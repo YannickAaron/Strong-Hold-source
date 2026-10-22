@@ -1,0 +1,9 @@
+# Placeholder: the simulation's source isn't published (README.md). Its real [package] and [dependencies]:
+[package]
+name = "shc-sim"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+shc-formats = { path = "../formats" }
+

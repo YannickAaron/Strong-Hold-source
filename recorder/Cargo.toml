@@ -1,0 +1,15 @@
+[package]
+name = "shc-recorder"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "CrusaderDE"
+crate-type = ["cdylib"]
+
+[dependencies]
+crc32fast = "1.5.2"
+lz4_flex = "0.11"
+
+[profile.release]
+panic = "abort"

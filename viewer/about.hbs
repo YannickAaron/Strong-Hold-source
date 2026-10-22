@@ -1,0 +1,16 @@
+Third-party software in Stronghold Crusader (Rust)
+
+The app statically links the Rust crates below and libvpx (at the end). Each licence text is followed by the crates
+it covers.
+
+{{#each licenses}}
+================================================================================
+{{{name}}}
+Used by:
+{{#each used_by}}
+  {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/each}}
+--------------------------------------------------------------------------------
+{{{text}}}
+
+{{/each}}

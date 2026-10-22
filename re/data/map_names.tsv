@@ -1,0 +1,225 @@
+# built-in map file name -> TEXT_MAP_NAMES id (0-based; < 0: -id into TEXT_TRAIL_NAMES_CRU), extreme desc id. From Translate.translateMapNames (CONVERT_FILENAME)
+A resourceful divide	1	-1
+A New Land	111	-1
+A Friend Indeed	61	-1
+Antioch	87	-1
+A Mighty Oasis	93	-1
+Armenia	83	-1
+Arnon River	123	-1
+Border Patrol	79	-1
+Bow Ridge	11	-1
+Broken Dune	125	-1
+Centre of the Oasis	13	-1
+Close Encounters	31	-1
+Crete Peninsula	133	-1
+Cactus Valley	95	-1
+Canyons	97	-1
+Crusader Demo	109	-1
+Cyclades	135	-1
+Caesarea Swampland	127	-1
+Coconut Twist	129	-1
+Craggy Cliffs	131	-1
+Desert Island Blues	17	-1
+Drawn and Quartered	137	-1
+Dunes of Nicaea	139	-1
+Empty Handed	63	-1
+Edessa	85	-1
+Flood Plains of Jordan	141	-1
+Green Belt	27	-1
+Green Haven	39	-1
+Great Euphrates	143	-1
+Happy Land	29	-1
+Height Advantage	9	-1
+Hell On The Hill	73	-1
+Hilltop Hideout	71	-1
+Halys River	145	-1
+Hills of Antioch	149	-1
+Hidden Crater	147	-1
+Inches Apart	53	-1
+Island Hoppin	37	-1
+Its a jungle out there	69	-1
+In The canyons	97	-1
+In The Shadow	113	-1
+Its just not fair	121	-1
+Love Thy Neighbour	57	-1
+Large Barren Desert	99	-1
+Large Island	101	-1
+Land of the Cactus	119	-1
+Lacus Magnus	151	-1
+Lakes of Konya	153	-1
+Lake Qaddas	155	-1
+Litani and Jordan	157	-1
+No Escape	33	-1
+North vs South	41	-1
+Marshy Mayhem	65	-1
+Melos	159	-1
+Oasis Struggle	3	-1
+Oasis by the Sea	107	-1
+Piggy in the middle	23	-1
+Pig in a Poke	161	-1
+Province of Bodrum	163	-1
+Riverside Rampage	67	-1
+Rocky Oasis	103	-1
+Reed Sea	165	-1
+Region of Corinth	167	-1
+Rock Face	169	-1
+Sleeping With The Enemy	55	-1
+Strati	171	-1
+Small Barren Desert	81	-1
+Small Island	105	-1
+Tyre	91	-1
+Tripoli	89	-1
+Thasos	173	-1
+The Valley	77	-1
+The Bulls Eye	21	-1
+Too Close For Comfort	5	-1
+Target Zone	15	-1
+Trapesac Island	177	-1
+The ford across the river	7	-1
+The Forest Oasis	51	-1
+The Great lake	25	-1
+The Guardians	47	-1
+The Killing Plains	35	-1
+The Last Stand	49	-1
+The River	19	-1
+The Trench	59	-1
+The Wet Lands	75	-1
+The Dunes	117	-1
+Tilos	175	-1
+Two in a bed	179	-1
+Upwards Alliance	43	-1
+West Coast	45	-1
+Watering Holes	115	-1
+Wall of Iron	181	-1
+The Great River	183	-1
+The Spine	185	-1
+Two Rivers	187	-1
+TheGreatProvider	189	-1
+StarfishBay	191	-1
+Archipelago	195	-1
+Two Rivers	197	-1
+IsleOfTears	199	-1
+Outcrop	201	-1
+A Layered Approach	203	-1
+Headland	205	-1
+GrainBasket	207	-1
+TheFavourite	209	-1
+HopeSprings	211	-1
+Crater Lake	213	-1
+Rocky Falls	215	-1
+Convergence	217	-1
+CrowdedIsland	219	-1
+WorldsEnd	221	-1
+TheCrateredCoast	223	-1
+Coastal Warfare	225	-1
+Marshy Crossroads	227	-1
+TippedScales	229	-1
+Protected	231	-1
+CrossedStreams	233	-1
+HighRoad	235	-1
+Serpent's Gorge	237	-1
+TheDivide	239	-1
+Cramped Crossing	241	-1
+Snakehead	243	-1
+Shattered Peninsula	245	-1
+Verdant Border	247	-1
+RiftValley	249	-1
+TheGreatDivide	251	-1
+Encircled	253	-1
+Splintered Cradle	255	-1
+Province of Bodrum OP	257	-1
+A Mightier Oasis	289	-1
+Back to Back	291	-1
+Custom Scenario	293	-1
+Distant Encounters	295	-1
+Castaways	297	-1
+Temple Island	299	-1
+The Thirsty Trail	301	-1
+CanalNetwork	303	-1
+EndlessSands	305	-1
+HeadOfTheValley	307	-1
+IslandsInTheStream	309	-1
+TheTrident	311	-1
+Outreach	313	-1
+The Impasse	315	-1
+TheJordanValley	317	-1
+Conquest	319	-1
+BigBend	321	-1
+CanyonRidge	323	-1
+DividedConquerors	325	-1
+EmeraldCliff	327	-1
+FerricFlow	329	-1
+OldWounds	331	-1
+RidgeRoad	333	-1
+Iron Rush	335	-1
+Mind Games	337	-1
+Approaching Seas	339	-1
+Oasis Crossing	341	-1
+Ancient River	343	-1
+The Rivers Edge	345	-1
+Fractured Frontier	347	-1
+Oasis by the River	349	-1
+The Lush Strip	351	-1
+AbandonedIsland	353	-1
+OasisScramble	355	-1
+Possession	357	-1
+TallOrder	359	-1
+TheTreeOfLife	361	-1
+CenterOfPower	363	-1
+Fortification	365	-1
+OpenOcean	367	-1
+PathToVictory	369	-1
+SeparationAnxiety	371	-1
+TheRunways	373	-1
+TheSinkhole	375	-1
+TriRiverIsland	377	-1
+Crocodiles nest	379	-1
+AcrossTheStream	381	-1
+ALongWayUp	383	-1
+ConfusingCliffs	385	-1
+FloodedPlains	387	-1
+RingOfSafety	389	-1
+IronDefence	391	-1
+RiverPass	393	-1
+OverlookPlateau	395	-1
+TheShallows	397	-1
+ABridgeApart	399	-1
+CrusadesCrossing	401	-1
+Island Living	403	-1
+Coast LIfe	405	-1
+Insular Hope	407	-1
+Bypass	409	-1
+LushCrossover	411	-1
+RiverOfLife	413	-1
+Fields And Forges	415	-1
+Rockhold	417	-1
+Best_Friends	-93	259
+Bird_In_Flight	-82	260
+Coastal_Trap	-87	261
+Crossroads	-99	262
+Divided	-111	263
+Enclosure	-90	264
+Fury_Bay	-83	265
+Jealous_Neighbours	-96	266
+Lionheart	-98	267
+Look_Out	-81	268
+MP-Divided	-101	269
+MP-Downhill Scrum	-102	270
+MP-No Mans Land	-103	271
+MP-No Where to Hide	-104	272
+MP-Slopes of Doom	-105	273
+MP-Snake River	-106	274
+MP-Surrounded	-107	275
+MP-The Rocky Divide	-108	276
+MP-Two Falls	-109	277
+MP-Valley of the Lords	-110	278
+Phoenix	-86	279
+Rivers_Fork	-89	280
+Snake_River	-84	281
+Spider_Island	-94	282
+Swampy_Island	-85	283
+The_Host	-92	284
+Three_Little_Pigs	-97	285
+Ultimate_Victory	-100	286
+Wazirs_Fortress	-88	287
+Wide_Open_Plain	-91	288

@@ -1,0 +1,184 @@
+# Options > Hotkeys rows in HUD_Options.hotKeyList order: KeyFunctions name, label text key ("Place : " rows: the
+# building's key; HUD_Options.GetPlaceBuildingHotkeyText). Generated from re/csharp/CrusaderDE/HUD_Options.cs; "=text" = a
+# port-only row with a literal label (QuickLoad, ToggleStats).
+Left	TEXT_HOT_KEYS_002	
+Right	TEXT_HOT_KEYS_003	
+Up	TEXT_HOT_KEYS_004	
+Down	TEXT_HOT_KEYS_005	
+Pause	TEXT_HOT_KEYS_006	
+HomeKeep	TEXT_HOT_KEYS_007	
+Market	TEXT_HOT_KEYS_008	
+Signpost	TEXT_HOT_KEYS_009	
+Barracks	TEXT_HOT_KEYS_010	
+MercPost	TEXT_HOT_KEYS_114	
+BedouinStockade	TEXT_HOT_KEYS_116	
+Granary	TEXT_HOT_KEYS_011	
+Armoury	TEXT_HOT_KEYS_126	
+EngineersGuild	TEXT_HOT_KEYS_127	
+TunnelersGuild	TEXT_HOT_KEYS_128	
+Cathedral	TEXT_HOT_KEYS_133	
+Lord	TEXT_HOT_KEYS_107	
+CycleLord	TEXT_HOT_KEYS_108	
+MapRotateLeft	TEXT_HOT_KEYS_012	
+MapRotateRight	TEXT_HOT_KEYS_013	
+FlattenLandscape	TEXT_HOT_KEYS_014	
+ZoomOut	TEXT_HOT_KEYS_015	
+ZoomIn	TEXT_HOT_KEYS_016	
+Patrol	TEXT_HOT_KEYS_017	
+StanceStand	TEXT_HOT_KEYS_135	
+StanceDefensive	TEXT_HOT_KEYS_136	
+StanceAggressive	TEXT_HOT_KEYS_137	
+Stop	TEXT_HOT_KEYS_129	
+AttackHere	TEXT_HOT_KEYS_131	
+RotateBuilding	TEXT_HOT_KEYS_109	
+Load	TEXT_HOT_KEYS_018	
+Save	TEXT_HOT_KEYS_019	
+IncreaseEngineSpeed	TEXT_HOT_KEYS_020	
+DecreaseEngineSpeed	TEXT_HOT_KEYS_021	
+ToggleUI	TEXT_HOT_KEYS_022	
+ToggleFrameRate	TEXT_HOT_KEYS_023	
+RadarZoomIn	TEXT_HOT_KEYS_102	
+RadarZoomOut	TEXT_HOT_KEYS_103	
+FreeBuildEvents	TEXT_HOT_KEYS_024	
+ToggleObjectives	TEXT_HOT_KEYS_105	
+ToggleGoods	TEXT_HOT_KEYS_104	
+AllyToggle	TEXT_HOT_KEYS_115	
+ToggleHealthBars	TEXT_HOT_KEYS_125	
+QuickSave	TEXT_HOT_KEYS_106	
+QuickLoad	=Quick Load	
+ToggleStats	=Statistics	
+OpenChat	TEXT_HOT_KEYS_025	
+ShowPings	TEXT_HOT_KEYS_026	
+MPPing	TEXT_HOT_KEYS_134	
+GroupTroops0	TEXT_HOT_KEYS_027	
+GroupTroops1	TEXT_HOT_KEYS_028	
+GroupTroops2	TEXT_HOT_KEYS_029	
+GroupTroops3	TEXT_HOT_KEYS_030	
+GroupTroops4	TEXT_HOT_KEYS_031	
+GroupTroops5	TEXT_HOT_KEYS_032	
+GroupTroops6	TEXT_HOT_KEYS_033	
+GroupTroops7	TEXT_HOT_KEYS_034	
+GroupTroops8	TEXT_HOT_KEYS_035	
+GroupTroops9	TEXT_HOT_KEYS_036	
+SelectClan0	TEXT_HOT_KEYS_037	
+SelectClan1	TEXT_HOT_KEYS_038	
+SelectClan2	TEXT_HOT_KEYS_039	
+SelectClan3	TEXT_HOT_KEYS_040	
+SelectClan4	TEXT_HOT_KEYS_041	
+SelectClan5	TEXT_HOT_KEYS_042	
+SelectClan6	TEXT_HOT_KEYS_043	
+SelectClan7	TEXT_HOT_KEYS_044	
+SelectClan8	TEXT_HOT_KEYS_045	
+SelectClan9	TEXT_HOT_KEYS_046	
+SetBookmark0	TEXT_HOT_KEYS_047	
+SetBookmark1	TEXT_HOT_KEYS_048	
+SetBookmark2	TEXT_HOT_KEYS_049	
+SetBookmark3	TEXT_HOT_KEYS_050	
+SetBookmark4	TEXT_HOT_KEYS_051	
+SetBookmark5	TEXT_HOT_KEYS_052	
+SetBookmark6	TEXT_HOT_KEYS_053	
+SetBookmark7	TEXT_HOT_KEYS_054	
+SetBookmark8	TEXT_HOT_KEYS_055	
+SetBookmark9	TEXT_HOT_KEYS_056	
+GotoBookmark0	TEXT_HOT_KEYS_057	
+GotoBookmark1	TEXT_HOT_KEYS_058	
+GotoBookmark2	TEXT_HOT_KEYS_059	
+GotoBookmark3	TEXT_HOT_KEYS_060	
+GotoBookmark4	TEXT_HOT_KEYS_061	
+GotoBookmark5	TEXT_HOT_KEYS_062	
+GotoBookmark6	TEXT_HOT_KEYS_063	
+GotoBookmark7	TEXT_HOT_KEYS_064	
+GotoBookmark8	TEXT_HOT_KEYS_065	
+GotoBookmark9	TEXT_HOT_KEYS_066	
+Cheat_gold	TEXT_HOT_KEYS_111	
+Cheat_freestuff	TEXT_HOT_KEYS_112	
+ExtremePower1	TEXT_HOT_KEYS_117	
+ExtremePower2	TEXT_HOT_KEYS_118	
+ExtremePower3	TEXT_HOT_KEYS_119	
+ExtremePower4	TEXT_HOT_KEYS_120	
+ExtremePower5	TEXT_HOT_KEYS_121	
+ExtremePower6	TEXT_HOT_KEYS_122	
+ExtremePower7	TEXT_HOT_KEYS_123	
+ExtremePower8	TEXT_HOT_KEYS_124	
+EditorHoldTime	TEXT_HOT_KEYS_099	
+EditorRespawnLord	TEXT_HOT_KEYS_100	
+EditorWipeAnimals	TEXT_HOT_KEYS_101	
+EditorShowConnections	TEXT_HOT_KEYS_132	
+PlaceStairs	TEXT_BUBBLE_HELP_TEXT_015	place
+PlaceLowWalls	TEXT_BUBBLE_HELP_TEXT_016	place
+PlaceWalls	TEXT_BUBBLE_HELP_TEXT_013	place
+PlaceCrenal	TEXT_BUBBLE_HELP_TEXT_014	place
+PlaceBarracks	TEXT_BUBBLE_HELP_TEXT_010	place
+PlaceMercPost	TEXT_BUBBLE_HELP_TEXT_011	place
+PlaceBedouinStockade	TEXT_BUBBLE_HELP_TEXT_349	place
+PlaceArmoury	TEXT_BUBBLE_HELP_TEXT_009	place
+PlaceTower1	TEXT_BUBBLE_HELP_TEXT_022	place
+PlaceTower2	TEXT_BUBBLE_HELP_TEXT_023	place
+PlaceTower3	TEXT_BUBBLE_HELP_TEXT_024	place
+PlaceTower4	TEXT_BUBBLE_HELP_TEXT_025	place
+PlaceTower5	TEXT_BUBBLE_HELP_TEXT_026	place
+PlaceEngineersGuild	TEXT_BUBBLE_HELP_TEXT_067	place
+PlaceTunnelGuild	TEXT_BUBBLE_HELP_TEXT_068	place
+PlaceBallista	TEXT_BUBBLE_HELP_TEXT_198	place
+PlaceMangonel	TEXT_BUBBLE_HELP_TEXT_134	place
+PlaceStables	TEXT_BUBBLE_HELP_TEXT_012	place
+PlaceSmelter	TEXT_BUBBLE_HELP_TEXT_140	place
+PlaceSmallGatehouse	TEXT_BUBBLE_HELP_TEXT_030	place
+PlaceLargeGatehouse	TEXT_BUBBLE_HELP_TEXT_092	place
+PlaceDrawbridge	TEXT_BUBBLE_HELP_TEXT_031	place
+PlaceDogCage	TEXT_BUBBLE_HELP_TEXT_280	place
+PlacePitchDitch	TEXT_BUBBLE_HELP_TEXT_205	place
+PlaceKillingPit	TEXT_BUBBLE_HELP_TEXT_018	place
+PlaceBrazier	TEXT_BUBBLE_HELP_TEXT_017	place
+PlaceDigMoat	TEXT_BUBBLE_HELP_TEXT_032	place
+PlaceClearMoat	TEXT_BUBBLE_HELP_TEXT_093	place
+PlaceStockpile	TEXT_BUBBLE_HELP_TEXT_046	place
+PlaceWoodcutter	TEXT_BUBBLE_HELP_TEXT_043	place
+PlaceQuarry	TEXT_BUBBLE_HELP_TEXT_042	place
+PlaceOxen	TEXT_BUBBLE_HELP_TEXT_051	place
+PlaceIronMine	TEXT_BUBBLE_HELP_TEXT_044	place
+PlacePitchRig	TEXT_BUBBLE_HELP_TEXT_045	place
+PlaceMarket	TEXT_BUBBLE_HELP_TEXT_050	place
+PlaceHunter	TEXT_BUBBLE_HELP_TEXT_063	place
+PlaceDairyFarm	TEXT_BUBBLE_HELP_TEXT_062	place
+PlaceAppleFarm	TEXT_BUBBLE_HELP_TEXT_060	place
+PlaceWheatFarm	TEXT_BUBBLE_HELP_TEXT_059	place
+PlaceHopsFarm	TEXT_BUBBLE_HELP_TEXT_061	place
+PlaceHouse	TEXT_BUBBLE_HELP_TEXT_040	place
+PlaceChurchMosque1	TEXT_BUBBLE_HELP_TEXT_102	place
+PlaceChurchMosque2	TEXT_BUBBLE_HELP_TEXT_103	place
+PlaceChurchMosque3	TEXT_BUBBLE_HELP_TEXT_104	place
+PlaceApothecary	TEXT_BUBBLE_HELP_TEXT_066	place
+PlaceWell	TEXT_BUBBLE_HELP_TEXT_048	place
+PlaceWaterpot	TEXT_IN_WATERPOT_001	place
+PlaceFletcher	TEXT_BUBBLE_HELP_TEXT_055	place
+PlacePoleturner	TEXT_BUBBLE_HELP_TEXT_056	place
+PlaceBlacksmith	TEXT_BUBBLE_HELP_TEXT_052	place
+PlaceTanner	TEXT_BUBBLE_HELP_TEXT_054	place
+PlaceArmourer	TEXT_BUBBLE_HELP_TEXT_053	place
+PlaceGranary	TEXT_BUBBLE_HELP_TEXT_047	place
+PlaceBaker	TEXT_BUBBLE_HELP_TEXT_057	place
+PlaceMill	TEXT_BUBBLE_HELP_TEXT_049	place
+PlaceBrewer	TEXT_BUBBLE_HELP_TEXT_058	place
+PlaceInn	TEXT_BUBBLE_HELP_TEXT_065	place
+PlaceMaypole	TEXT_BUBBLE_HELP_TEXT_073	place
+PlaceDancingBear	TEXT_BUBBLE_HELP_TEXT_284	place
+PlaceGardens1	TEXT_BUBBLE_HELP_TEXT_105	place
+PlaceGardens2	TEXT_BUBBLE_HELP_TEXT_108	place
+PlaceGardens3	TEXT_BUBBLE_HELP_TEXT_107	place
+PlaceStatue	TEXT_BUBBLE_HELP_TEXT_281	place
+PlaceShrine	TEXT_BUBBLE_HELP_TEXT_282	place
+PlaceFlag1	TEXT_BUBBLE_HELP_TEXT_096	place
+PlaceFlag2	TEXT_BUBBLE_HELP_TEXT_216	place
+PlaceFlag3	TEXT_BUBBLE_HELP_TEXT_097	place
+PlaceFlag4	TEXT_BUBBLE_HELP_TEXT_098	place
+PlaceGallows	TEXT_BUBBLE_HELP_TEXT_072	place
+PlaceCesspit	TEXT_BUBBLE_HELP_TEXT_272	place
+PlaceStocks	TEXT_BUBBLE_HELP_TEXT_076	place
+PlaceHeads	TEXT_BUBBLE_HELP_TEXT_310	place
+PlaceBurningStake	TEXT_BUBBLE_HELP_TEXT_273	place
+PlaceDungeon	TEXT_BUBBLE_HELP_TEXT_275	place
+PlaceRack	TEXT_BUBBLE_HELP_TEXT_276	place
+PlaceGibbett	TEXT_BUBBLE_HELP_TEXT_274	place
+PlaceChoppingBlock	TEXT_BUBBLE_HELP_TEXT_278	place
+PlaceDunkingStool	TEXT_BUBBLE_HELP_TEXT_279	place

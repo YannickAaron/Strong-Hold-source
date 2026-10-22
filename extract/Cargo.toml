@@ -1,0 +1,14 @@
+[package]
+name = "shc-extract"
+version = "0.1.0"
+edition = "2024"
+
+# First-run export of the game's assets from the user's own install (README: "First run"). Replaces re/scripts/export_*.py.
+[dependencies]
+regex = "1"
+lewton = "0.10"
+texture2ddecoder = "0.1"
+fontdue = "0.9"
+lz4_flex = "0.11"
+crc32fast = "1.5"
+image = { version = "0.25", default-features = false, features = ["png"] }

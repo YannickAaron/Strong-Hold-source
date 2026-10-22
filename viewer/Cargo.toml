@@ -1,0 +1,39 @@
+[package]
+name = "shc-viewer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wgpu = "25"
+winit = "0.30"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+shc-formats = { path = "../formats" }
+lz4_flex = "0.11"
+fontdue = "0.9"
+shc-sim = { path = "../sim", optional = true }
+shc-audio = { path = "../audio", optional = true }
+shc-extract = { path = "../extract" }
+# help.rs: the help pages' pictures. The same crate and features shc-extract already builds: nothing new to download.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[features]
+# `--live save.sav` (runs the Rust sim). Default on; `--no-default-features` builds the viewer without ../sim.
+default = ["live"]
+live = ["dep:shc-sim", "dep:shc-audio"]
+
+# ux.rs / macos.rs: the menu bar and the quit sheet. Same versions winit already pulls in: nothing new to download.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5.2"
+block2 = "0.5.1"
+objc2-foundation = { version = "0.2.2", features = ["NSString", "NSThread", "NSObject", "NSData", "NSURL", "NSDate", "NSRunLoop", "NSArray", "NSGeometry"] }
+objc2-app-kit = { version = "0.2.2", features = ["NSApplication", "NSMenu", "NSMenuItem", "NSResponder", "NSEvent", "NSCell", "NSAlert", "NSWindow", "NSButton", "NSControl", "NSView", "block2",
+    "NSTextField", "NSSecureTextField", "NSProgressIndicator", "NSImage", "NSImageView", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSFont", "NSColor", "NSWorkspace", "NSText", "NSAppearance", "NSGraphics", "NSRunningApplication", "NSActionCell", "NSTextFieldCell", "NSImageCell", "NSColorSpace", "NSLayoutConstraint", "NSBitmapImageRep", "NSImageRep"] }
+
+# setup/mod.rs: free disk space (statvfs)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# setup/mod.rs steam_index_current: steam_files.txt patterns. Already in the lock (through wgpu): nothing new to download.
+regex = "1"

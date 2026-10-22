@@ -1,0 +1,8 @@
+regex:^Stronghold Crusader Definitive Edition_Data/(resources\.assets(\.resS)?|resources\.resource|globalgamemanagers\.assets|sharedassets[01]\.assets(\.resS)?)$
+regex:^Stronghold Crusader Definitive Edition_Data/StreamingAssets/(Maps|Help|Music|EnglishSpeech)/
+regex:^Stronghold Crusader Definitive Edition_Data/Plugins/x86_64/CrusaderDE\.dll$
+regex:^Stronghold Crusader Definitive Edition_Data/Managed/Assembly-CSharp\.dll$
+regex:^Stronghold Crusader Definitive Edition_Data/Assets/GUI/Video/(intro-low|front_end_background(_low)?|Banner-[A-Za-z]+-(Victory|Defeat)|(Buildings|Characters|Events|Lords|Victory|Defeat)/[^/]+)\.webm$
+regex:^Assets/Text/
+regex:^Assets/GUI/Images/[^/]+\.png$
+regex:^Assets/GUI/Avatars/[^/]+\.png$
