@@ -2053,6 +2053,7 @@ fn draw(g: &Gfx, cam: &Cam, tris: &[Tri], rows: &[i32], hud: &[hud::HudTri], sho
 }
 
 fn main() {
+    paths::app_bundle_start();
     setup::ensure();
     update::start();
     let mut app = App::new();

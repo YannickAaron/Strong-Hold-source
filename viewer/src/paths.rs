@@ -69,6 +69,34 @@ pub fn app_data() -> PathBuf {
     return env_dir("XDG_DATA_HOME").unwrap_or_else(|| home().join(".local/share")).join(APP);
 }
 
+/// Started from the .app (Finder): what the bundle's shell script did before 0.8.1 (a script in the bundle made
+/// Microsoft Defender's ML guess "trojan"): move the pre-rename folder over, saves in app_data()/Saves, stdout and
+/// stderr into ~/Library/Logs/Strong Hold.log. Set env vars win (tests); `cargo run` keeps the terminal.
+#[cfg(target_os = "macos")]
+pub fn app_bundle_start() {
+    use std::os::fd::AsRawFd;
+    if !std::env::current_exe().is_ok_and(|e| e.to_string_lossy().contains(".app/Contents/MacOS/")) { return; }
+    // Renamed from "Stronghold Crusader (Rust)" after v0.1.1, per entry so an existing "Strong Hold" folder doesn't
+    // block it (ponytail: drop after a few more releases)
+    let (old, new) = (home().join("Library/Application Support/Stronghold Crusader (Rust)"), app_data());
+    if let Ok(rd) = std::fs::read_dir(&old) {
+        let _ = std::fs::create_dir_all(&new);
+        for e in rd.flatten() { if !new.join(e.file_name()).exists() { let _ = std::fs::rename(e.path(), new.join(e.file_name())); } }
+        let _ = std::fs::remove_file(old.join("update_check.txt"));
+        let _ = std::fs::remove_dir(&old);
+    }
+    if std::env::var_os("SHC_SAVES").is_none() { std::env::set_var("SHC_SAVES", app_data().join("Saves")); }
+    let _ = std::fs::create_dir_all(std::env::var_os("SHC_SAVES").unwrap());
+    let logs = home().join("Library/Logs");
+    let _ = std::fs::create_dir_all(&logs);
+    if let Ok(f) = std::fs::File::create(logs.join("Strong Hold.log")) {
+        unsafe extern "C" { fn dup2(from: i32, to: i32) -> i32; }
+        unsafe { dup2(f.as_raw_fd(), 1); dup2(f.as_raw_fd(), 2); } // the fds stay open after `f` drops
+    }
+}
+#[cfg(not(target_os = "macos"))]
+pub fn app_bundle_start() {}
+
 /// Tests: a save of the real game's (e.g. "Crater Lake-1test.sav").
 #[allow(dead_code)]
 pub fn test_save(name: &str) -> String { game_user().join("Saves").join(name).to_string_lossy().into_owned() }

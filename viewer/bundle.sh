@@ -39,24 +39,8 @@ done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 if otool -L target/release/shc-viewer | grep -q /opt/homebrew; then echo "shc-viewer links a Homebrew dylib (otool -L): the app wouldn't run on other Macs"; exit 1; fi
 
-# Finder entry point: the viewer (setup on first start, then the main menu); the env vars win when already set (tests)
-cat > "$APP/Contents/MacOS/launch" <<'LAUNCH'
-#!/bin/sh
-HERE="$(cd "$(dirname "$0")" && pwd)"
-# Renamed from "Stronghold Crusader (Rust)" after v0.1.1: keep the old download, exports and saves (ponytail: drop after a few releases)
-AS="$HOME/Library/Application Support"
-# per entry, so a "Strong Hold" folder that already exists (update check, dev build) doesn't block the move
-O="$AS/Stronghold Crusader (Rust)"; N="$AS/Strong Hold"
-if [ -d "$O" ]; then
-    mkdir -p "$N"
-    for f in "$O"/*; do [ -e "$f" ] && [ ! -e "$N/${f##*/}" ] && mv "$f" "$N/"; done
-    rm -f "$O/update_check.txt"; rmdir "$O" 2>/dev/null
-fi
-export SHC_SAVES="${SHC_SAVES:-$HOME/Library/Application Support/Strong Hold/Saves}"
-mkdir -p "$SHC_SAVES" "$HOME/Library/Logs"
-exec "$HERE/shc-viewer" "$@" > "$HOME/Library/Logs/Strong Hold.log" 2>&1
-LAUNCH
-chmod +x "$APP/Contents/MacOS/launch"
+# Finder starts shc-viewer itself: no shell script in the bundle (paths::app_bundle_start does its old jobs: saves
+# folder, log file, the pre-rename folder)
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -66,7 +50,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleName</key><string>Strong Hold</string>
     <key>CFBundleDisplayName</key><string>Strong Hold</string>
     <key>CFBundleIdentifier</key><string>local.shc.rust</string>
-    <key>CFBundleExecutable</key><string>launch</string>
+    <key>CFBundleExecutable</key><string>shc-viewer</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
