@@ -82,16 +82,13 @@ impl Panel {
         let y0 = if end { hh - ph - 24.0 * s } else { (hh - ph) / 2.0 - 60.0 * s };
         let mut out = vec![];
         self.area = [x0, y0, x0 + pw, y0 + ph];
-        Ui::fill(&mut out, [x0 - 3.0 * s, y0 - 3.0 * s, x0 + pw + 3.0 * s, y0 + ph + 3.0 * s], [0.313, 0.248, 0.152, 0.95]);
         ui.img(&mut out, "Panel_BG", [x0, y0, x0 + pw, y0 + ph], [1.0, 1.0, 1.0, 0.95]);
-        // tabs
-        let tw = pw / NAMES.len() as f32;
+        ui.frame_c(&mut out, [x0, y0, x0 + pw, y0 + ph], s);
+        // tabs, inside the frame
+        let tw = (pw - 28.0 * s) / NAMES.len() as f32;
         for (k, name) in NAMES.iter().enumerate() {
-            let r = [x0 + k as f32 * tw + 4.0 * s, y0 + 8.0 * s, x0 + (k + 1) as f32 * tw - 4.0 * s, y0 + 40.0 * s];
-            let hot = inside(r, cursor);
-            let bg = if k == self.kind { [0.767, 0.680, 0.461, 0.95] } else if hot { [0.634, 0.556, 0.410, 0.95] } else { [0.461, 0.396, 0.313, 0.9] };
-            Ui::fill(&mut out, r, bg);
-            ui.text_sh(&mut out, name, (r[0] + r[2]) / 2.0, r[3] - 9.0 * s, 20.0, 0.5, [0xef as f32 / 255.0, 0xf3 as f32 / 255.0, 0xc6 as f32 / 255.0, 1.0]);
+            let r = [x0 + 14.0 * s + k as f32 * tw + 3.0 * s, y0 + 16.0 * s, x0 + 14.0 * s + (k + 1) as f32 * tw - 3.0 * s, y0 + 48.0 * s];
+            ui.text_button(&mut out, name, r, inside(r, cursor), k == self.kind, true);
             self.hits.push((r, k));
         }
         // plot area: left value labels, right legend

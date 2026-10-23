@@ -451,7 +451,7 @@ impl Hud {
                 let (bw, bh) = match (b.w, b.h) { (0.0, h) => (h * r[2] / r[3], h), (w, 0.0) => (w, w * r[3] / r[2]), wh => wh };
                 let p = br(ox + 150.0 + b.x, oy + 55.0 + b.y, bw, bh);
                 let (hot, on) = (Menu::inside(p, cursor), b.mapper > 0 && self.place == b.mapper);
-                if on { Ui::fill(&mut out, [p[0] - 2.0, p[1] - 2.0, p[2] + 2.0, p[3] + 2.0], [1.0, 0.85, 0.3, 0.35]); }
+                if on { ui.img(&mut out, "UI Player Border", [p[0] - 3.0, p[1] - 3.0, p[2] + 3.0, p[3] + 3.0], white); } // as hud.rs's build menu
                 ui.img_fit(&mut out, if hot || on { &s2 } else { &s1 }, p, white);
                 if hot { tip = Some(ui.text_of(&b.help)); }
                 self.hits.push((p, H::Build(i)));
@@ -516,11 +516,13 @@ impl Hud {
         for (label, hit, bw) in bar {
             let p = tl(x, 16.0, bw, 44.0);
             x += bw + 12.0;
-            let lit = Menu::inside(p, cursor) || (hit == H::Name && self.typing) || (hit == H::Scenario && self.scenario);
-            box_(&mut out, p, lit, s);
-            let align = if hit == H::Name { 0.0 } else { 0.5 };
-            let tx = if hit == H::Name { p[0] + 10.0 * s } else { (p[0] + p[2]) / 2.0 };
-            ui.text_sh(&mut out, &label, tx, p[1] + 31.0 * s, 24.0, align, if lit { GOLD } else { CREAM });
+            let hot = Menu::inside(p, cursor);
+            if hit == H::Name { // the name box
+                widget(&mut out, |o| Ui::text_field(o, p, hot || self.typing, s));
+                ui.text_sh(&mut out, &label, p[0] + 10.0 * s, p[1] + 31.0 * s, 24.0, 0.0, if self.typing { GOLD } else { CREAM });
+            } else {
+                widget(&mut out, |o| ui.text_button(o, &label, p, hot, hit == H::Scenario && self.scenario, true));
+            }
             self.hits.push((p, hit));
         }
         let path = self.path();
@@ -556,7 +558,7 @@ impl Hud {
         let goods: Vec<usize> = (0..25).filter(|&g| LIMITS[g] > 0).collect();
         let rows = goods.len().div_ceil(2);
         let p = tl(LEFT, 124.0, 640.0, 110.0 + rows as f32 * 34.0);
-        Ui::fill(out, p, [0.18, 0.13, 0.08, 0.92]);
+        widget(out, |o| ui.panel(o, p, s)); // Menu::panel's look
         self.hits.push((p, H::Panel)); // the panel takes its clicks (under its buttons)
         let head = ui.text_of("TEXT_STARTUP_001");
         ui.text_sh(out, &head, p[0] + 16.0 * s, p[1] + 34.0 * s, 24.0, 0.0, GOLD);
@@ -572,9 +574,7 @@ impl Hud {
             ui.text_sh(out, &v, (cx + 225.0) * s, (cy + 22.0) * s, 18.0, 0.5, GOLD);
             for (d, dx) in [(-1, 175.0), (1, 255.0)] {
                 let b = tl(cx + dx, cy, 26.0, 28.0);
-                let hot = Menu::inside(b, cursor);
-                box_(out, b, hot, s);
-                ui.text_sh(out, if d < 0 { "-" } else { "+" }, (b[0] + b[2]) / 2.0, b[1] + 21.0 * s, 20.0, 0.5, if hot { GOLD } else { CREAM });
+                widget(out, |o| ui.text_button(o, if d < 0 { "-" } else { "+" }, b, Menu::inside(b, cursor), false, true));
                 self.hits.push((b, H::Good(g, d)));
             }
         }
@@ -582,9 +582,7 @@ impl Hud {
         for k in 0..3 {
             let label = ui.text_of(&format!("TEXT_NEW_TEXT2_{:03}", 68 + k));
             let b = tl(LEFT + 16.0 + k as f32 * 200.0, y, 180.0, 36.0);
-            let hot = Menu::inside(b, cursor);
-            box_(out, b, hot, s);
-            ui.text_sh(out, &label, (b[0] + b[2]) / 2.0, b[1] + 26.0 * s, 20.0, 0.5, if hot { GOLD } else { CREAM });
+            widget(out, |o| ui.text_button(o, &label, b, Menu::inside(b, cursor), false, true));
             self.hits.push((b, H::Preset(k)));
         }
     }
@@ -593,13 +591,6 @@ impl Hud {
 /// "{Binding UIBuildingsO001}" (a troop button's view-model sprite) → "UI-Buildings O001"; other keys as they are.
 fn bound(k: &str) -> String {
     k.strip_prefix("{Binding UIBuildings").and_then(|r| r.strip_suffix('}')).map_or(k.to_string(), |r| format!("UI-Buildings {r}"))
-}
-
-/// Our top-left buttons' look: a dark frame, gold when lit.
-fn box_(out: &mut Vec<HudTri>, p: [f32; 4], lit: bool, s: f32) {
-    Ui::fill(out, p, if lit { [0.55, 0.42, 0.18, 0.95] } else { [0.18, 0.13, 0.08, 0.9] });
-    let e = 2.0 * s;
-    Ui::fill(out, [p[0] + e, p[1] + e, p[2] - e, p[3] - e], [0.27, 0.2, 0.12, 0.95]);
 }
 
 // ---- main.rs's side: start the editor, its clicks and strokes ----

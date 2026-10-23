@@ -45,7 +45,7 @@ fn player_name() -> String { super::coa::player_name() }
 /// The skirmish lobby's view of a LAN lobby (map path, AIs, options; your team = the host's).
 fn to_skirmish(l: &lan::Lobby, seed: i32) -> Lobby {
     Lobby { map: skirmish::maps_dir().join(&l.map), team: l.humans.first().map_or(0, |h| h.team), ais: l.ais.clone(), fairness: l.fairness,
-        goods: l.goods, outposts: l.outposts, seed, ..Lobby::new(skirmish::maps_dir().join(&l.map)) }
+        goods: l.goods, outposts: l.outposts, seed, hill: l.hill, ..Lobby::new(skirmish::maps_dir().join(&l.map)) }
 }
 
 impl Menu {
@@ -254,7 +254,7 @@ impl Menu {
         let ais = l.ais.iter().take(8usize.saturating_sub(humans.len())).copied().collect();
         let new = lan::Lobby { map, humans, ais, fairness: l.fairness, goods: l.goods, outposts: l.outposts, speed, coop: net.lobby.coop,
             slots: self.mp.save_slots.iter().copied().take(net.lobby.humans.len()).collect(), spectators: net.lobby.spectators.clone(),
-            loaded: self.mp.save.is_some() };
+            loaded: self.mp.save.is_some(), hill: l.hill };
         if self.mp.pushed.as_ref() != Some(&new) || new != net.lobby {
             net.set_lobby(new.clone());
             self.mp.pushed = Some(new);
@@ -291,7 +291,7 @@ impl Menu {
         let want = to_skirmish(&net.lobby, 0);
         if let Screen::Lobby(l) = &mut self.screen {
             let new_map = l.map != want.map;
-            (l.map, l.team, l.ais, l.fairness, l.goods, l.outposts) = (want.map.clone(), want.team, want.ais.clone(), want.fairness, want.goods, want.outposts);
+            (l.map, l.team, l.ais, l.fairness, l.goods, l.outposts, l.hill) = (want.map.clone(), want.team, want.ais.clone(), want.fairness, want.goods, want.outposts, want.hill);
             if new_map {
                 if let Some(i) = self.files.iter().position(|f| *f == want.map) { self.select(i); }
             }
@@ -325,7 +325,10 @@ impl Menu {
         let blink = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() / 500) % 2 == 0;
         let caret = if self.mp.typing && blink { "|" } else { "" };
         let field = if self.mp.addr.is_empty() && !self.mp.typing { "click, type e.g. 192.168.1.20".to_string() } else { format!("{}{caret}", self.mp.addr) };
-        self.button(ui, out, &field, 560.0, 810.0, 560.0, 56.0, Act::Mp(A::Type), cursor);
+        let p = self.r(560.0, 810.0, 560.0, 56.0); // a text box, not a button
+        widget(out, |o| Ui::text_field(o, p, self.mp.typing || Self::inside(p, cursor), self.s));
+        self.text(ui, out, &field, 840.0, 847.0, 26.0, 0.5, CREAM);
+        self.hits.push((p, Act::Mp(A::Type)));
         self.button(ui, out, "Join", 1140.0, 810.0, 220.0, 56.0, Act::Mp(A::JoinAddr), cursor);
         self.button(ui, out, "Back", 840.0, 890.0, 240.0, 60.0, Act::Back, cursor);
     }

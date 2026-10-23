@@ -85,13 +85,6 @@ fn mission_video(lord_type: u8, won: bool) -> String {
     format!("{}_{}", match lord_type { 1 | 6 => "arabian", 2 | 7 => "bedouin", _ => "crusader" }, if won { "win" } else { "lose" })
 }
 
-/// The end box's button (the port's own look: a framed parchment bar, the label centred); `s` = the layout's scale.
-pub(crate) fn button(ui: &mut Ui, out: &mut Vec<HudTri>, label: &str, r: [f32; 4], hot: bool, s: f32) {
-    Ui::fill(out, r, if hot { [0.767, 0.68, 0.461, 0.95] } else { [0.461, 0.396, 0.313, 0.9] });
-    Ui::fill(out, [r[0] + 2.0 * s, r[1] + 2.0 * s, r[2] - 2.0 * s, r[3] - 2.0 * s], [0.556, 0.485, 0.381, 0.95]);
-    ui.text_sh(out, label, (r[0] + r[2]) / 2.0, r[1] + 33.0 * s, 24.0, 0.5, if hot { [1.0, 0.839, 0.451, 1.0] } else { [0.937, 0.953, 0.776, 1.0] });
-}
-
 /// What the end screen's buttons ask main.rs for (HUD_MissionOver.ButtonClicked "Exit" = Continue).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Exit { Continue, Again, Menu }
@@ -221,9 +214,9 @@ impl Screen {
         };
         let bh = 20.0 + 24.0 * end.winners.len() as f32 + 20.0 + 60.0 * buttons.len() as f32;
         let (x0, y0) = ((w - 500.0 * s) / 2.0, (h - bh * s) / 2.0);
-        // ponytail: BDR_SH1DEb as parchment + dark edge (menu.rs draws the tiled border for its own panels)
-        Ui::fill(&mut out, [x0 - 3.0 * s, y0 - 3.0 * s, x0 + 503.0 * s, y0 + (bh + 3.0) * s], [0.313, 0.248, 0.152, 0.95]);
+        // BDR_SH1DEb: parchment, the carved frame
         ui.img(&mut out, "Panel_BG", [x0, y0, x0 + 500.0 * s, y0 + bh * s], [1.0, 1.0, 1.0, 0.95]);
+        ui.frame_c(&mut out, [x0, y0, x0 + 500.0 * s, y0 + bh * s], s);
         let wins = ui.text_of("TEXT_XPLAY_WAITING_ROOM_065");
         for (k, (p, n)) in end.winners.iter().enumerate() {
             let row = format!("{} {wins}", ui.text_of(n));
@@ -233,7 +226,7 @@ impl Screen {
         for (label, b) in buttons {
             let r = [w / 2.0 - 170.0 * s, y, w / 2.0 + 170.0 * s, y + 48.0 * s];
             let hot = cursor[0] >= r[0] && cursor[0] < r[2] && cursor[1] >= r[1] && cursor[1] < r[3];
-            button(ui, &mut out, label, r, hot, s);
+            ui.text_button(&mut out, label, r, hot, false, b != 2 || !self.saved); // saved: Save Replay does nothing
             self.hits.push((r, b));
             y += 60.0 * s;
         }

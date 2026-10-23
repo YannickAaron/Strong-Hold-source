@@ -392,7 +392,7 @@ impl Score {
         let buttons = [("Play Again", Btn::Again), ("Main Menu", Btn::Menu), (if saved { "Replay saved" } else { "Save Replay" }, Btn::Replay), ("Graphs", Btn::Graphs)];
         for (k, (label, b)) in buttons.into_iter().filter(|b| again || b.1 != Btn::Again).enumerate() {
             let p = m.r(110.0 + 250.0 * k as f32, by + 21.0, 230.0, 48.0);
-            crate::endgame::button(ui, out, label, p, hot(p), m.s);
+            ui.text_button(out, label, p, hot(p), false, b != Btn::Replay || !saved);
             hits.push((p, b));
         }
         // the help line: the hovered button's text, else the sort's (UpdateHelpText); the dates under the rank's
@@ -537,8 +537,8 @@ impl Menu {
         // the filters along the bottom (checked: the tick)
         for (k, (x, key)) in [(px + 20.0, "TEXT_SKMASTERS_023"), (px + 330.0, "TEXT_SKMASTERS_024"), (px + 730.0, "TEXT_SKMASTERS_025")].into_iter().enumerate() {
             let p = self.r(x, py + 512.0, 300.0, 30.0);
-            Ui::fill(out, self.r(x, py + 517.0, 20.0, 20.0), [0.0, 0.0, 0.0, 0.25]);
-            if flags & (1 << k) != 0 { Ui::fill(out, self.r(x + 4.0, py + 521.0, 12.0, 12.0), [0.0, 0.0, 0.0, 0.85]); }
+            let (b, hot) = (self.r(x, py + 517.0, 20.0, 20.0), Self::inside(p, cursor));
+            crate::menu::widget(out, |o| Ui::checkbox(o, b, flags & (1 << k) != 0, hot, hot && ui.down));
             self.label(ui, out, &t(self, ui, key), x + 25.0, py + 527.0, 20.0, 0.0, BLACK);
             self.hits.push((p, Act::Trail(A::MFlag(1 << k))));
         }

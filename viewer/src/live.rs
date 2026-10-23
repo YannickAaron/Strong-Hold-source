@@ -96,6 +96,7 @@ mod sim {
         ev: crate::hud::Events,             // the engine's UI events so far (message bar, objectives), for the HUD
         pub tap: Option<crate::game_replay::Tap>, // around every RunTick: records the game, or plays a replay (game_replay.rs)
         editor: Option<i32>,                      // the map editor's brush size while its tool input repeats (editor.rs)
+        pub hill: Option<crate::koth::Hill>,      // King of the Hill (koth.rs); a replay's is its Player's
     }
 
     impl Live {
@@ -112,6 +113,7 @@ mod sim {
             // on a copy, written in the background (save_game takes 1-2 s; saves.rs)
             // a LAN game's saves are .msv, like the original's multiplayer saves (the LAN lobby's Load lists those)
             let path = if self.net.is_some() { path.with_extension("msv") } else { path.to_path_buf() };
+            crate::koth::Hill::write_beside(&self.hill, &path)?; // the score is not in the sim memory (koth.rs)
             crate::saves::save_async(&self.m, path, self.t0.elapsed().as_millis() as u32, |_| {});
             Ok(())
         }
@@ -132,7 +134,13 @@ mod sim {
             let me = m.i32(ma::LOCAL).max(1);
             Self { radar_n, m, last: vec![[0; 21]; 320_800], tiles, t0: std::time::Instant::now(), sent: false, view: None, preview: vec![],
                 mouse: [-1, -1], centre: [400, 400, 30, 30], pos: None, flattened: false, ret: vec![0; shc_sim::hudstate::RET_LEN], sel: vec![], held: None,
-                troop: Default::default(), idx: vec![], ev: Default::default(), me, net: None, tap: Some(crate::game_replay::Tap::record()), editor: None }
+                troop: Default::default(), idx: vec![], ev: Default::default(), me, net: None, tap: Some(crate::game_replay::Tap::record()), editor: None, hill: None }
+        }
+
+        /// A new game in King of the Hill to `target` points (0 = conquest): its hill, fort and guards, koth.rs.
+        pub fn with_hill(mut self, target: i32) -> Self {
+            self.hill = (target > 0).then(|| crate::koth::Hill::begin(&mut self.m, target));
+            self
         }
 
         pub fn tick(&self) -> i32 { self.m.i32(core::TICK_COUNTER) }
@@ -225,11 +233,18 @@ mod sim {
                 bink_playing: self.ev.video.playing(), // SFXManager.isBinkPlaying (video.rs)
                 ..Default::default()
             };
+            if let Some(crate::game_replay::Tap::Rec(r)) = &mut self.tap { r.hill.get_or_insert_with(|| self.hill.clone()); } // a replay's start
             if let Some(tap) = &mut self.tap { if !tap.before(&mut self.m, &mut inp) { return vec![]; } } // replay over: no tick
             if let Some(n) = &mut self.net { n.before(&mut self.m); } // LAN: peers' chores in, exec-tick timing
             let out = shc_sim::frontend::run_tick(&mut self.m, &inp, &mut self.ret, None);
             if let Some(n) = &mut self.net { n.after(&mut self.m); } // LAN: own chores and the reached tick out
             if let Some(tap) = &mut self.tap { tap.after(&mut self.m, &inp); }
+            // King of the Hill counts between ticks, after the tap: its end-of-game writes are recorded front-end
+            // writes, which a replay plays back (it counts in its Player, koth.rs)
+            crate::koth::after_tick(&mut self.hill, &mut self.m, true);
+            if let Some(crate::game_replay::Tap::Rec(r)) = &mut self.tap {
+                if let Some(p) = r.autosaved.take() { let _ = crate::koth::Hill::write_beside(&self.hill, &p); } // after this tick's count
+            }
             self.sel = out.selected.iter().flat_map(|p| p.iter().flat_map(|v| v.to_le_bytes())).collect();
             self.troop.track(&out.draw);
             self.ev.scan(&out.draw);
@@ -277,6 +292,11 @@ mod sim {
             if h.end.is_some() { crate::menu::trail_menu::masters::capture(&self.m, self.t0.elapsed().as_millis() as u32); }
             h.ev = crate::hud::Events { campaign: self.m.i32(0x183663eb8) == 0, ..self.ev.clone() }; // game mode 0 = campaign
             crate::military::hud_extra(&self.m, &mut h); // local player, lords still in, game kind (allies / Free Build)
+            let hill = self.hill.as_ref().or(match &self.tap { Some(crate::game_replay::Tap::Play(p)) => p.hill.as_ref(), _ => None });
+            if let Some(hill) = hill {
+                let names = self.net.as_ref().map_or(vec![], |n| n.status().lock().unwrap().players.clone());
+                h.hill = Some(crate::koth::board(hill, &self.m, self.me, &names));
+            }
             h
         }
 
@@ -560,7 +580,13 @@ mod sim {
         pub fn set_tax(&mut self, v: i32) { if self.net.is_some() { self.game_action(1004, 0, v.clamp(0, 11)); } else { self.command(Command::Tax(v.clamp(0, 11) as u8)) } }
         pub fn set_rations(&mut self, v: i32) { if self.net.is_some() { self.game_action(1005, 0, v.clamp(0, 4)); } else { self.command(Command::Rations(v.clamp(0, 4) as u8)) } }
         /// LAN game: every peer far enough for the next RunTick (lan::Lockstep::ready); always in single player.
-        pub fn net_ready(&mut self) -> bool { match &mut self.net { Some(n) => n.ready(&mut self.m), None => true } }
+        pub fn net_ready(&mut self) -> bool {
+            let Some(n) = &mut self.net else { return true };
+            n.rules = crate::koth::Hill::bytes(&self.hill); // the host's, for a hold's Go
+            let ok = n.ready(&mut self.m);
+            if let Some(b) = n.rules_in.take() { self.hill = crate::koth::Hill::from_bytes(&b); } // with the host's state
+            ok
+        }
         pub fn in_mp(&self) -> bool { self.net.is_some() }
     }
 

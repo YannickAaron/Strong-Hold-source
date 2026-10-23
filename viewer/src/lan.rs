@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 pub const DISCOVERY_PORT: u16 = 47777;
 pub const GAME_PORT: u16 = 47778;
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 /// Input delay at the start, before any round trip is measured: the original's LAN floor (FUN_180027f00).
 pub const DELAY: i32 = 10;
 /// The fewest ticks from a command to its exec tick: the gate needs P ≥ T + 2 with P = tick + delay − 1.
@@ -69,12 +69,14 @@ pub struct Lobby {
     pub spectators: Vec<String>,
     /// Started from a saved game: the host sends its state to everyone.
     pub loaded: bool,
+    /// King of the Hill to this many points, 0 = conquest (skirmish::Lobby::hill).
+    pub hill: i32,
 }
 
 impl Lobby {
     pub fn new(host: &str) -> Self {
         Lobby { map: "Crater Lake.map".into(), humans: vec![Human { name: host.into(), team: 0, lord: -1, coa: crate::menu::coa::mine().code() }], ais: vec![], fairness: 3, goods: 1,
-            outposts: true, speed: 40, coop: None, slots: vec![], spectators: vec![], loaded: false }
+            outposts: true, speed: 40, coop: None, slots: vec![], spectators: vec![], loaded: false, hill: 0 }
     }
     pub fn players(&self) -> usize { self.humans.len() + self.ais.len() }
     /// The player number of human k (0 = the host).
@@ -118,8 +120,9 @@ pub enum Msg {
     /// Host → `to`: pages `idx` (4 KB each, lz4 of their concatenation); `last` ends the transfer.
     Pages { to: i32, last: bool, idx: Vec<u32>, lz: Vec<u8> },
     Synced { from: i32 },
-    /// Host → all: the hold at `at` is over; every player's promise and the players still in the game.
-    Go { at: i32, through: Vec<(i32, i32)>, active: Vec<i32> },
+    /// Host → all: the hold at `at` is over; every player's promise, the players still in the game and the game mode's
+    /// state outside the sim memory (`Lockstep::rules`).
+    Go { at: i32, through: Vec<(i32, i32)>, active: Vec<i32>, rules: Vec<u8> },
     /// Net → Lockstep (host): a player came back / a spectator joined the running game.
     Joined { who: i32, tick: i32, through: i32 },
     /// To the host: player `from` pauses (`on`) or resumes the game.
@@ -154,7 +157,7 @@ impl W {
         for &s in &l.slots { self.i32(s); }
         self.i32(l.spectators.len() as i32);
         for s in &l.spectators { self.str(s); }
-        self.u8(l.loaded as u8)
+        self.u8(l.loaded as u8).i32(l.hill)
     }
 }
 
@@ -183,7 +186,7 @@ impl R<'_> {
         let coop = if self.u8()? != 0 { Some((self.i32()?, self.i32()?, self.u8()? != 0)) } else { None };
         let slots = (0..self.len()?).map(|_| self.i32()).collect::<Option<_>>()?;
         let spectators = (0..self.len()?).map(|_| self.str()).collect::<Option<_>>()?;
-        Some(Lobby { map, humans, ais, fairness, goods, outposts, speed, coop, slots, spectators, loaded: self.u8()? != 0 })
+        Some(Lobby { map, humans, ais, fairness, goods, outposts, speed, coop, slots, spectators, loaded: self.u8()? != 0, hill: self.i32()? })
     }
 }
 
@@ -211,11 +214,12 @@ impl Msg {
             Msg::PageHashes { from, hashes } => { w.u8(15).i32(*from).i32(hashes.len() as i32); for &h in hashes { w.u64(h); } }
             Msg::Pages { to, last, idx, lz } => { w.u8(16).i32(*to).u8(*last as u8).i32(idx.len() as i32); for &i in idx { w.u32(i); } w.bytes(lz); }
             Msg::Synced { from } => { w.u8(17).i32(*from); }
-            Msg::Go { at, through, active } => {
+            Msg::Go { at, through, active, rules } => {
                 w.u8(18).i32(*at).i32(through.len() as i32);
                 for &(p, t) in through { w.i32(p).i32(t); }
                 w.i32(active.len() as i32);
                 for &p in active { w.i32(p); }
+                w.bytes(rules);
             }
             Msg::Joined { who, tick, through } => { w.u8(19).i32(*who).i32(*tick).i32(*through); }
             Msg::Pause { from, on } => { w.u8(20).i32(*from).u8(*on as u8); }
@@ -268,7 +272,8 @@ impl Msg {
             18 => {
                 let at = r.i32()?;
                 let through = (0..r.len()?).map(|_| Some((r.i32()?, r.i32()?))).collect::<Option<_>>()?;
-                Msg::Go { at, through, active: (0..r.len()?).map(|_| r.i32()).collect::<Option<_>>()? }
+                let active = (0..r.len()?).map(|_| r.i32()).collect::<Option<_>>()?;
+                Msg::Go { at, through, active, rules: r.bytes()? }
             }
             19 => Msg::Joined { who: r.i32()?, tick: r.i32()?, through: r.i32()? },
             20 => Msg::Pause { from: r.i32()?, on: r.u8()? != 0 },
@@ -928,7 +933,7 @@ struct Hold {
     chunks: Vec<(Vec<u32>, Vec<u8>)>,    // client: pages received
     done: bool,                          // client: last page received
     applied: bool,                       // client: state applied
-    go: Option<(Vec<(i32, i32)>, Vec<i32>)>, // client: the host's Go
+    go: Option<(Vec<(i32, i32)>, Vec<i32>, Vec<u8>)>, // client: the host's Go
     kick: Option<i32>,                   // host migration: the old host, removed at `at`
     pages_sent: usize,
 }
@@ -976,6 +981,11 @@ pub struct Lockstep {
     paused_by: i32,                   // the player who paused the game (0 = running)
     pauses: BTreeMap<i32, i32>,       // host: pauses used per player
     speed: i32,                       // the game speed everyone runs at (ticks/s; the lobby's at the start)
+    /// The game mode's state outside the sim memory (koth.rs `Hill::bytes`, kept current by Live): the host sends it
+    /// with every hold's Go, so a peer that gets the host's pages gets the score that goes with them.
+    pub rules: Vec<u8>,
+    /// Client: the host's `rules` from the last Go, for Live to take.
+    pub rules_in: Option<Vec<u8>>,
 }
 
 #[cfg(feature = "live")]
@@ -992,7 +1002,7 @@ impl Lockstep {
             through, active, inbox: vec![], kicks: vec![], own: Default::default(), theirs: Default::default(), last: tick, error: None,
             hashes_checked: 0, resyncs: 0, log: vec![], status, epoch: Instant::now(), rtt: Default::default(), max_rtt: 0.0,
             pinged: Instant::now(), adapted: Instant::now(), steps: vec![], stepped: None, hold: None, lost: Default::default(), migrate: None, retried: Instant::now(),
-            dead_host: None, paused_by: 0, pauses: Default::default(), speed };
+            dead_host: None, paused_by: 0, pauses: Default::default(), speed, rules: vec![], rules_in: None };
         // the host of a loaded game / with spectators: they get its state at the first tick
         if ls.net.is_host() {
             let state: Vec<i32> = ls.net.peers.iter().map(|(p, _)| *p).filter(|&p| ls.net.lobby.loaded || p >= SPECTATOR).collect();
@@ -1106,8 +1116,8 @@ impl Lockstep {
                     }
                 }
                 Msg::Synced { from } if self.net.is_host() => { if let Some(h) = &mut self.hold { h.synced.insert(from); } }
-                Msg::Go { at, through, active } if !self.net.is_host() => {
-                    if let Some(h) = &mut self.hold { if h.at == at || h.at == 0 { h.go = Some((through, active)); } }
+                Msg::Go { at, through, active, rules } if !self.net.is_host() => {
+                    if let Some(h) = &mut self.hold { if h.at == at || h.at == 0 { h.go = Some((through, active, rules)); } }
                 }
                 Msg::Pause { from, on } if self.net.is_host() => self.pause(from, on),
                 Msg::Paused { by, left } if !self.net.is_host() => self.set_paused(by, left),
@@ -1291,7 +1301,7 @@ impl Lockstep {
             let mut through: Vec<(i32, i32)> = self.through.iter().map(|(&p, &t)| (p, t)).collect();
             through.push((self.me, self.promised));
             let at = h.at;
-            let go = Msg::Go { at, through, active: self.active.clone() };
+            let go = Msg::Go { at, through, active: self.active.clone(), rules: self.rules.clone() };
             self.net.send(&go, self.me);
             self.net.send(&Msg::Speed { rate: self.speed }, self.me); // joiners start at the lobby's
             let why = h.why.clone();
@@ -1332,18 +1342,19 @@ impl Lockstep {
             }
         }
         let h = self.hold.as_mut().unwrap();
-        if let Some((through, active)) = h.go.take() {
+        if let Some((through, active, rules)) = h.go.take() {
             if !mine || h.applied {
                 let at = h.at;
                 for (p, t) in through { if p != me { self.through.insert(p, t); } else { self.promised = self.promised.max(t); } }
                 self.active = active;
+                self.rules_in = Some(rules);
                 if mine && h.why.contains("desync") { self.resyncs += 1; }
                 self.hold = None;
                 self.own.retain(|&t, _| t < at);
                 self.theirs.retain(|&t, _| t < at);
                 self.log(format!("go at {at}"));
             } else {
-                h.go = Some((through, active));
+                h.go = Some((through, active, rules));
             }
         }
     }
@@ -1671,6 +1682,7 @@ impl crate::App {
         let crate::menu::mp_menu::Started { net, lobby, seed, delay } = s;
         let (state, save) = (net.state, net.save.clone());
         let me = net.me;
+        let saved_hill = save.as_deref().map(crate::koth::Hill::read_beside); // King of the Hill: a loaded game's score
         let r: Result<(shc_sim::mem::Mem, Option<Lockstep>), String> = if state {
             Lockstep::join(net, delay, Duration::from_secs(60)).map(|(ls, m)| (m, Some(ls)))
         } else if let Some(path) = save {
@@ -1683,9 +1695,16 @@ impl crate::App {
             })
         };
         match r {
-            Ok((m, Some(ls))) => {
+            Ok((mut m, Some(mut ls))) => {
                 (self.menu, self.last_lobby, self.campaign) = (None, None, None);
+                // King of the Hill (koth.rs): every peer finds the same hill in the same start, the host of a loaded game
+                // has the save's score, a peer that got the host's state got it with the hold's Go (here already, so the
+                // replay recorder starts with it)
+                let hill = if state { ls.rules_in.take().and_then(|b| crate::koth::Hill::from_bytes(&b)) } else if lobby.coop.is_some() { None } else {
+                    saved_hill.unwrap_or_else(|| (lobby.hill > 0).then(|| crate::koth::Hill::begin(&mut m, lobby.hill)))
+                };
                 let mut l = crate::live::Live::from_mem(m);
+                l.hill = hill;
                 if ls.spectator { l.me = 0; }
                 ls.status().lock().unwrap().cfg_speed = crate::skirmish::Settings::load().game_speed() as i32;
                 *UI.lock().unwrap() = Some(ls.status());
@@ -1798,7 +1817,7 @@ mod tests {
         let mut l = Lobby::new("host");
         l.humans.push(Human { name: "zwei".into(), team: 2, lord: 5, coa: "0222110191010".into() });
         l.ais.push((4, 1));
-        (l.coop, l.slots, l.spectators, l.loaded) = (Some((2, 7, true)), vec![1, 3], vec!["watcher".into()], true);
+        (l.coop, l.slots, l.spectators, l.loaded, l.hill) = (Some((2, 7, true)), vec![1, 3], vec!["watcher".into()], true, 300);
         let a: SocketAddr = "192.168.1.20:47790".parse().unwrap();
         for m in [Msg::Hello { name: "a".into(), version: 2, listen: 51000, join: Join::Rejoin(3), tick: 77, through: 90, coa: "0222110191010".into() }, Msg::Lobby(l.clone()),
             Msg::Start { lobby: l, seed: -7, delay: 10, state: true }, Msg::Peers(vec![(2, a)]),
@@ -1806,7 +1825,7 @@ mod tests {
             Msg::Left { who: 2, at: 99 }, Msg::Chat { from: 1, text: "hallo ü".into() }, Msg::Ping { from: 1, t: 5 }, Msg::Pong { from: 2, to: 1, t: 5 },
             Msg::Rtt { max_ms: 3 }, Msg::Hold { at: 9, why: "x".into(), state: vec![2, 100] }, Msg::PageHashes { from: 2, hashes: vec![0, u64::MAX] },
             Msg::Pages { to: 2, last: true, idx: vec![4, 9], lz: vec![1, 2] }, Msg::Synced { from: 2 },
-            Msg::Go { at: 9, through: vec![(1, 20)], active: vec![1, 2] }, Msg::Joined { who: 100, tick: 0, through: 0 }, Msg::Pause { from: 2, on: true }, Msg::Paused { by: 2, left: 1 },
+            Msg::Go { at: 9, through: vec![(1, 20)], active: vec![1, 2], rules: b"koth1,5".to_vec() }, Msg::Joined { who: 100, tick: 0, through: 0 }, Msg::Pause { from: 2, on: true }, Msg::Paused { by: 2, left: 1 },
             Msg::Speed { rate: 65 }] {
             let e = m.encode();
             assert_eq!(u32::from_le_bytes(e[..4].try_into().unwrap()) as usize, e.len() - 4);
@@ -2130,6 +2149,54 @@ mod tests {
         println!("host: {}\nclient: {}", log(&ls[0]), log(&ls[1]));
         assert_eq!(a, b, "after the resync");
         assert!(ls[1].net.as_ref().unwrap().resyncs >= 1, "no resync");
+    }
+
+    /// King of the Hill over LAN (koth.rs): both peers set up the same hill, neutral fort and guards and count the same
+    /// (the host's archers there, the guards killed at the same tick on both); after a desync the resync hands the
+    /// client the host's score with the host's state; the fort changes hands on both in sync.
+    #[cfg(feature = "live")]
+    #[test]
+    fn koth_in_lockstep() {
+        if !maps() { return; }
+        let mut ls = start(1, 10);
+        let mut mine = vec![];
+        for l in &mut ls {
+            let h = crate::koth::Hill::begin(l.mem(), 1000); // the hill player's fort and guards, the same on both
+            let at = crate::koth::Hill { x: h.x - 5, ..h.clone() };
+            mine = crate::koth::tests::spawn(l.mem(), &at, 1, 22, 6); // the host's archers below the tower
+            l.hill = Some(h);
+        }
+        assert_eq!(ls[0].hill, ls[1].hill, "the same hill");
+        let t0 = ls[0].tick();
+        let mut ls = run_all(ls, t0 + 60);
+        assert_eq!(ls[0].hill.as_ref().map(|h| h.holder), Some(-1), "the guards and your archers");
+        for l in &mut ls { // both at the same tick: the guards die on both
+            for g in crate::koth::tests::guards(l.mem_ref(), l.hill.as_ref().unwrap()) { shc_sim::units::helpers::apply_hit(l.mem(), mine[0], g, 10_000_000); }
+        }
+        let mut ls = run_all(ls, t0 + 300);
+        let team = crate::koth::sides(ls[0].mem_ref())[1] as usize;
+        assert!(ls[0].hill.as_ref().is_some_and(|h| h.score[team] >= 6), "{:?}", ls[0].hill);
+        assert_eq!((sums(&mut ls[0]), ls[0].hill.clone()), (sums(&mut ls[1]), ls[1].hill.clone()));
+        // the client's score off, and a building byte so the sync check finds the desync
+        ls[1].hill.as_mut().unwrap().score[team] += 50;
+        let b = shc_sim::buildings::rec(1) + 0x100;
+        let m = ls[1].mem();
+        m.set_u8(b, m.u8(b) ^ 0x55);
+        let mut ls = run_all(ls, t0 + 600);
+        println!("host: {}\nclient: {}", log(&ls[0]), log(&ls[1]));
+        assert!(ls[1].net.as_ref().unwrap().resyncs >= 1, "no resync");
+        assert_eq!((sums(&mut ls[0]), ls[0].hill.clone()), (sums(&mut ls[1]), ls[1].hill.clone()), "the host's score came with its state");
+        // alone on the hill for koth::TAKE seconds: the fort changes hands on both, in sync
+        let mut ls = run_all(ls, t0 + 1200);
+        let fort = |l: &Live| crate::koth::fort(l.mem_ref(), l.hill.as_ref().unwrap()).map(|f| f.1);
+        assert_eq!((fort(&ls[0]), fort(&ls[1])), (Some(1), Some(1)), "{:?}", ls[0].hill);
+        assert_eq!((sums(&mut ls[0]), ls[0].hill.clone()), (sums(&mut ls[1]), ls[1].hill.clone()), "in sync after the capture");
+        // the AI lord's first wave to the hill (koth::lords, tick koth::WAVE): the same groups on both, in sync on its way
+        let ai = (1..9).find(|&p| { let m = ls[0].mem_ref(); m.i32(0x188571c34 + p as u64 * 4) != 0 && m.i32(0x188571bbc + p as u64 * 4) == -1 }).unwrap();
+        let mut ls = run_all(ls, t0 + 1600);
+        let force = |l: &Live| crate::koth::tests::force(l.mem_ref(), ai).0;
+        assert!(!force(&ls[0]).is_empty() && force(&ls[0]) == force(&ls[1]), "{:?} / {:?}", force(&ls[0]), force(&ls[1]));
+        assert_eq!((sums(&mut ls[0]), ls[0].hill.clone()), (sums(&mut ls[1]), ls[1].hill.clone()), "in sync with the AI's orders");
     }
 
     /// A player drops out and comes back (its app lost the game: it gets the host's state); everyone waited for it.

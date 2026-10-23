@@ -103,6 +103,7 @@ pub struct HudState {
     pub cg_total: [i16; 10],         // +2446 control_groups_total (< 0 in [0]: none sent)
     pub cg: [[(u8, i16); 4]; 10],    // +2466 control_groups_type / +2506 _count: the first four kinds per group
     pub lords: Lords,                // the allies panel's lord table
+    pub hill: Option<crate::koth::Board>, // --live: King of the Hill (koth.rs); None = conquest
 }
 
 /// The lords' part of PlayStateReturnData (+2612.., written in skirmish / multiplayer; C# CopyPlayStateStruct moves the
@@ -243,6 +244,7 @@ impl HudState {
                     req: std::array::from_fn(|k| [s2(2692 + 2 * k), s2(2712 + 2 * k)]), order: sh(2732), order_player: sh(2748),
                     order_from: sh(2764), ping: std::array::from_fn(|q| s2(1968 + 2 * q)), ..Default::default() }
             },
+            hill: None,
         })
     }
 }
@@ -324,6 +326,8 @@ const CREAM: [f32; 4] = [0xef as f32 / 255.0, 0xf3 as f32 / 255.0, 0xc6 as f32 /
 const GREEN: [f32; 4] = [0.0, 136.0 / 255.0, 0.0, 1.0]; // BookColour_Green
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];             // BookColour_Red
 const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];           // HUD_Buildings TextBlock style
+const ACCENT7: [f32; 3] = [0xf4 as f32 / 255.0, 0xde as f32 / 255.0, 0xaa as f32 / 255.0]; // Brush.Accent7, a GlowS button's text
+const PRESSED: [f32; 4] = [0.8, 0.8, 0.8, 1.0]; // a held button's bar (ours: IsPressed only dims the text)
 
 pub(crate) struct Button { pub(crate) screen: usize, pub(crate) name: String, pub(crate) structure: String, pub(crate) s1: String, pub(crate) s2: String, pub(crate) x: f32, pub(crate) y: f32, pub(crate) w: f32, pub(crate) h: f32, pub(crate) help: String, pub(crate) mapper: i32 }
 struct Glyph { uv: [f32; 4], m: fontdue::Metrics }
@@ -490,6 +494,7 @@ pub struct Ui {
     seen_ret: u32,                  // serial of the last ACTION_RET taken
     last_panel: (i32, i32),         // (app_mode, app_sub_mode) drawn last: a panel change resets its view state
     panel_tip: Option<String>,      // a building panel button's hover text, shown as the tooltip
+    pub down: bool,                 // the left mouse button is held (main.rs): the button under it looks pressed
     pub(crate) s: f32, pub(crate) w: f32, pub(crate) h: f32,    // Viewbox scale, window logical size
 }
 
@@ -518,7 +523,7 @@ impl Ui {
         white_block(&mut font_rgba);
         Some(Self { rects, strings, goods, build, tabs, troops, titles, font, glyphs: HashMap::new(), font_rgba, pen: (4, 0, 0), font_dirty: true,
             hits: vec![], screen: 1, selected: None, radar: false, actions: vec![], actions4: vec![], drag: None, allies: None, fb: None, cg: false, lords: Lords::default(), delete: None, radar_click: None, radar_at: [0.0; 4], message: None, sub_mode: None, shift: false, open_menu: false, help: None, ctrl: false, stance: None, engi: false, order: None, ost: Default::default(), bar: None, seen: (0, 0), goals: false, edge_mask: 0.0, rclick: None, hidden: false, flat: false,
-            open_briefing: false, confirm: None, auto: None, auto_goods: ([[0; 25]; 2], [0; 25]), prev_trade: 0, trade_err: None, seen_ret: 0, last_panel: (0, 0), panel_tip: None, s: 1.0, w: 0.0, h: 0.0 })
+            open_briefing: false, confirm: None, auto: None, auto_goods: ([[0; 25]; 2], [0; 25]), prev_trade: 0, trade_err: None, seen_ret: 0, last_panel: (0, 0), panel_tip: None, down: false, s: 1.0, w: 0.0, h: 0.0 })
     }
 
     pub(crate) fn text_of(&self, key: &str) -> String {
@@ -1002,14 +1007,15 @@ impl Ui {
     }
 
     /// ImageBrush TileMode=Tile: `key` in `tw`×`th` screen-px tiles from the top-left of `p`, cut at the far edges.
-    fn img_tiled(&self, out: &mut Vec<HudTri>, key: &str, p: [f32; 4], tw: f32, th: f32) {
+    fn img_tiled(&self, out: &mut Vec<HudTri>, key: &str, p: [f32; 4], tw: f32, th: f32) { self.img_tiled_c(out, key, p, tw, th, [1.0; 4]) }
+    fn img_tiled_c(&self, out: &mut Vec<HudTri>, key: &str, p: [f32; 4], tw: f32, th: f32, color: [f32; 4]) {
         let mut y = p[1];
         while y < p[3] - 0.01 {
             let y1 = (y + th).min(p[3]);
             let mut x = p[0];
             while x < p[2] - 0.01 {
                 let x1 = (x + tw).min(p[2]);
-                self.img_part(out, key, [0.0, 0.0, (x1 - x) / tw, (y1 - y) / th], [x, y, x1, y1], [1.0; 4]);
+                self.img_part(out, key, [0.0, 0.0, (x1 - x) / tw, (y1 - y) / th], [x, y, x1, y1], color);
                 x = x1;
             }
             y = y1;
@@ -1023,13 +1029,102 @@ impl Ui {
         let p = [at[0], at[1] - 1.5 * s, at[0] + w * s, at[1] + 29.5 * s];
         let hot = lit || hit.is_some() && Self::inside(p, cursor);
         if hot && hit.is_some() { crate::audio::hover(p, crate::audio::ui_id::RED_BUTTON, 1.0); }
-        let n = if hot { ["Button_02_Left_", "Button_02_Center", "Button_02_Right"] } else { ["Button_01_Left", "Button_01_Center", "Button_01_Right"] };
-        self.img(out, n[0], [p[0], p[1], p[0] + 29.5 * s, p[3]], [1.0; 4]);
-        self.img_tiled(out, n[1], [p[0] + 29.5 * s, p[1], p[2] - 29.5 * s, p[3]], 29.5 * s, 31.0 * s);
-        self.img(out, n[2], [p[2] - 29.5 * s, p[1], p[2], p[3]], [1.0; 4]);
-        let color = [0xf4 as f32 / 255.0, 0xde as f32 / 255.0, 0xaa as f32 / 255.0, if hit.is_some() { 1.0 } else { 0.5 }];
-        self.text(out, text, (p[0] + p[2]) / 2.0, at[1] + (15.0 + 16.0 * 0.33) * s, 16.0, 1.0, 0.0, 0.5, color); // centred on y + 15
+        let held = hit.is_some() && Self::inside(p, cursor) && self.down;
+        self.glow_bar(out, p, hot, true, if held { PRESSED } else { [1.0; 4] });
+        let color = [ACCENT7[0], ACCENT7[1], ACCENT7[2], if hit.is_none() { 0.5 } else if held { 0.9 } else { 1.0 }];
+        self.text(out, text, (p[0] + p[2]) / 2.0, at[1] + (15.0 + 16.0 * 0.33 + held as u8 as f32) * s, 16.0, 1.0, 0.0, 0.5, color); // centred on y + 15
         if let Some(h) = hit { self.hits.push((p, h)); }
+    }
+
+    /// BTN_SH_GlowS's bar filling screen rect `p` at any size: Button_01_* (Button_02_*, the glow, while `glow`), the
+    /// caps 29.5 / 31 of the height wide, the centre tiled at that pitch. `star` false (ours: the label would reach
+    /// it) or a button narrower than two caps (half of each shows): the left cap is the right one mirrored.
+    pub(crate) fn glow_bar(&self, out: &mut Vec<HudTri>, p: [f32; 4], glow: bool, star: bool, color: [f32; 4]) {
+        let k = (p[3] - p[1]) / 31.0; // screen px per px of the 31 px bar
+        let cap = (29.5 * k).min((p[2] - p[0]) / 2.0);
+        let f = cap / (29.5 * k); // the part of a cap that shows
+        let n = if glow { ["Button_02_Left_", "Button_02_Center", "Button_02_Right"] } else { ["Button_01_Left", "Button_01_Center", "Button_01_Right"] };
+        let (left, part) = if f < 1.0 || !star { (n[2], [1.0, 0.0, 1.0 - f, 1.0]) } else { (n[0], [0.0, 0.0, 1.0, 1.0]) };
+        self.img_part(out, left, part, [p[0], p[1], p[0] + cap, p[3]], color);
+        self.img_tiled_c(out, n[1], [p[0] + cap, p[1], p[2] - cap, p[3]], 29.5 * k, 31.0 * k, color);
+        self.img_part(out, n[2], [1.0 - f, 0.0, 1.0, 1.0], [p[2] - cap, p[1], p[2], p[3]], color);
+    }
+
+    /// The port's own text buttons in the game's look: BTN_SH_GlowS (`glow_bar`) filling screen rect `p`, `label`
+    /// centred in #F4DEAA at 16 / 31 of its height. `hot` (hovered): the glow bar and the red button's hover sound;
+    /// `on` (GlowSB's selected, a toggle that is on): the glow bar, #FFD700 text; held down: the bar darker, the text
+    /// 90 % (IsPressed) and a px lower; `enabled` false: no glow, text 60 % (IsEnabled False).
+    pub(crate) fn text_button(&mut self, out: &mut Vec<HudTri>, label: &str, p: [f32; 4], hot: bool, on: bool, enabled: bool) {
+        let hot = hot && enabled;
+        let held = hot && self.down;
+        if hot { crate::audio::hover(p, crate::audio::ui_id::RED_BUTTON, 1.0); }
+        let (k, c) = ((p[3] - p[1]) / 31.0, if on { [1.0, 0.843, 0.0] } else { ACCENT7 });
+        let size = 16.0 * k / self.s;
+        let tw = self.text(&mut vec![], label, 0.0, 0.0, size, 1.0, 0.0, 0.0, [1.0; 4]);
+        self.glow_bar(out, p, hot || on, p[2] - p[0] - tw >= 40.0 * k, if held { PRESSED } else { [1.0; 4] }); // the star: the cap's left 20 px
+        let a = if !enabled { 0.6 } else if held { 0.9 } else { 1.0 };
+        self.text(out, label, (p[0] + p[2]) / 2.0, p[1] + (16.5 + 16.0 * 0.33 + held as u8 as f32) * k, size, 1.0, 0.0, 0.5, [c[0], c[1], c[2], a]);
+    }
+
+    /// The default TextBox's look (Options > Player Settings' name): #631200, a 1 px #6D7378 edge while `active` (typing
+    /// or hovered); the caller writes the text.
+    pub(crate) fn text_field(out: &mut Vec<HudTri>, p: [f32; 4], active: bool, s: f32) {
+        const FILL: [f32; 4] = [0.388, 0.071, 0.0, 1.0]; // #631200
+        Self::fill(out, p, if active { [0.427, 0.451, 0.471, 1.0] } else { [0.0, 0.0, 0.0, 1.0] }); // #6D7378
+        Self::fill(out, [p[0] + s, p[1] + s, p[2] - s, p[3] - s], FILL);
+    }
+
+    /// The port's dark panel (light text reads on it): Panel_BG darkened, in the carved frame (`frame_c`).
+    pub(crate) fn panel(&self, out: &mut Vec<HudTri>, p: [f32; 4], s: f32) {
+        self.img(out, "Panel_BG", p, [0.768, 0.735, 0.702, 0.97]);
+        Self::fill(out, p, [0.315, 0.271, 0.221, 0.35]);
+        self.frame_c(out, p, s);
+    }
+
+    /// A progress bar in screen rect `r`: a dark groove (#1E1C10 in black, the HUD's own bars) filled to `frac` with
+    /// the game's Loading Bar texture.
+    pub(crate) fn progress(&self, out: &mut Vec<HudTri>, r: [f32; 4], frac: f32) {
+        Self::fill(out, r, BLACK);
+        let e = ((r[3] - r[1]) / 12.0).max(1.0);
+        let r = [r[0] + e, r[1] + e, r[2] - e, r[3] - e];
+        Self::fill(out, r, [0x1e as f32 / 255.0, 0x1c as f32 / 255.0, 0x10 as f32 / 255.0, 1.0]);
+        let f = frac.clamp(0.0, 1.0);
+        self.img_part(out, "Loading Bar", [0.0, 0.0, f, 1.0], [r[0], r[1], r[0] + (r[2] - r[0]) * f, r[3]], [1.0; 4]);
+    }
+
+    /// A convex polygon `pts` (screen px) on the white texel block, like `fill`.
+    fn fill_convex(out: &mut Vec<HudTri>, pts: &[[f32; 2]], color: [f32; 4]) {
+        let t = 1.0 / FONT_PX as f32;
+        let v = |p: [f32; 2]| Vert { pos: p, uv: [t, t], color, team: [0.0; 4] };
+        for k in 1..pts.len() - 1 { out.push((1, [v(pts[0]), v(pts[k]), v(pts[k + 1])])); }
+    }
+
+    /// CheckBox_Template in screen rect `p` (20×20 design px): #631200; hovered a 2 px #9FA3A7 edge, held #6D7378;
+    /// checked #D59C20 in a #EB452F edge (ours: 1 px; hovered 2) with Geometry.CheckBox.Check, the 14 px tick, in #631200.
+    pub(crate) fn checkbox(out: &mut Vec<HudTri>, p: [f32; 4], on: bool, hot: bool, held: bool) {
+        let k = (p[2] - p[0]) / 20.0;
+        let c = |v: u32| [(v >> 16) as f32 / 255.0, (v >> 8 & 0xff) as f32 / 255.0, (v & 0xff) as f32 / 255.0, 1.0];
+        let e = if hot { 2.0 * k } else if on { k } else { 0.0 };
+        Self::fill(out, p, if on { c(0xeb452f) } else { c(0x9fa3a7) });
+        Self::fill(out, [p[0] + e, p[1] + e, p[2] - e, p[3] - e], if on { c(0xd59c20) } else if held { c(0x6d7378) } else { c(0x631200) });
+        if on { // M0,7.5 L5.5,12.5 14,2.75 11.75,1 5.5,9 1.5,5.5 z in the 14 px box 3 px in: two convex arms
+            let at = |x: f32, y: f32| [p[0] + (3.0 + x) * k, p[1] + (3.0 + y) * k];
+            Self::fill_convex(out, &[at(0.0, 7.5), at(5.5, 12.5), at(5.5, 9.0), at(1.5, 5.5)], c(0x631200));
+            Self::fill_convex(out, &[at(5.5, 12.5), at(14.0, 2.75), at(11.75, 1.0), at(5.5, 9.0)], c(0x631200));
+        }
+    }
+
+    /// BDR_SH1DEc around screen rect `p`, the carved frame only (the inside is the caller's): Panel_Border_* strips 30
+    /// px (18 out, 12 in) tiled 250 long, Panel_Corner_2_* corners; `s` = the layout's scale.
+    pub(crate) fn frame_c(&self, out: &mut Vec<HudTri>, p: [f32; 4], s: f32) {
+        let ([x0, y0, x1, y1], e) = (p, |v: f32| v * s);
+        self.img_tiled(out, "Panel_Border_Top", [x0 - e(1.0), y0 - e(18.0), x1 + e(1.0), y0 + e(12.0)], e(250.0), e(30.0));
+        self.img_tiled(out, "Panel_Border_Bottom", [x0 - e(1.0), y1 - e(12.0), x1 + e(1.0), y1 + e(18.0)], e(250.0), e(30.0));
+        self.img_tiled(out, "Panel_Border_Left", [x0 - e(18.0), y0 - e(1.0), x0 + e(12.0), y1 + e(1.0)], e(30.0), e(250.0));
+        self.img_tiled(out, "Panel_Border_Right", [x1 - e(12.0), y0 - e(1.0), x1 + e(18.0), y1 + e(1.0)], e(30.0), e(250.0));
+        for (k, x, y) in [("Top_Left", x0 - e(18.0), y0 - e(18.0)), ("Top_Right", x1 - e(12.0), y0 - e(18.0)), ("Bottom_Left", x0 - e(18.0), y1 - e(12.0)), ("Bottom_Right", x1 - e(12.0), y1 - e(12.0))] {
+            self.img(out, &format!("Panel_Corner_2_{k}"), [x, y, x + e(30.0), y + e(30.0)], [1.0; 4]);
+        }
     }
 
     /// SDR_SH_Plain_Tickless (Top / Bottom): a 2 px black track across the 22 px high box at panel-local (x, y), the
@@ -1265,16 +1360,8 @@ impl Ui {
         let lw = self.tw(&label, 20.0);
         let x0 = (w - 26.0 - lw) / 2.0;
         let b = r(self, x0, h - 10.0 - 21.5, 20.0, 20.0);
-        let rgb = |v: u32| [(v >> 16) as f32 / 255.0, (v >> 8 & 0xff) as f32 / 255.0, (v & 0xff) as f32 / 255.0, 1.0];
-        if checked {
-            Self::fill(out, b, rgb(0xeb452f));
-            let e = s;
-            Self::fill(out, [b[0] + e, b[1] + e, b[2] - e, b[3] - e], rgb(0xd59c20));
-            let e = 5.5 * s;
-            Self::fill(out, [b[0] + e, b[1] + e, b[2] - e, b[3] - e], rgb(0x631200));
-        } else {
-            Self::fill(out, b, rgb(0x631200));
-        }
+        let hot = Self::inside(b, cursor);
+        Self::checkbox(out, b, checked, hot, hot && self.down);
         let [lx, ly] = c(self, x0 + 26.0, h - 10.0 - 21.5 + 10.0 + 20.0 * 0.33);
         self.text(out, &label, lx, ly, 20.0, 1.0, 0.0, 0.0, BLACK);
         self.hits.push(([b[0], b[1], lx + lw * s, b[3]], Hit::Confirm(2)));
@@ -1763,8 +1850,8 @@ impl Ui {
                 }
                 let hover = Self::inside(p, cursor);
                 let sel = self.selected == Some(i);
-                if sel { // ponytail: selection glow is ours; the game shows the placement cursor instead
-                    Self::fill(&mut out, [p[0] - 2.0, p[1] - 2.0, p[2] + 2.0, p[3] + 2.0], [1.0, 0.85, 0.3, 0.35]);
+                if sel { // ours (the game shows the placement cursor instead): the gold UI Player Border around it
+                    self.img(&mut out, "UI Player Border", [p[0] - 3.0, p[1] - 3.0, p[2] + 3.0, p[3] + 3.0], [1.0; 4]);
                 }
                 let key = if hover || sel { &b.s2 } else { &b.s1 };
                 self.img_fit(&mut out, key, p, white);

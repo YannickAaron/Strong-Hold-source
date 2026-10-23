@@ -331,6 +331,8 @@ pub struct Lobby {
     pub aivs: [i32; 8],
     /// Customize on the Extreme trail (DLL_PreInitMap_Multiplayer customisedExtremeTrail: triple start gold)
     pub extreme_trail: bool,
+    /// The game mode (ours): 0 = conquest, else King of the Hill to this many points (koth.rs; the sim never sees it)
+    pub hill: i32,
 }
 
 /// The Advanced Settings rows (FRONT_Multiplayer.xaml, left column then right): MultiplayerSetupTransferData word,
@@ -349,7 +351,7 @@ impl Lobby {
     pub fn new(map: PathBuf) -> Self {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_secs() as i32);
         Lobby { map, lord_kind: -1, team: 0, ais: vec![(0, 0)], fairness: 3, goods: 1, outposts: true, seed, colour: 0, extreme: [false; 3],
-            advanced: false, adv: ADV_DEFAULT, buildings: [1; 13], keeps: None, aivs: [-1; 8], extreme_trail: false }
+            advanced: false, adv: ADV_DEFAULT, buildings: [1; 13], keeps: None, aivs: [-1; 8], extreme_trail: false, hill: 0 }
     }
     /// FRONT_Multiplayer.doOpen(skirmishSetup): your colour from Options, the Advanced Settings remembered
     /// (Settings_SkirmishPresets, the popup's Remember).

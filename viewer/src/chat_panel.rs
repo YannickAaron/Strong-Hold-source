@@ -70,7 +70,7 @@ pub fn draw(ui: &mut Ui, v: &View, w: f32, h: f32, cursor: [f32; 2]) -> (Vec<Hud
     match &v.insult {
         Some(t) => { m.label(ui, &mut out, t, 20.0, 249.0, 22.0, 0.0, BLACK); }
         None => {
-            Ui::fill(&mut out, m.r(20.0, 233.0, 1200.0, 33.0), [0.08, 0.03, 0.02, 0.85]);
+            super::widget(&mut out, |o| Ui::text_field(o, m.r(20.0, 233.0, 1200.0, 33.0), true, m.s));
             let caret = if std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() / 500 % 2) == 0 { "_" } else { "" };
             m.label(ui, &mut out, &format!("{}{caret}", v.line), 26.0, 249.5, 20.0, 0.0, [0.94, 0.95, 0.78, 1.0]);
         }

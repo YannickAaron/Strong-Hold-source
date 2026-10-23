@@ -239,6 +239,10 @@ pub struct Recorder {
     shadow: std::collections::HashMap<u32, Vec<u8>>,
     patches: Vec<(u32, Vec<u8>)>,
     steps: u64, // stepping ticks recorded (autosave)
+    /// King of the Hill at the start (Live sets it before the first tap call; None inside = conquest), koth.rs
+    pub hill: Option<Option<crate::koth::Hill>>,
+    /// The autosave just written: Live puts the score's sidecar next to it once it has counted this tick.
+    pub autosaved: Option<std::path::PathBuf>,
 }
 
 /// The start snapshot: a copy of the memory (~60 ms) compressed on a worker (~200 ms), joined when a replay is made.
@@ -305,7 +309,9 @@ impl Recorder {
         if steps(inp) && !cfg!(test) {
             self.steps += 1;
             if self.steps % crate::saves::autosave_ticks() as u64 == 0 {
-                crate::saves::save_async(m, crate::saves::autosave_path(), self.t0.map_or(0, |t| t.elapsed().as_millis() as u32), |_| {});
+                let path = crate::saves::autosave_path();
+                crate::saves::save_async(m, path.clone(), self.t0.map_or(0, |t| t.elapsed().as_millis() as u32), |_| {});
+                self.autosaved = Some(path);
             }
         }
     }
@@ -319,7 +325,7 @@ impl Recorder {
         let Some(Start::Done(start)) = &self.start else { return None };
         Some(Replay {
             start: start.clone(), frames: Arc::new(decode(&self.buf)?), start_tick: self.start_tick,
-            map: map_name(m), play_ms: self.t0.map_or(0, |t| t.elapsed().as_millis() as u64), preview: vec![],
+            map: map_name(m), play_ms: self.t0.map_or(0, |t| t.elapsed().as_millis() as u64), preview: vec![], hill: self.hill.clone().flatten(),
         })
     }
 }
@@ -341,6 +347,7 @@ pub struct Replay {
     pub map: String,
     pub play_ms: u64,
     pub preview: Vec<u8>, // packed save header block 0 (palette + 200×200 indices), empty = none
+    pub hill: Option<crate::koth::Hill>, // King of the Hill at the start (koth.rs), None = conquest
 }
 
 impl Replay {
@@ -350,7 +357,8 @@ impl Replay {
     pub fn write(&self, path: &std::path::Path) -> std::io::Result<()> {
         let (mut buf, mut prev) = (vec![], vec![0; FIELDS.len()]);
         for f in self.frames.iter() { encode(&mut buf, &prev, f); prev = f.inp.clone(); }
-        let info = format!("map={}\nstart_tick={}\nticks={}\nframes={}\nplay_ms={}\n", self.map, self.start_tick, self.ticks(), self.frames.len(), self.play_ms);
+        let mut info = format!("map={}\nstart_tick={}\nticks={}\nframes={}\nplay_ms={}\n", self.map, self.start_tick, self.ticks(), self.frames.len(), self.play_ms);
+        if let Some(h) = &self.hill { info += &format!("hill={}\n", h.encode()); }
         let mut out = MAGIC.to_vec();
         for b in [info.as_bytes(), &self.preview, &self.start, &lz4_flex::block::compress_prepend_size(&buf)] {
             out.extend_from_slice(&(b.len() as u32).to_le_bytes());
@@ -367,13 +375,13 @@ impl Replay {
         let (info, preview, start, frames) = (r.blob().ok_or_else(bad)?, r.blob().ok_or_else(bad)?, r.blob().ok_or_else(bad)?, r.blob().ok_or_else(bad)?);
         let info = Info::parse(info);
         let frames = lz4_flex::block::decompress_size_prepended(frames).ok().and_then(|f| decode(&f)).ok_or_else(bad)?;
-        Ok(Replay { start: Arc::new(start.to_vec()), frames: Arc::new(frames), start_tick: info.start_tick, map: info.map, play_ms: info.play_ms, preview: preview.to_vec() })
+        Ok(Replay { start: Arc::new(start.to_vec()), frames: Arc::new(frames), start_tick: info.start_tick, map: info.map, play_ms: info.play_ms, preview: preview.to_vec(), hill: info.hill })
     }
 }
 
 /// A replay file's info block and preview, without decoding the game (save browser).
 #[derive(Clone, Debug, Default)]
-pub struct Info { pub map: String, pub start_tick: i32, pub ticks: i32, pub play_ms: u64, pub preview: Vec<u8> }
+pub struct Info { pub map: String, pub start_tick: i32, pub ticks: i32, pub play_ms: u64, pub preview: Vec<u8>, pub hill: Option<crate::koth::Hill> }
 
 impl Info {
     fn parse(b: &[u8]) -> Self {
@@ -381,7 +389,7 @@ impl Info {
         for l in String::from_utf8_lossy(b).lines() {
             let Some((k, v)) = l.split_once('=') else { continue };
             match k { "map" => i.map = v.into(), "start_tick" => i.start_tick = v.parse().unwrap_or(0), "ticks" => i.ticks = v.parse().unwrap_or(0),
-                "play_ms" => i.play_ms = v.parse().unwrap_or(0), _ => {} }
+                "play_ms" => i.play_ms = v.parse().unwrap_or(0), "hill" => i.hill = crate::koth::Hill::decode(v), _ => {} }
         }
         i
     }
@@ -404,7 +412,7 @@ impl Info {
 pub struct Player {
     pub replay: Replay,
     pub at: usize,
-    pub snaps: Arc<Mutex<Vec<(usize, Arc<Vec<u8>>)>>>,
+    pub snaps: Arc<Mutex<Vec<Snap>>>,
     pub pos: Arc<AtomicUsize>, // `at`, for the UI
     pub desync: Option<i32>, // first tick whose section hash differs from the recording's
     pub check_every_tick: Option<Vec<u64>>, // test: the original run's hash after every frame
@@ -412,18 +420,24 @@ pub struct Player {
     stash: Option<Mem>,       // the state before that draw, put back after it
     centre: (i32, i32),       // the recorded camera centre last frame
     follow: Option<(i32, i32)>,
+    /// King of the Hill as the game was at `at` (it counts here during playback, koth.rs; the recorded writes end the game)
+    pub hill: Option<crate::koth::Hill>,
 }
+
+/// A playback snapshot: the frame, the memory (lz4), King of the Hill then (it is not in the memory).
+type Snap = (usize, Arc<Vec<u8>>, Option<crate::koth::Hill>);
 
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
 impl Player {
     pub fn new(replay: Replay) -> Self {
-        let snaps = Arc::new(Mutex::new(vec![(0, replay.start.clone())]));
+        let snaps = Arc::new(Mutex::new(vec![(0, replay.start.clone(), replay.hill.clone())]));
         Self::at(replay, 0, snaps, Default::default())
     }
-    fn at(replay: Replay, at: usize, snaps: Arc<Mutex<Vec<(usize, Arc<Vec<u8>>)>>>, pos: Arc<AtomicUsize>) -> Self {
+    fn at(replay: Replay, at: usize, snaps: Arc<Mutex<Vec<Snap>>>, pos: Arc<AtomicUsize>) -> Self {
         pos.store(at, Relaxed);
-        Player { replay, at, snaps, pos, desync: None, check_every_tick: None, primed: false, stash: None, centre: (-1, -1), follow: None }
+        let hill = replay.hill.clone();
+        Player { replay, at, snaps, pos, desync: None, check_every_tick: None, primed: false, stash: None, centre: (-1, -1), follow: None, hill }
     }
     pub fn done(&self) -> bool { self.at >= self.replay.frames.len() }
 
@@ -444,7 +458,7 @@ impl Player {
         let Some(f) = self.replay.frames.get(self.at) else { return false };
         if self.at % SNAP_EVERY == 0 && self.at > 0 {
             let mut s = self.snaps.lock().unwrap();
-            if !s.iter().any(|x| x.0 == self.at) { s.push((self.at, Arc::new(snapshot(m)))); s.sort_by_key(|x| x.0); }
+            if !s.iter().any(|x| x.0 == self.at) { s.push((self.at, Arc::new(snapshot(m)), self.hill.clone())); s.sort_by_key(|x| x.0); }
         }
         unpack(&f.inp, inp);
         for (at, b) in &f.patches { m.slice_mut(mem::BASE + *at as u64, b.len()).copy_from_slice(b); }
@@ -467,6 +481,7 @@ impl Player {
                 eprintln!("replay: desync at tick {} (frame {})", m.i32(TICK_COUNTER), self.at);
             }
         }
+        if let Some(h) = &mut self.hill { h.update(m); }
         self.at += 1;
         self.pos.store(self.at, Relaxed);
     }
@@ -475,9 +490,10 @@ impl Player {
     /// player reports its position to `pos`.
     pub fn seek(&self, to: usize, pos: Arc<AtomicUsize>) -> (Mem, Player) {
         let to = to.min(self.replay.frames.len());
-        let (at, snap) = self.snaps.lock().unwrap().iter().rev().find(|s| s.0 <= to).cloned().unwrap_or((0, self.replay.start.clone()));
+        let (at, snap, hill) = self.snaps.lock().unwrap().iter().rev().find(|s| s.0 <= to).cloned().unwrap_or((0, self.replay.start.clone(), self.replay.hill.clone()));
         let mut m = restore(&snap);
         let mut p = Player::at(self.replay.clone(), at, self.snaps.clone(), pos);
+        p.hill = hill;
         let mut ret = vec![0; shc_sim::hudstate::RET_LEN];
         while p.at < to { p.run(&mut m, &mut ret); }
         p.follow = None;
@@ -552,7 +568,7 @@ enum Btn { Back, Toggle, Fwd, Speed(f32), Bar }
 /// the state from the nearest snapshot on a worker thread, and `poll` hands over the new `Live`.
 pub struct Controls {
     replay: Replay,
-    snaps: Arc<Mutex<Vec<(usize, Arc<Vec<u8>>)>>>,
+    snaps: Arc<Mutex<Vec<Snap>>>,
     pos: Arc<AtomicUsize>,
     steps: Vec<u32>, // stepping ticks before each frame (the timeline is in ticks)
     seeking: Option<(usize, Arc<AtomicUsize>, std::thread::JoinHandle<crate::live::Live>)>,
@@ -635,18 +651,14 @@ impl Controls {
         self.hits.clear();
         let mut out = vec![];
         let (bw, bh) = (1100.0 * s, 64.0 * s);
-        let (x0, y0) = ((w - bw) / 2.0, 10.0 * s);
-        Ui::fill(&mut out, [x0 - 2.0 * s, y0 - 2.0 * s, x0 + bw + 2.0 * s, y0 + bh + 2.0 * s], [0.08, 0.05, 0.02, 0.92]);
+        let (x0, y0) = ((w - bw) / 2.0, 18.0 * s); // the frame (18 px out) inside the window
         ui.img(&mut out, "Panel_BG", [x0, y0, x0 + bw, y0 + bh], [1.0, 1.0, 1.0, 0.95]);
+        ui.frame_c(&mut out, [x0, y0, x0 + bw, y0 + bh], s);
         const CREAM: [f32; 4] = [0.863, 0.896, 0.565, 1.0];
-        const GOLD: [f32; 4] = [1.0, 0.672, 0.171, 1.0];
         let mut x = x0 + 12.0 * s;
         let mut button = |ui: &mut Ui, out: &mut Vec<_>, x: &mut f32, wd: f32, label: &str, b: Btn, on: bool| {
             let r = [*x, y0 + 12.0 * s, *x + wd * s, y0 + 52.0 * s];
-            let hot = inside(r, cursor);
-            Ui::fill(out, r, if hot { [0.55, 0.42, 0.18, 0.95] } else if on { [0.42, 0.3, 0.12, 0.95] } else { [0.18, 0.13, 0.08, 0.9] });
-            Ui::fill(out, [r[0] + 2.0 * s, r[1] + 2.0 * s, r[2] - 2.0 * s, r[3] - 2.0 * s], if on { [0.36, 0.26, 0.12, 0.95] } else { [0.27, 0.2, 0.12, 0.95] });
-            ui.text_sh(out, label, (r[0] + r[2]) / 2.0, r[1] + 28.0 * s, 20.0, 0.5, if hot || on { GOLD } else { CREAM });
+            ui.text_button(out, label, r, inside(r, cursor), on, true);
             self.hits.push((r, b));
             *x += (wd + 8.0) * s;
         };
@@ -662,18 +674,17 @@ impl Controls {
         let time = format!("{} / {}", crate::saves::hms(at as u64 * 1000 / base as u64), crate::saves::hms(total as u64 * 1000 / base as u64));
         let tw = 190.0 * s;
         let r = [x + 6.0 * s, y0 + 24.0 * s, x0 + bw - tw - 16.0 * s, y0 + 40.0 * s];
-        Ui::fill(&mut out, r, [0.12, 0.08, 0.04, 0.9]);
+        ui.progress(&mut out, r, at as f32 / total as f32);
         let fx = |t: u32| r[0] + (r[2] - r[0]) * t as f32 / total as f32;
-        Ui::fill(&mut out, [r[0], r[1], fx(at), r[3]], [0.75, 0.55, 0.2, 0.95]);
-        for &(f, _) in self.snaps.lock().unwrap().iter() {
+        for &(f, ..) in self.snaps.lock().unwrap().iter() {
             let sx = fx(self.steps[f.min(self.steps.len() - 1)]);
             Ui::fill(&mut out, [sx - 1.0 * s, r[1] - 4.0 * s, sx + 1.0 * s, r[1]], CREAM);
         }
-        if let Some(f) = self.seeking.as_ref().map(|s| s.0).or(self.ff.map(|f| f.0)) {
-            let sx = fx(self.steps[f.min(self.steps.len() - 1)]);
-            Ui::fill(&mut out, [sx - 2.0 * s, r[1] - 6.0 * s, sx + 2.0 * s, r[3] + 6.0 * s], GOLD);
-        }
         if inside([r[0], r[1] - 10.0 * s, r[2], r[3] + 10.0 * s], cursor) { Ui::fill(&mut out, [cursor[0] - 1.0 * s, r[1] - 6.0 * s, cursor[0] + 1.0 * s, r[3] + 6.0 * s], [1.0, 1.0, 1.0, 0.7]); }
+        // the thumbs (Slider_Thumb, SDR_SH_Plain's): where it plays, the seek target faded
+        let thumb = |out: &mut Vec<_>, t: u32, a: f32| { let x = fx(t); ui.img(out, "Slider_Thumb", [x - 11.0 * s, r[1] - 3.0 * s, x + 11.0 * s, r[3] + 3.0 * s], [1.0, 1.0, 1.0, a]) };
+        if let Some(f) = self.seeking.as_ref().map(|s| s.0).or(self.ff.map(|f| f.0)) { thumb(&mut out, self.steps[f.min(self.steps.len() - 1)], 0.6); }
+        thumb(&mut out, at, 1.0);
         self.hits.push(([r[0], r[1] - 10.0 * s, r[2], r[3] + 10.0 * s], Btn::Bar));
         let label = if self.seeking.is_some() || self.ff.is_some() { "Seeking...".to_string() } else { time };
         ui.text_sh(&mut out, &label, x0 + bw - 14.0 * s, y0 + 30.0 * s, 20.0, 1.0, CREAM);

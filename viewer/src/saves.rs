@@ -24,7 +24,7 @@ pub fn autosave_path() -> PathBuf { rotate(&saves_dir(), secs()) }
 fn rotate(dir: &Path, now: u64) -> PathBuf {
     let mut old: Vec<PathBuf> = list(dir, "sav").into_iter().filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("Autosave-"))).collect();
     old.sort_by_key(|p| p.file_stem().and_then(|s| s.to_string_lossy()[9..].parse::<u64>().ok())); // the name carries the time
-    for p in old.iter().rev().skip(AUTOSAVES - 1) { let _ = std::fs::remove_file(p); }
+    for p in old.iter().rev().skip(AUTOSAVES - 1) { let _ = std::fs::remove_file(p); let _ = std::fs::remove_file(crate::koth::Hill::sidecar(p)); }
     dir.join(format!("Autosave-{now}.sav"))
 }
 

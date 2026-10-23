@@ -1047,14 +1047,13 @@ pub fn sands_overlay(trail: Option<(i32, i32, i32, bool)>, tick: Option<i32>, ov
     let bands = [target / 2, target * 3 / 4, target, 2 * target];
     let (lo, hi) = match r { 4 => (0, bands[0]), 3 => (bands[0], bands[1]), 2 => (bands[1], bands[2]), 1 => (bands[2], bands[3] + 1), _ => (0, 0) };
     let left = if hi > lo { (hi - t) as f32 / (hi - lo) as f32 } else { 0.0 };
-    let (x0, y0) = (w / 2.0 - 260.0 * s, 8.0 * s);
-    Ui::fill(&mut hud, [x0, y0, x0 + 520.0 * s, y0 + 64.0 * s], [0.0, 0.0, 0.0, 0.55]);
-    ui.img_fit(&mut hud, &format!("rank_{}_S", r + 1), [x0 + 6.0 * s, y0 + 4.0 * s, x0 + 86.0 * s, y0 + 44.0 * s], WHITE);
+    let (x0, y0) = (w / 2.0 - 260.0 * s, 18.0 * s); // the panel's frame (18 px out) inside the window
+    ui.panel(&mut hud, [x0, y0, x0 + 520.0 * s, y0 + 64.0 * s], s);
+    ui.img_fit(&mut hud, &format!("rank_{}_S", r + 1), [x0 + 14.0 * s, y0 + 6.0 * s, x0 + 94.0 * s, y0 + 46.0 * s], WHITE);
     ui.text_sh(&mut hud, &sands_time(t), x0 + 260.0 * s, y0 + 36.0 * s, 28.0, 0.5, WHITE);
-    ui.text_sh(&mut hud, &ui.text_of(&format!("TEXT_SANDS_OF_TIME_{:03}", 64 + r)), x0 + 512.0 * s, y0 + 30.0 * s, 18.0, 1.0, GOLD);
-    let bar = [x0 + 13.0 * s, y0 + 48.0 * s, x0 + 507.0 * s, y0 + 58.0 * s];
-    Ui::fill(&mut hud, bar, [0.15, 0.12, 0.08, 1.0]);
-    Ui::fill(&mut hud, [bar[0], bar[1], bar[0] + (bar[2] - bar[0]) * left.clamp(0.0, 1.0), bar[3]], [0.86, 0.68, 0.25, 1.0]);
+    ui.text_sh(&mut hud, &ui.text_of(&format!("TEXT_SANDS_OF_TIME_{:03}", 64 + r)), x0 + 502.0 * s, y0 + 30.0 * s, 18.0, 1.0, GOLD);
+    let bar = [x0 + 16.0 * s, y0 + 46.0 * s, x0 + 504.0 * s, y0 + 56.0 * s];
+    ui.progress(&mut hud, bar, left);
     hud
 }
 

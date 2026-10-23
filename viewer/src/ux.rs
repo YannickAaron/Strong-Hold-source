@@ -384,7 +384,6 @@ impl App {
     }
 }
 
-const PANEL: [f32; 4] = [0.0, 0.0, 0.0, 0.95]; // blended in linear light: 0.8 would still show the menu through
 const CREAM: [f32; 4] = [0xef as f32 / 255.0, 0xf3 as f32 / 255.0, 0xc6 as f32 / 255.0, 1.0];
 const GOLD: [f32; 4] = [0.95, 0.78, 0.35, 1.0];
 const DIM: [f32; 4] = [0.75, 0.75, 0.70, 1.0];
@@ -408,7 +407,7 @@ pub(crate) fn overlay(ux: &mut Ux, ui: Option<&mut Ui>, keys: &Keys, window: &Wi
     if let Some((t, _)) = &ux.toast {
         let tw = ui.text(&mut vec![], t, 0.0, 0.0, 26.0, 1.0, 0.0, 0.0, CREAM);
         let (x, y) = (w / 2.0, 90.0 * s);
-        Ui::fill(out, [x - tw / 2.0 - 18.0 * s, y - 34.0 * s, x + tw / 2.0 + 18.0 * s, y + 12.0 * s], PANEL);
+        ui.panel(out, [x - tw / 2.0 - 24.0 * s, y - 40.0 * s, x + tw / 2.0 + 24.0 * s, y + 18.0 * s], s);
         ui.text(out, t, x, y, 26.0, 1.0, 0.0, 0.5, CREAM);
     }
     if ux.help { sheet(ui, out, keys, w, h, s); }
@@ -438,10 +437,7 @@ fn sheet(ui: &mut Ui, out: &mut Vec<HudTri>, keys: &Keys, w: f32, h: f32, s: f32
     ui.s = s;
     let (pw, ph, row) = (pw * s, 640.0 * s, 36.0 * s);
     let (x0, y0) = ((w - pw) / 2.0, (h - ph) / 2.0);
-    Ui::fill(out, [x0, y0, x0 + pw, y0 + ph], PANEL);
-    for e in [[x0, y0, x0 + pw, y0 + 2.0], [x0, y0 + ph - 2.0, x0 + pw, y0 + ph], [x0, y0, x0 + 2.0, y0 + ph], [x0 + pw - 2.0, y0, x0 + pw, y0 + ph]] {
-        Ui::fill(out, e, [CREAM[0], CREAM[1], CREAM[2], 0.5]);
-    }
+    ui.panel(out, [x0, y0, x0 + pw, y0 + ph], s);
     ui.text(out, "Keyboard & Trackpad", w / 2.0, y0 + 56.0 * s, 34.0, 1.0, 0.0, 0.5, CREAM);
     let mut x = x0 + gap * s;
     for (title, rows, lw, kw) in cols {

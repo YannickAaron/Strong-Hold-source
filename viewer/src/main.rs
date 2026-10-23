@@ -2,6 +2,7 @@
 mod audio;
 mod cursor;
 mod endgame;
+mod koth; // the King of the Hill game mode (koth.rs)
 mod gestures;
 #[cfg(feature = "live")]
 mod game_replay; // game replays (game_replay.rs)
@@ -239,6 +240,16 @@ impl Cam {
     /// ponytail: moat / pitch drags keep the press height in the game (getFixedHeightMouseOver); not done here
     fn tile_at(&self, rot: i16) -> [i32; 2] { self.tile_at_px(self.cursor, rot) }
 
+    /// Window px of a game position (engine coords of rotation `rot`, fractional) on the ground: cell_px of the West
+    /// frame, raised by the nearest tile's height like a tile sprite (koth.rs's hill).
+    fn ground(&self, rot: i16, x: f32, y: f32) -> [f32; 2] {
+        const S: f32 = replay::N as f32 - 1.0;
+        let (wx, wy) = match rot { 0 => (y, S - x), 2 => (S - x, S - y), 4 => (S - y, x), _ => (x, y) }; // replay::to_west
+        let i = (wy.round().clamp(0.0, S) as usize) * replay::N + wx.round().clamp(0.0, S) as usize;
+        let h = self.heights.get(i).copied().unwrap_or(0) as f32;
+        [self.off[0] - (wx + wy) * 32.0 * self.zoom, self.off[1] + ((wx - wy) * 16.0 - h * 2.0) * self.zoom]
+    }
+
     fn tile_at_px(&self, px: [f32; 2], rot: i16) -> [i32; 2] { self.tile_pick(px, rot, true, self.use_bld) }
 
     /// The screen-centre tile for the radar's view rectangle: GameMap.PreCalcScreenCentre picks it flat
@@ -390,7 +401,10 @@ impl App {
         if let Some(m) = arg("--map") { app.scene = Some(app.build_map(&m, &names)); }
         if let Some(f) = arg("--live") {
             let t0 = Instant::now();
-            let l = live::Live::load(&f);
+            #[allow(unused_mut)]
+            let mut l = live::Live::load(&f);
+            #[cfg(feature = "live")]
+            { l.hill = koth::Hill::read_beside(std::path::Path::new(&f)); } // King of the Hill's score (koth.rs)
             println!("live {f}: loaded in {:.2}s", t0.elapsed().as_secs_f32());
             app.start_live(l, None);
             // --trail 11,4: the save is that trail's mission (0-based) at difficulty 1 (end screens; endgame write_trail_won_saves)
@@ -400,8 +414,9 @@ impl App {
         if let Some(m) = arg("--skirmish") { // --skirmish "Crater Lake": new skirmish vs the Rat, skipping the lobby
             let mut lobby = skirmish::Lobby::from_settings(skirmish::maps_dir().join(format!("{m}.map"))); // your Options colour
             if std::env::var_os("SHC_TEAMS").is_some() { (lobby.team, lobby.ais) = (1, vec![(0, 1), (1, 2)]); } // + the Snake; the Rat on your team
+            lobby.hill = std::env::var("SHC_KOTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0); // SHC_KOTH=300: King of the Hill
             match skirmish::start(&lobby) {
-                Ok(mem) => app.start_live(live::Live::from_mem(mem), None),
+                Ok(mem) => app.start_live(live::Live::from_mem(mem).with_hill(lobby.hill), None),
                 Err(e) => panic!("{e}"),
             }
         }
@@ -426,6 +441,7 @@ impl App {
                 let mut l = net.lobby.clone();
                 for h in &mut l.humans { h.team = 1; }
                 l.ais = vec![(0, 2)]; // the Rat against them (else the game is won at once)
+                l.hill = std::env::var("SHC_KOTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0); // SHC_KOTH=300: King of the Hill
                 net.set_lobby(l);
                 net.start(1, lan::DELAY)
             } else { net.started.clone().expect("the host did not start") };
@@ -641,7 +657,12 @@ impl App {
             },
             #[cfg(feature = "live")]
             menu::Go::Load(f) => match self.loaded(|| loader::load_save(&f)) {
-                Ok(m) => { (self.menu, self.last_lobby, self.campaign) = (None, None, None); self.start_live(live::Live::from_mem(m), None); }
+                Ok(m) => {
+                    (self.menu, self.last_lobby, self.campaign) = (None, None, None);
+                    let mut l = live::Live::from_mem(m);
+                    l.hill = koth::Hill::read_beside(&f); // a King of the Hill game's score (koth.rs)
+                    self.start_live(l, None);
+                }
                 Err(e) => if let Some(m) = &mut self.menu { m.error = Some(e) },
             },
             // Restart Mission: the same lobby again
@@ -707,7 +728,7 @@ impl App {
             menu::Go::Lan(s) => self.lan_start(*s), // a LAN game (lan.rs, menu/mp_menu.rs)
             #[cfg(feature = "live")]
             menu::Go::Start(l) => match self.loaded(|| skirmish::start(&l)) {
-                Ok(m) => { (self.menu, self.last_lobby, self.campaign) = (None, Some(l), None); self.start_live(live::Live::from_mem(m), None); }
+                Ok(m) => { let hill = l.hill; (self.menu, self.last_lobby, self.campaign) = (None, Some(l), None); self.start_live(live::Live::from_mem(m).with_hill(hill), None); }
                 Err(e) => self.menu.as_mut().unwrap().error = Some(e),
             },
             // Options changed settings.cfg: the running game's speed (Director.SetEngineFrameRate); Apply's screen mode
@@ -944,6 +965,26 @@ impl App {
                 }
             }
         }
+        // King of the Hill (koth.rs): a standing flag (GM 76, the pole's foot at the pivot) on the hill's centre, waving
+        // (frames 8..19): on the tower's top in its owner's colour (neutral gold for the hill player's), else on the
+        // ground in the holder's
+        if let Some(b) = p.huds.get(p.at.saturating_sub(1)).and_then(|h| h.hill.as_ref()) {
+            let (wx, wy) = replay::to_west_pub(p.world.rot, b.hill.x as i16, b.hill.y as i16);
+            let i = (wy.clamp(0, replay::N as i16 - 1) as usize) * replay::N + wx.clamp(0, replay::N as i16 - 1) as usize;
+            let [x, y] = replay::cell_px(wx, wy);
+            let r = &p.world.tiles[i];
+            let (owner, lift) = match b.fort {
+                0 => ((1..9u8).find(|&q| b.hill.holder > 0 && b.team[q as usize] == b.hill.holder).unwrap_or(0), 0.0),
+                f => (if f == b.hill.keeper { 0 } else { f as u8 }, b.height as f32 * 2.0), // on the tower's top
+            };
+            let frame = 9 + (self.start.elapsed().as_secs_f32() * 10.0) as i16 % 12;
+            // over the tower (its roof too): sorted after the footprint's front corner
+            let front = [(-2, -2), (3, -2), (-2, 3), (3, 3)].map(|(dx, dy)| { let (a, c) = replay::to_west_pub(p.world.rot, (b.hill.x + dx) as i16, (b.hill.y + dy) as i16); a as i32 - c as i32 });
+            let row = if b.fort > 0 { front.into_iter().max().unwrap_or(0) + 1 } else { replay::row(i) };
+            if let Some(s) = p.gm.body(76, frame) {
+                objs.push(((row, 41, 0, 0), s, [x, y - r[5] as f32 * 2.0 - lift], [1.0; 4], p.gm.team(76, owner as i16, &p.world.colours)));
+            }
+        }
         objs.sort_by_key(|o| o.0);
         p.objs.clear();
         p.obj_rows.clear();
@@ -1122,6 +1163,7 @@ impl App {
             let mut f = e.split(':');
             if f.next().and_then(|v| v.parse::<u32>().ok()) != Some(self.frames) { continue; }
             let (a, v) = (f.next(), f.next());
+            if let (Some(d @ ("d" | "u")), Some(u)) = (a, self.ui.as_mut()) { u.down = d == "d"; }
             match (a, v.and_then(|v| v.split_once(','))) {
                 (Some("m"), Some((x, y))) => (self.cam.cursor, self.cam.cursor_in) = ([x.parse().unwrap(), y.parse().unwrap()], true),
                 (Some("d"), _) if self.menu.is_some() => if let Some(go) = self.menu.as_mut().unwrap().click(self.cam.cursor) { self.menu_go(go, el) },
@@ -1459,6 +1501,8 @@ impl App {
     fn event(&mut self, el: &ActiveEventLoop, ev: WindowEvent) {
         // trackpad, focus / visibility, close button, F1 (ux.rs); whatever it doesn't take goes on below
         if self.ux_event(el, &ev) { return; }
+        // the held left button: the button under it looks pressed (Ui::text_button); scripted runs: SHC_INPUT d / u
+        if let (WindowEvent::MouseInput { button: MouseButton::Left, state, .. }, Some(u), false) = (&ev, self.ui.as_mut(), scripted()) { u.down = state.is_pressed(); }
         match ev {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::Resized(sz) => if let Some(g) = &mut self.gfx {
@@ -1699,7 +1743,21 @@ impl App {
                         u.edge_mask = self.cam.edge_mask;
                         match &mut self.editor {
                             Some(e) => e.draw(u, &p.huds.get(t).cloned().unwrap_or_default(), sz.width, sz.height, self.cam.cursor, u.radar),
-                            None => u.draw(&p.huds.get(t).cloned().unwrap_or_default(), sz.width, sz.height, self.cam.cursor, label, ghost.as_ref()),
+                            None => {
+                                let mut hud = u.draw(&p.huds.get(t).cloned().unwrap_or_default(), sz.width, sz.height, self.cam.cursor, label, ghost.as_ref());
+                                // King of the Hill (koth.rs): the hill on the ground under the HUD, the score bar over it
+                                // until the game is decided (the end banner takes the top then)
+                                let st = p.huds.get(t);
+                                match st.and_then(|h| h.hill.as_ref()) {
+                                    Some(b) => {
+                                        let mut under = vec![];
+                                        koth::ring(&mut under, b, |x, y| self.cam.ground(p.world.rot, x, y), self.start.elapsed().as_secs_f32());
+                                        if st.and_then(|h| h.end.as_ref()).is_none_or(|e| e.result == 0) { koth::bar(u, &mut hud, b, sz.width, sz.height); }
+                                        [under, hud].concat()
+                                    }
+                                    None => hud,
+                                }
+                            }
                         }
                     }
                     _ => vec![],

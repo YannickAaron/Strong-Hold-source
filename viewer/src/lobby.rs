@@ -6,7 +6,7 @@ use crate::skirmish::{MapInfo, ADV};
 
 /// The lobby's own clicks.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum A { Extreme(u8), AdvOpen, AdvClose, AdvEnable, Adv(usize), Remember, Sort(u8), Include(u8), Search, ClearSearch }
+pub enum A { Extreme(u8), AdvOpen, AdvClose, AdvEnable, Adv(usize), Remember, Sort(u8), Include(u8), Search, ClearSearch, Mode }
 
 /// The map list: every skirmish map found (path, info, user map), the search text (`typing`: the box has the
 /// keyboard), the sort (FileListHeaderClickedHandler: 0 name, 1 date, 2 players, 3 size, 5 balanced; ascending?),
@@ -142,6 +142,8 @@ impl Menu {
                 self.lst.all = scan(self.lst.include);
                 self.lst.dirty = true;
             }
+            // the game mode (ours): Conquest -> King of the Hill Short / Normal / Long -> Conquest
+            A::Mode => l.hill = crate::koth::TARGETS.iter().copied().find(|&t| t > l.hill).unwrap_or(0),
             A::Search => self.lst.typing = true,
             A::ClearSearch => { self.lst.filter.clear(); self.lst.dirty = true; }
         }
@@ -157,8 +159,7 @@ impl Menu {
             ui.img_fit(out, icon, self.r(x + 22.0, 661.0, 30.0, 30.0), [1.0; 4]);
         }
         let p = self.r(260.0, 660.0, 255.0, 34.0);
-        Ui::fill(out, p, if self.lst.typing { [0.55, 0.42, 0.18, 0.95] } else { [0.313, 0.248, 0.152, 0.95] });
-        Ui::fill(out, [p[0] + 2.0 * self.s, p[1] + 2.0 * self.s, p[2] - 2.0 * self.s, p[3] - 2.0 * self.s], [0.08, 0.06, 0.04, 0.95]);
+        widget(out, |o| Ui::text_field(o, p, self.lst.typing || Self::inside(p, cursor), self.s));
         self.hits.push((p, Act::Lobby(A::Search)));
         let caret = if self.lst.typing && std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis()) % 1000 < 500 { "|" } else { "" };
         if self.lst.filter.is_empty() && !self.lst.typing {
@@ -187,6 +188,12 @@ impl Menu {
             self.glow(ui, out, &ui.text_of("TEXT_SKIRMISH_MISC_019"), 1016.0, 539.0, 280.0, Some(tick(l.outposts)), Some(Act::Outposts), cursor);
         }
         if l.advanced_on() { self.label(ui, out, &ui.text_of("TEXT_NEW_CTEXT_432"), 1156.0, 580.0, 14.0, 0.5, [0.0, 0.0, 0.0, 1.0]); }
+        // the game mode (ours, koth.rs): the host's to change in a LAN lobby (it travels with it)
+        let mode = match crate::koth::TARGETS.iter().position(|&t| t == l.hill) {
+            Some(k) => format!("King of the Hill: {} ({} points)", crate::koth::LENGTHS[k], l.hill),
+            None => "Game Mode: Conquest".to_string(),
+        };
+        self.glow(ui, out, &mode, 657.0, 613.0, 345.0, None, self.mp_can_start().then_some(Act::Lobby(A::Mode)), cursor);
         self.glow(ui, out, &ui.text_of("TEXT_NEW_CTEXT_396"), 1016.0, 589.0, 280.0, None, (!lan).then_some(Act::Lobby(A::AdvOpen)), cursor);
     }
 

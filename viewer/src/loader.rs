@@ -243,7 +243,7 @@ pub fn overlay(l: &Loading, g: &crate::Gfx, ui: Option<&mut crate::hud::Ui>, mut
     (ui.s, ui.w, ui.h) = (s, sz.width, sz.height);
     let text = match gfx { Some(p) if busy => format!("Loading...   graphics {:.0} %", p * 100.0), Some(p) => format!("Loading graphics {:.0} %", p * 100.0), None => "Loading...".into() };
     let (x, y) = (24.0 * s, sz.height - 24.0 * s);
-    crate::hud::Ui::fill(&mut hud, [x - 10.0 * s, y - 34.0 * s, x + 420.0 * s, y + 10.0 * s], [0.0, 0.0, 0.0, 0.6]);
+    ui.panel(&mut hud, [x - 10.0 * s, y - 40.0 * s, x + 420.0 * s, y + 16.0 * s], s);
     ui.text_sh(&mut hud, &text, x, y, 26.0, 0.0, [0xef as f32 / 255.0, 0xf3 as f32 / 255.0, 0xc6 as f32 / 255.0, 1.0]);
     hud
 }

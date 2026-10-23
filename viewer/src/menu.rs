@@ -304,6 +304,7 @@ pub struct Menu {
     name: String,              // Save dialog: the file name typed
     confirm: Option<Confirm>,  // Save / Load: the Yes / No popup
     lst: lobby::List,          // Lobby: the map list's search / sort / include, the Advanced popup (lobby.rs)
+    mouse: ([f32; 2], bool),   // this frame's cursor and held left button (`draw`): the checkboxes' hover / press
 }
 
 /// Save / Load list order (HUD_LoadSaveRequester sortByColumn / sortByAscending): 0 name, 1 date; ascending. Kept
@@ -313,7 +314,7 @@ static SORT: std::sync::Mutex<(u8, bool)> = std::sync::Mutex::new((1, false));
 static LAST_SAVE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 impl Menu {
-    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, teams_open: false, team_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default() } }
+    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, teams_open: false, team_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default(), mouse: ([0.0; 2], false) } }
     pub fn pause(can_restart: bool) -> Self { Menu { screen: Screen::Pause, in_game: true, can_restart, ..Self::main() } }
     /// Back from a sub-screen: the pause menu in game, else the main menu.
     fn home(&self) -> Self { if self.in_game { Self::pause(self.can_restart) } else { Self::main() } }
@@ -534,6 +535,7 @@ impl Menu {
                 Some(Confirm::Overwrite(_)) => return self.save_go(),
                 Some(Confirm::Delete(p)) => {
                     self.confirm = None;
+                    let _ = std::fs::remove_file(crate::koth::Hill::sidecar(&p)); // a King of the Hill save's score
                     match std::fs::remove_file(&p) {
                         Ok(()) => { self.files.retain(|f| *f != p); self.scroll = self.scroll.min(self.files.len().saturating_sub(ROWS)); }
                         Err(e) => self.error = Some(format!("{}: {e}", p.display())),
@@ -751,21 +753,16 @@ impl Menu {
     fn text(&self, ui: &mut Ui, out: &mut Vec<HudTri>, s: &str, x: f32, y: f32, size: f32, align: f32, color: [f32; 4]) {
         ui.text_sh(out, s, self.o[0] + x * self.s, self.o[1] + y * self.s, size, align, color);
     }
-    /// Text button: dark plate, gold edge when hovered.
+    /// Text button (Ui::text_button: the game's red GlowS bar at this size).
     fn button(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, label: &str, x: f32, y: f32, w: f32, h: f32, a: Act, cursor: [f32; 2]) {
         let p = self.r(x, y, w, h);
-        let hot = cursor[0] >= p[0] && cursor[0] < p[2] && cursor[1] >= p[1] && cursor[1] < p[3];
-        if hot { crate::audio::hover(p, crate::audio::ui_id::RED_BUTTON, 1.0); }
-        Ui::fill(out, p, if hot { [0.55, 0.42, 0.18, 0.95] } else { [0.18, 0.13, 0.08, 0.9] });
-        let e = self.s * 2.0;
-        Ui::fill(out, [p[0] + e, p[1] + e, p[2] - e, p[3] - e], [0.27, 0.2, 0.12, 0.95]);
-        self.text(ui, out, label, x + w / 2.0, y + h * 0.68, h * 0.5, 0.5, if hot { GOLD } else { CREAM });
+        widget(out, |o| ui.text_button(o, label, p, Self::inside(p, cursor), false, true));
         self.hits.push((p, a));
     }
+    /// Darkened parchment (light text reads on it) in the carved BDR_SH1DEc frame.
     fn panel(&self, ui: &Ui, out: &mut Vec<HudTri>, x: f32, y: f32, w: f32, h: f32) {
         let p = self.r(x, y, w, h);
-        ui.img(out, "Panel_BG", p, [0.55, 0.5, 0.45, 0.97]);
-        Ui::fill(out, p, [0.08, 0.06, 0.04, 0.35]);
+        widget(out, |o| ui.panel(o, p, self.s));
     }
 
     /// List rows on this screen (the Save dialog's name box takes the bottom ones).
@@ -798,7 +795,7 @@ impl Menu {
             let hot = Self::inside(p, cursor) && self.confirm.is_none();
             let name = f.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned());
             let chosen = save && name == self.name.trim();
-            if hot || chosen { hover = Some(i); Ui::fill(out, p, [0.55, 0.42, 0.18, if chosen { 0.7 } else { 0.4 }]); }
+            if hot || chosen { hover = Some(i); row(out, p, hot, chosen); }
             self.text(ui, out, &name, 352.0, y + 24.0, 22.0, 0.0, if hot || chosen { GOLD } else { CREAM });
             let writing = saves::pending(&f); // just saved, still being written: shown, not loadable yet
             let kind = if writing { "Saving\u{2026}" } else { saves::Entry::kind(&f) };
@@ -808,9 +805,8 @@ impl Menu {
             self.hits.push((p, Act::Pick(i)));
             if hot && saves::deletable(&f) { // Delete, on top of the row
                 let d = self.r(1046.0, y + 4.0, 50.0, 24.0);
-                let on = Self::inside(d, cursor);
-                Ui::fill(out, d, if on { [0.45, 0.06, 0.03, 0.95] } else { [0.18, 0.13, 0.08, 0.9] });
-                self.text(ui, out, &ui.text_of("TEXT_SCENARIO_020"), 1071.0, y + 21.0, 14.0, 0.5, if on { GOLD } else { CREAM });
+                let t = ui.text_of("TEXT_SCENARIO_020");
+                widget(out, |o| ui.text_button(o, &t, d, Self::inside(d, cursor), false, true));
                 self.hits.push((d, Act::Delete(i)));
             }
         }
@@ -820,9 +816,7 @@ impl Menu {
         }
         if save { // the name box (HUD_LoadSaveRequester FileName), a blinking caret
             self.text(ui, out, &ui.text_of("TEXT_GAME_OPTIONS_028"), 352.0, 835.0, 22.0, 0.0, [0.75, 0.72, 0.6, 1.0]);
-            let p = self.r(440.0, 806.0, 660.0, 42.0);
-            Ui::fill(out, p, [0.55, 0.42, 0.18, 0.9]);
-            Ui::fill(out, [p[0] + 2.0 * self.s, p[1] + 2.0 * self.s, p[2] - 2.0 * self.s, p[3] - 2.0 * self.s], [0.08, 0.06, 0.04, 0.95]);
+            widget(out, |o| Ui::text_field(o, self.r(440.0, 806.0, 660.0, 42.0), true, self.s));
             let caret = if std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis()) % 1000 < 500 { "|" } else { "" };
             let name = self.name.clone();
             self.text(ui, out, &format!("{name}{caret}"), 452.0, 836.0, 24.0, 0.0, CREAM);
@@ -868,6 +862,7 @@ impl Menu {
 
     /// The menu's triangles for a `w`×`h` (logical px) window.
     pub fn draw(&mut self, ui: &mut Ui, w: f32, h: f32, cursor: [f32; 2]) -> Vec<HudTri> {
+        self.mouse = (cursor, ui.down);
         // FRONT_Multiplayer is a 1366×768 grid in its own Viewbox; everything else 1920×1080
         let (dw, dh) = match self.screen { Screen::Lobby(_) | Screen::Solo(_) => (1366.0, 768.0), Screen::Briefing(..) => (1365.0, 768.0), _ => (1920.0, 1080.0) };
         self.s = (w / dw).min(h / dh);
@@ -1391,20 +1386,11 @@ impl Menu {
         self.label(ui, out, &defeat, x + 26.0, 660.0, 18.0, 0.0, BLACK);
     }
 
-    /// CheckBox_Template: a 20×20 box, #631200 when off; on: #D59C20 with a #EB452F edge and a #631200 mark.
-    /// ponytail: a square mark, not the tick path
+    /// CheckBox_Template (Ui::checkbox), 20×20 at design x, y; hovered / held while the cursor is on the box.
     fn checkbox(&mut self, out: &mut Vec<HudTri>, x: f32, y: f32, on: bool, a: Option<Act>) {
-        const DARK: [f32; 4] = [0.125, 0.006, 0.0, 1.0];
         let p = self.r(x, y, 20.0, 20.0);
-        if on {
-            Ui::fill(out, p, [0.83, 0.06, 0.028, 1.0]);
-            let e = 1.0 * self.s;
-            Ui::fill(out, [p[0] + e, p[1] + e, p[2] - e, p[3] - e], [0.665, 0.332, 0.014, 1.0]);
-            let e = 5.5 * self.s;
-            Ui::fill(out, [p[0] + e, p[1] + e, p[2] - e, p[3] - e], DARK);
-        } else {
-            Ui::fill(out, p, DARK);
-        }
+        let hot = a.is_some() && Self::inside(p, self.mouse.0);
+        widget(out, |o| Ui::checkbox(o, p, on, hot, hot && self.mouse.1));
         if let Some(a) = a { self.hits.push((p, a)); }
     }
 
@@ -1530,9 +1516,10 @@ impl Menu {
         if (vis(ty, 30.0) || op.page >= 3) && op.page != 6 { self.label(ui, out, &tx(ui, title), 548.5, ty + 15.0 - sc, 24.0, 0.5, BLACK); }
         for (i, &(page, _, label, _, x, y)) in CHECKS.iter().enumerate() {
             if page != op.page || !vis(y, 23.0) { continue; }
-            let on = self.check_on(i);
-            self.checkbox(out, x, y + 1.5 - sc, on, None);
-            self.hits.push((self.r(x, y - sc, 350.0, 23.0), Act::Check(i as u8)));
+            let (on, row, p) = (self.check_on(i), self.r(x, y - sc, 350.0, 23.0), self.r(x, y + 1.5 - sc, 20.0, 20.0));
+            let hot = Self::inside(row, cursor); // the label is part of the box (CheckBox content)
+            widget(out, |o| Ui::checkbox(o, p, on, hot, hot && ui.down));
+            self.hits.push((row, Act::Check(i as u8)));
             self.label(ui, out, &tx(ui, label), x + 26.0, y + 13.5 - sc, 20.0, 0.0, BLACK);
         }
         for (i, &(page, key, label, lo, hi, tick, bx, by)) in SLIDERS.iter().enumerate() {
@@ -1627,9 +1614,7 @@ impl Menu {
             _ => {
                 let name = coa::player_name();
                 let p = self.r(398.5, 108.5, 300.0, 35.0);
-                Ui::fill(out, p, if op.typing { [0.25, 0.27, 0.29, 1.0] } else { [0.125, 0.006, 0.0, 1.0] }); // #6D7378 edge while typing
-                let e = if op.typing { self.s } else { 0.0 };
-                Ui::fill(out, [p[0] + e, p[1] + e, p[2] - e, p[3] - e], [0.125, 0.006, 0.0, 1.0]);
+                widget(out, |o| Ui::text_field(o, p, op.typing, self.s));
                 let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
                 let caret = if op.typing && ms / 500 % 2 == 0 { "|" } else { "" };
                 self.label(ui, out, &format!("{name}{caret}"), 548.5, 126.0, 18.0, 0.5, [0.905, 0.73, 0.402, 1.0]); // TextAlignment Center
@@ -1772,7 +1757,7 @@ impl Menu {
             let p = self.r(x, y + k as f32 * 34.0, w, 32.0);
             let hot = cursor[0] >= p[0] && cursor[0] < p[2] && cursor[1] >= p[1] && cursor[1] < p[3];
             let on = sel == Some(&self.files[i]);
-            if hot || on { Ui::fill(out, p, [0.55, 0.42, 0.18, if on { 0.8 } else { 0.4 }]); }
+            row(out, p, hot, on);
             self.text(ui, out, &name, x + 12.0, y + k as f32 * 34.0 + 24.0, 24.0, 0.0, if on { GOLD } else { CREAM });
             self.hits.push((p, Act::Pick(i)));
         }
@@ -1854,12 +1839,11 @@ impl Menu {
         let p = self.r(x, y - 1.5, w, 31.0);
         let hot = a.is_some() && Self::inside(p, cursor);
         if hot { crate::audio::hover(p, crate::audio::ui_id::RED_BUTTON, 1.0); }
-        let n = if hot { ["Button_02_Left_", "Button_02_Center", "Button_02_Right"] } else { ["Button_01_Left", "Button_01_Center", "Button_01_Right"] };
+        let held = hot && ui.down;
         let c = [1.0, 1.0, 1.0, alpha];
-        atlas_part(out, n[0], FULL, self.r(x, y - 1.5, 29.5, 31.0), c);
-        tiled(out, 0, n[1], self.r(x + 29.5, y - 1.5, w - 59.0, 31.0), 29.5 * self.s, 31.0 * self.s, c);
-        atlas_part(out, n[2], FULL, self.r(x + w - 29.5, y - 1.5, 29.5, 31.0), c);
-        let color = [0.905, 0.73, 0.402, alpha * if a.is_some() { 1.0 } else { 0.6 }]; // #F4DEAA
+        ui.glow_bar(out, p, hot, true, if held { [0.6, 0.6, 0.6, alpha] } else { c }); // linear: Ui::text_button's 0.8
+        let color = [0.905, 0.73, 0.402, alpha * if a.is_none() { 0.6 } else if held { 0.9 } else { 1.0 }]; // #F4DEAA
+        let y = y + held as u8 as f32;
         match tick {
             Some((t, tx)) => { self.label(ui, out, text, x + 12.0, y + 15.0, 16.0, 0.0, color); ui.img_fit(out, t, self.r(x + tx, y - 0.5, 29.0, 29.0), c); }
             None => { self.label(ui, out, text, x + w / 2.0, y + 15.0, 16.0, 0.5, color); }
@@ -2351,6 +2335,21 @@ fn key_name(ui: &Ui, k: &str) -> String {
 
 /// The menu's colours are linear: encode a finished triangle list for sprite.wgsl (which takes sRGB).
 fn encode(out: &mut [HudTri]) { for (_, vs) in out.iter_mut() { for v in vs.iter_mut() { for c in &mut v.color[..3] { *c = srgb(*c) } } } }
+
+/// A list row's background (Template.ListViewItem): Brush.Item.Over #B52E0C, Selected #A11F08, SelectedOver #C2240C.
+fn row(out: &mut Vec<HudTri>, p: [f32; 4], hot: bool, sel: bool) {
+    let c = match (hot, sel) { (true, true) => [0.539, 0.018, 0.004, 1.0], (false, true) => [0.356, 0.014, 0.002, 1.0], (true, false) => [0.462, 0.027, 0.004, 1.0], _ => return };
+    Ui::fill(out, p, c);
+}
+
+/// Ui's widgets (`Ui::text_button`, `Ui::text_field`) colour in sRGB like the HUD: drawn into a menu list, back to
+/// linear for `encode`.
+pub(crate) fn widget(out: &mut Vec<HudTri>, draw: impl FnOnce(&mut Vec<HudTri>)) {
+    let n = out.len();
+    draw(out);
+    let lin = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    for (_, vs) in &mut out[n..] { for v in vs.iter_mut() { for c in &mut v.color[..3] { *c = lin(*c) } } }
+}
 
 /// Linear -> sRGB (the inverse of sprite.wgsl's decode).
 fn srgb(c: f32) -> f32 { if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 } }
