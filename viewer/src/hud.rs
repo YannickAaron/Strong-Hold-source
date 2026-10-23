@@ -82,6 +82,7 @@ pub struct HudState {
     pub keep_storage: [i32; 25], // +1436: starting goods still in the keep (OST_STARTING_GOODS rows)
     pub left: [i16; 10],         // +1984: editor counts / limits: people, buildings, vegetation, rocks, tribes (OST_PEOPLE_LEFT)
     pub got_market: u8,          // +2587: bits 4 granary, 8 armoury placed (the starting goods' speech)
+    pub lord_only_selected: u8,  // +2586: the selection is the lord alone (modern controls: no right-click menu)
     pub report: reports::Data, // reports book values (reports.rs)
     pub mouse_selector_state: u8, // +2812: ≥ 4 blocks the right-click menu (HUD_RightClick.Open)
     pub speed: f32,      // --live: game speed (sim ticks/s) the sim thread runs at; 0 = unknown (replay)
@@ -226,7 +227,7 @@ impl HudState {
             bed_avail: std::array::from_fn(|k| u(2796 + k)), guild_avail: std::array::from_fn(|k| u(2817 + k)), ladderman_cost: u(2832),
             eunuch_cost: u(2833), siege: std::array::from_fn(|k| if k < 6 { u(1025 + k) } else { u(2609) }), patrol_mode: u(1037), get_ammo: u(1031), cows: u(1032), attack_here: u(1033), rocks: u(1034), weapon_avail: std::array::from_fn(|k| u(1047 + k)), costs: Table::default(), coords: Table::default(),
             keep_storage: std::array::from_fn(|k| i32::from_le_bytes(std::array::from_fn(|j| u(1436 + 4 * k + j)))),
-            left: std::array::from_fn(|k| s2(1984 + 2 * k)), got_market: u(2587),
+            left: std::array::from_fn(|k| s2(1984 + 2 * k)), got_market: u(2587), lord_only_selected: u(2586),
             game_paused: b.get(2200).copied().unwrap_or(0), report: reports::Data::decode(b), mouse_selector_state: u(2812), speed: 0.0, end: None, ev: Events::default(),
             gate_state: i(976), dog_cage: s(968), hp: [s(982), s(984), s(986)],
             inn: [i(1008), s(1012) as i32, s(1014) as i32, s(1016) as i32, s(1018) as i32, s(1020) as i32, s(1022) as i32],
@@ -2001,6 +2002,14 @@ impl Ui {
         out
     }
 
+    /// Whether a right press on the map keeps HUD_RightClick shut: a tool held (the press only drops it), over the HUD,
+    /// the troops or a building panel up, the mouse selector busy (HUD_RightClick.Open), or with the modern controls the
+    /// lord alone selected (EditorDirector: that press orders him).
+    pub fn rclick_blocked(st: &HudState, tool: bool, over: bool, sh1_rts: bool) -> bool {
+        tool || over || (st.app_mode == 14 && matches!(st.app_sub_mode, 61 | 62)) || st.app_mode == 16 || st.mouse_selector_state >= 4
+            || (st.lord_only_selected > 0 && !sh1_rts)
+    }
+
     /// HUD_RightClick.Open at window px `at`: all four icons, the compass of rotation `rot`.
     pub fn rclick_open(&mut self, at: [f32; 2], rot: i16) {
         self.rclick = Some(RightClick { at, centre: at, taken: false, rot_at: None, flat_held: false, show: [true; 4], rot, zoomed: false, flat: self.flat });
@@ -2277,6 +2286,19 @@ fn panel_buttons_via_hud() {
     assert_eq!(h.app_mode, 16, "stockpile panel not open");
     press(&mut u, &mut l, &h, Hit::Delete(pile));
     assert_ne!(b::state(l.mem(), pile), 2, "stockpile still standing");
+}
+
+/// HUD_RightClick stays shut while troops are selected, and with the modern controls while the lord alone is (that
+/// right press is his order); the SH1 controls open it over a lone lord, and nothing selected always opens it.
+#[test]
+fn rclick_blocked_by_selection() {
+    let free = HudState { app_mode: 14, app_sub_mode: 10, ..Default::default() };
+    let troops = HudState { app_sub_mode: 61, ..free.clone() };
+    let lord = HudState { lord_only_selected: 1, ..free.clone() };
+    assert!(!Ui::rclick_blocked(&free, false, false, false) && !Ui::rclick_blocked(&free, false, false, true));
+    assert!(Ui::rclick_blocked(&troops, false, false, false) && Ui::rclick_blocked(&troops, false, false, true));
+    assert!(Ui::rclick_blocked(&lord, false, false, false), "modern controls: the lord's order");
+    assert!(!Ui::rclick_blocked(&lord, false, false, true), "SH1 controls: the menu over a lone lord");
 }
 
 /// The troops panel's type buttons: a left click keeps only that type (1022), a right click drops it (1021).

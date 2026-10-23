@@ -569,10 +569,7 @@ impl App {
         self.drag_from = None;
         if let Some((l, st)) = self.play.as_ref().and_then(|p| Some((p.live.as_ref()?, &p.huds[0]))) {
             l.send(live::Cmd::Troops(live::TroopIn::Right(true)));
-            // HUD_RightClick.Open's conditions: not with a tool held (the press only drops it), the troop or a building
-            // panel up or the mouse selector busy (SH1 RTS controls: a lone selected lord doesn't block it)
-            let busy = tool || over || (st.app_mode == 14 && matches!(st.app_sub_mode, 61 | 62)) || st.app_mode == 16 || st.mouse_selector_state >= 4;
-            if let (Some(u), false) = (self.ui.as_mut(), busy) { u.rclick_open(self.cam.cursor, l.rot); }
+            if let (Some(u), false) = (self.ui.as_mut(), hud::Ui::rclick_blocked(st, tool, over, menu::sh1_rts())) { u.rclick_open(self.cam.cursor, l.rot); }
         }
     }
 
@@ -888,29 +885,31 @@ impl App {
     fn rebuild_objs(&mut self) {
         /// A chimp's base point (replay::chimp_base), slid toward its 0x34 next tile: GameMap's interp from the
         /// record's position to nextPos over (k7 + 1) engine frames, unless the heights differ by more than 1.25
-        /// units; instant at fast-forward.
-        fn chimp_base(p: &Play, id: i32, r: &replay::Rec) -> [f32; 2] {
+        /// units; instant at fast-forward. Past half the way, also that tile's row and layer delay (k17): interpChimp
+        /// sorts the chimp there from then on (nextBaseSortLayer), so one walking behind a building goes under it.
+        fn chimp_base(p: &Play, id: i32, r: &replay::Rec) -> ([f32; 2], Option<(i32, i32)>) {
             let b = replay::chimp_base(r, p.world.tele.get(&id).map_or(0, |t| t[17]));
-            let Some(&(n, seq)) = p.world.next.get(&id) else { return b };
+            let Some(&(n, seq)) = p.world.next.get(&id) else { return (b, None) };
             let dt = if p.ff { 0.0 } else { 1.0 / p.rate.max(1.0) };
-            if dt == 0.0 || (r[5] - n[5]).abs() as f32 / 32.0 > 1.25 { return b; }
+            if dt == 0.0 || (r[5] - n[5]).abs() as f32 / 32.0 > 1.25 { return (b, None); }
             let since = p.world.applied_at.map_or(0.0, |t| t.elapsed().as_secs_f32());
             let f = (((p.world.applies - seq) as f32 * dt + since) / ((n[7] as f32 + 1.0) * dt)).clamp(0.0, 1.0);
             let to = replay::sprite_px(&n, n[8], n[9], -n[5]);
-            [b[0] + (to[0] - b[0]) * f, b[1] + (to[1] - b[1]) * f]
+            let next = (f > 0.5).then(|| (replay::row(n[2] as usize * replay::N + n[1] as usize), n[17] as i32));
+            ([b[0] + (to[0] - b[0]) * f, b[1] + (to[1] - b[1]) * f], next)
         }
         let mut p = self.play.take().unwrap();
         // sort key = Unity sortingOrder (−20000 + row*49 + sub, CSHARP_NOTES §2 "Depth"): (row + layerDelay, sub), then
         // Unity z = 200 + y + id%10000/10000 (farther = higher on screen = first)
         let mut objs: Vec<((i32, i32, i32, i32), usize, [f32; 2], [f32; 4], [f32; 4])> = vec![];
         for (&(_, id), r) in &p.world.objs {
+            let (base, next) = if r[0] == 2 { chimp_base(&p, id, r) } else { ([0.0; 2], None) };
             // GameMap.addUpdateOrg / addUpdateChimp / addUpdateBuildingAnim; k5 = -heightAboveGround×32 for org + chimp
             let pos = match r[0] {
                 1 => replay::sprite_px(r, 14, 8, -r[5]),
                 2 => { // addUpdateChimp: Chimp.position, sliding toward the 0x34 next tile
-                    let b = chimp_base(&p, id, r);
                     let v = replay::pivot((r[20] & 0xff) as i32);
-                    [b[0] + v[0], b[1] + v[1] + r[17] as f32 * 2.0]
+                    [base[0] + v[0], base[1] + v[1] + r[17] as f32 * 2.0]
                 }
                 3 => replay::sprite_px(r, r[8], r[9], -r[5]), // addUpdateFly
                 6 => replay::sprite_px(r, 14, 8, 0),              // addUpdateWhiteCap: GM 173
@@ -939,7 +938,8 @@ impl App {
                 9 => 41, // pixie on the ground (hiMode): over the units
                 _ => if r[5] >= 25 { 1 } else { 16 + r[5] as i32 },
             };
-            let key = (replay::row(r[2] as usize * replay::N + r[1] as usize) + delay as i32, sub, (pos[1] * 64.0) as i32, id % 10000);
+            let mut key = (replay::row(r[2] as usize * replay::N + r[1] as usize) + delay as i32, sub, (pos[1] * 64.0) as i32, id % 10000);
+            if let Some((row, d)) = next { (key.0, key.1) = (row + d, 8 + if d > 0 { 34 } else { 0 }); } // interpChimp
             let file = match r[0] { 6 => 173, 7 => 54, _ => r[3] };
             match p.gm.body(file, r[4]) { Some(s) => objs.push((key, s, pos, color, team)), None => *p.misses.entry(file).or_default() += 1 }
             // the chimp's other sprites (addUpdateChimp), each in its sortingOrder slot after the body (+8):
@@ -947,7 +947,7 @@ impl App {
             // from record 0x33: siege flag GM 189 k4 at (k1, k2) (+11), health bar / selection GM 16 k10 at (k8, k9)
             // (+12), oil / recharge k11 at (k8 if > 400, k12) (+13), target GM 172 k17 at (k18, k19) (+14)
             if r[0] == 2 {
-                let b = chimp_base(&p, id, r);
+                let b = base;
                 let v = replay::pivot((r[20] & 0xff) as i32);
                 let slot = |k: i32| (key.0, key.1 + k, key.2, key.3);
                 let mut add = |k: i32, file: i16, img: i16, at: [f32; 2], a: f32, team: [f32; 4]| match p.gm.body(file, img) {
@@ -1712,17 +1712,19 @@ impl App {
                     (None, None) => { built = self.build_tris(self.start.elapsed().as_secs_f32()); (&built, &[]) }
                 };
                 // --live: the sim's cursor sprite (draw record type 5: offset 1/2, body 3/4, second body 13/14) at the
-                // mouse, half size, on top (GameMap.Update / mouseCursorGO)
+                // mouse, half size, on top (GameMap.Update / mouseCursorGO). × the window's scale factor: our world starts
+                // at one sprite px per device px, so on a Retina screen the original's half size came out half as big
+                // as the game shows it on a normal screen (the pointer next to it is 32 points either way)
                 let (cur, cur_rows): (Vec<Tri>, Vec<i32>);
                 let (tris, rows) = match self.play.as_ref().and_then(|p| Some((p, p.live.as_ref()?.cursor?))) {
                     Some((p, r)) => {
-                        let c = &self.cam;
-                        let pos = [(c.cursor[0] - c.off[0]) / c.zoom + r[1] as f32 * 2.0, (c.cursor[1] - c.off[1]) / c.zoom + r[2] as f32 * 2.0];
+                        let (c, k) = (&self.cam, g.window.scale_factor() as f32);
+                        let pos = [(c.cursor[0] - c.off[0]) / c.zoom + r[1] as f32 * 2.0 * k, (c.cursor[1] - c.off[1]) / c.zoom + r[2] as f32 * 2.0 * k];
                         let mut t = tris.to_vec();
                         // mouseCursorGO with the record's transparency k11 (the move cursor's faint first sprite), GO2 opaque
                         let a = replay::obj_alpha(&r).unwrap_or(0.0);
                         for (f, i, a) in [(r[3], r[4], a), (r[13], r[14], 1.0)] {
-                            if let Some(s) = p.gm.body(f, i).filter(|_| f > 0) { self.push_c(&mut t, s, pos, 0.5, [1.0, 1.0, 1.0, a], [0.0; 4]); }
+                            if let Some(s) = p.gm.body(f, i).filter(|_| f > 0) { self.push_c(&mut t, s, pos, 0.5 * k, [1.0, 1.0, 1.0, a], [0.0; 4]); }
                         }
                         cur_rows = rows.iter().copied().chain(std::iter::repeat(i32::MAX)).take(t.len()).collect();
                         cur = t;

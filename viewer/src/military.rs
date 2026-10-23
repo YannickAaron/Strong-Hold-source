@@ -438,6 +438,22 @@ mod tests {
         assert_eq!(selected(l.mem()), vec![i], "the click kept the group");
     }
 
+    /// A click on the own lord selects him alone: the engine's HUD state says so (+2586 lordOnlySelected), which keeps
+    /// the right-click menu shut with the modern controls (hud::Ui::rclick_blocked).
+    #[test]
+    fn lone_lord_flag() {
+        let Some(mut l) = save("Crater Lake-1test.sav") else { return };
+        l.step();
+        let lord = own(l.mem(), 0x37)[0];
+        let w = at(&l, lord);
+        click(&mut l, w);
+        l.step();
+        let h = l.hud();
+        println!("selected {:?}, lord {lord}, panel {} / {}, lord only {}", selected(l.mem()), h.app_mode, h.app_sub_mode, h.lord_only_selected);
+        assert_eq!(selected(l.mem()), vec![lord]);
+        assert_eq!(h.lord_only_selected, 1);
+    }
+
     /// The troops panel's type filter: Troops_DeSelectExceptType (1022) keeps only that type, Troops_DeSelectType
     /// (1021) drops it.
     #[test]
