@@ -121,6 +121,19 @@ fn spawn_tick_not_drawn_as_flat_quad() {
     assert_eq!(obj_alpha(&org), None);
 }
 
+/// A chimp's slide to its 0x34 next tile.
+#[derive(Clone, Copy)]
+pub struct Slide {
+    pub n: Rec,                    // the 0x34 record (k1 / k2 in West frame)
+    pub seq: u64,                  // `applies` when it came
+    /// GameMap's nextTimeStart. Not the original's: DE starts each slide at the record's position when it comes, so a
+    /// horse whose last slide ended early or late jumped, and stood still for the frame it came in. Here it starts
+    /// where and when the chimp was last drawn (`from`, the frame before), so each step carries on from the last.
+    pub at: std::time::Instant,
+    pub from: Option<[f32; 2]>,
+    pub dt: Option<f32>, // main.rs: the tick length it slides by, fixed when first drawn (GameMap: nextTimeEnd)
+}
+
 pub struct World {
     pub tiles: Vec<Rec>, // per game tile (y*800+x, West frame): last type-0 record; file (k3) 0 = nothing drawn
     pub objs: BTreeMap<(i16, i32), Rec>, // (type, id) -> last record, k1/k2 in West frame
@@ -129,19 +142,22 @@ pub struct World {
     /// position + (k8, -k9)/32 units; siege flag k4; oil k11; target k17), sent right after the chimp record
     pub marks: BTreeMap<i32, Rec>,
     /// chimp id -> its continuation 0x34 (k1 / k2 next tile, West frame like k1 / k2 of objs; k8 / k9 next pixel
-    /// offset, k5 next −height ×32, k7 frames to get there, k17 next layer delay) and `applies` when it came: the
-    /// chimp slides there (GameMap addUpdateChimp `interp`)
-    pub next: BTreeMap<i32, (Rec, u64)>,
+    /// offset, k5 next −height ×32, k7 frames to get there, k17 next layer delay): the chimp slides there (GameMap
+    /// addUpdateChimp `interp`)
+    pub next: BTreeMap<i32, Slide>,
     /// chimp id -> its continuation 0x35 (k17 tele_x_adjust half pixels, k18 / k19 assassin rope x / y, k16 fade)
     pub tele: BTreeMap<i32, Rec>,
     pub applies: u64, // `apply` calls so far (one per tick / frame of records)
-    pub applied_at: Option<std::time::Instant>, // when the last `apply` came (interpolation clock)
+    /// chimp id -> its base point as last drawn (main.rs rebuild_objs, world px), and when: where and when its next
+    /// slide starts
+    pub drawn: HashMap<i32, [f32; 2]>,
+    pub drawn_at: Option<std::time::Instant>,
     pub colours: [u8; 9], // the players' colours (`colours`, from the ROTATION record; identity until one comes)
 }
 
 impl World {
     pub fn new() -> Self {
-        Self { tiles: vec![[0; 21]; N * N], objs: BTreeMap::new(), rot: 6, marks: BTreeMap::new(), next: BTreeMap::new(), tele: BTreeMap::new(), applies: 0, applied_at: None, colours: IDENTITY }
+        Self { tiles: vec![[0; 21]; N * N], objs: BTreeMap::new(), rot: 6, marks: BTreeMap::new(), next: BTreeMap::new(), tele: BTreeMap::new(), applies: 0, drawn: HashMap::new(), drawn_at: None, colours: IDENTITY }
     }
 
     /// Rotation changed: move everything already stored into the new frame (all records live in West frame
@@ -157,7 +173,9 @@ impl World {
             tiles[y as usize * N + x as usize] = t;
         }
         self.tiles = tiles;
-        for r in self.objs.values_mut().chain(self.next.values_mut().map(|n| &mut n.0)) { (r[1], r[2]) = remap(self.rot, r[1], r[2]); }
+        for r in self.objs.values_mut().chain(self.next.values_mut().map(|s| &mut s.n)) { (r[1], r[2]) = remap(self.rot, r[1], r[2]); }
+        self.drawn.clear(); // world px of the old frame
+        for s in self.next.values_mut() { s.from = None; }
         self.rot = rot;
         dirty.extend(0..N * N);
     }
@@ -166,7 +184,6 @@ impl World {
     pub fn apply(&mut self, tick: &[Rec], dirty: &mut Vec<usize>) {
         let mut chimp = None; // the last chimp record: continuations 0x35, 0x33, 0x34 follow it
         self.applies += 1;
-        self.applied_at = Some(std::time::Instant::now());
         for (k, r) in tick.iter().enumerate() {
             if r[0] == ROTATION {
                 if r[1] != self.rot { self.rotate(r[1], dirty); }
@@ -179,7 +196,9 @@ impl World {
                 (0x34, Some(id)) => {
                     let mut n = *r;
                     (n[1], n[2]) = to_west(self.rot, n[1], n[2]);
-                    self.next.insert(id, (n, self.applies));
+                    let now = std::time::Instant::now();
+                    let from = self.drawn.get(&id).copied().filter(|_| self.drawn_at.is_some_and(|t| now - t < std::time::Duration::from_millis(100)));
+                    self.next.insert(id, Slide { n, seq: self.applies, at: from.and(self.drawn_at).unwrap_or(now), from, dt: None });
                     continue;
                 }
                 (0x33..=0x35, None) => continue,
@@ -193,7 +212,7 @@ impl World {
                 // one engine frame later in a journey: k7 bit 0x4000) keeps sliding. A horse sends a new frame every 2
                 // ticks but a step every 4..6, so dropping the slide here snapped it back to the step's start mid-step
                 let slides = tick[k + 1..].iter().take_while(|q| (0x33..=0x35).contains(&q[0])).any(|q| q[0] == 0x34);
-                let running = |&(n, seq): &(Rec, u64)| self.applies - seq <= n[7].max(0) as u64 + (r[7] & 0x4000 != 0) as u64;
+                let running = |s: &Slide| self.applies - s.seq <= s.n[7].max(0) as u64 + (r[7] & 0x4000 != 0) as u64;
                 if slides || !self.next.get(&id).is_some_and(running) { self.next.remove(&id); }
             }
             let mut r = *r;
@@ -211,7 +230,10 @@ impl World {
                 // orgs, chimps, flies / projectiles, building anims, pixies (8 on walls, 9 on the ground: order markers)
                 1 | 2 | 3 | 4 | 8 | 9 => {
                     let id = if r[0] == 4 { r[10] as i32 + r[19] as i32 * 10000 } else { r[10] as i32 };
-                    if r[3] == 0 { self.objs.remove(&(r[0], id)); } else { self.objs.insert((r[0], id), *r); }
+                    if r[3] == 0 {
+                        self.objs.remove(&(r[0], id));
+                        if r[0] == 2 { self.drawn.remove(&id); }
+                    } else { self.objs.insert((r[0], id), *r); }
                 }
                 // whitecaps (k4 < 0 deletes) and wall fill-ins (k3 == 0 deletes): one per tile
                 6 | 7 if x < N && y < N => {
@@ -522,4 +544,25 @@ fn horse_keeps_sliding_on_frame_records() {
     w.apply(&[], &mut vec![]);
     w.apply(&[chimp(199, 10)], &mut vec![]);
     assert!(!w.next.contains_key(&7), "after the step: at the record's position");
+}
+
+/// A slide starts where and when the chimp was last drawn (if that was recent), so a step carries on from the last one;
+/// with no recent drawing it starts at the record's position, now.
+#[test]
+fn slide_starts_where_last_drawn() {
+    let step = |w: &mut World| {
+        let mut c = [0i16; 21];
+        (c[0], c[1], c[2], c[3], c[4], c[10]) = (2, 473, 475, 44, 183, 7);
+        let mut n = [0i16; 21];
+        (n[0], n[1], n[2], n[7]) = (0x34, 472, 475, 3);
+        w.apply(&[c, n], &mut vec![]);
+        w.next[&7]
+    };
+    let mut w = World::new();
+    let t = std::time::Instant::now();
+    (w.drawn_at, w.drawn) = (Some(t), HashMap::from([(7, [10.0, 20.0])]));
+    let s = step(&mut w);
+    assert_eq!((s.from, s.at), (Some([10.0, 20.0]), t));
+    w.drawn_at = Some(t - std::time::Duration::from_secs(1)); // drawn long ago (paused, off screen): not from there
+    assert_eq!(step(&mut w).from, None);
 }

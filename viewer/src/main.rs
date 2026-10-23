@@ -452,6 +452,11 @@ struct Play {
     rate: f32, // ticks/s (game speed)
     ff: bool,  // Tab held: fast-forward, ticks as fast as the sim runs
     acc: f32,
+    /// --live: the sim's real tick length in s (slides last k7 + 1 ticks), longer than 1 / rate while a big battle
+    /// keeps the sim busy; and the (time, sim tick, rate) it was last measured at
+    tick_s: f32,
+    tick_mark: Option<(Instant, i32, f32)>,
+    now: Instant, // this frame's clock for the slides: every rebuild_objs of a frame draws them at the same instant
     misses: HashMap<i16, u32>, // GM file -> records without a sprite
     title: (bool, u32, i64), // (playing, rate bits, tick if paused) the window title last showed
     live: Option<live::Thread>, // --live: records come from the Rust sim thread, `huds` holds just the latest
@@ -913,7 +918,7 @@ impl App {
     /// Shared by --replay and --live: tick 0's tiles become the static buffer, then ticks 1..=start are applied.
     fn start_play(&mut self, ticks: Vec<Vec<replay::Rec>>, huds: Vec<hud::HudState>, start: usize, names: &[String]) {
         let mut p = Play { ticks, huds, at: 0, world: replay::World::new(), gm: replay::Gm::new(names), slot: vec![], dirty: vec![],
-            objs: vec![], obj_rows: vec![], playing: std::env::var_os("SHC_SHOT").is_none(), rate: skirmish::Settings::load().game_speed(), ff: false, acc: 0.0, misses: HashMap::new(), title: (false, 0, -1), live: None };
+            objs: vec![], obj_rows: vec![], playing: std::env::var_os("SHC_SHOT").is_none(), rate: skirmish::Settings::load().game_speed(), ff: false, acc: 0.0, tick_s: 0.0, tick_mark: None, now: Instant::now(), misses: HashMap::new(), title: (false, 0, -1), live: None };
         let mut dirty = vec![];
         p.world.apply(&p.ticks[0], &mut dirty);
         // Slots only for cells tick 0 draws (it resends every tile; GM 38 = off-map ring, never drawn).
@@ -973,20 +978,38 @@ impl App {
     }
 
     fn rebuild_objs(&mut self) {
-        /// A chimp's base point (replay::chimp_base), slid toward its 0x34 next tile: GameMap's interp from the
-        /// record's position to nextPos over (k7 + 1) engine frames, unless the heights differ by more than 1.25
-        /// units; instant at fast-forward. Past half the way, also that tile and its layer delay (k17): interpChimp
-        /// sorts the chimp there from then on (nextBaseSortLayer), so one walking behind a building goes under it.
+        /// A chimp's base point (replay::chimp_base), slid toward its 0x34 next tile: GameMap's interp to nextPos over
+        /// (k7 + 1) engine frames from when the slide came (nextTimeStart), unless the heights differ by more than
+        /// 1.25 units; instant at fast-forward. Past half the way, also that tile and its layer delay (k17):
+        /// interpChimp sorts the chimp there from then on (nextBaseSortLayer), so one walking behind a building goes
+        /// under it. Not the original's: a frame is the sim's measured tick (`tick_s`), and the slide starts where the
+        /// chimp was drawn (`Slide::from`), not at the record's position: a galloping horse no longer stops at the end
+        /// of each step the sim takes late, or jumps on one it takes early.
         fn chimp_base(p: &Play, id: i32, r: &replay::Rec) -> ([f32; 2], Option<(i32, i32, i32)>) {
             let b = replay::chimp_base(r, p.world.tele.get(&id).map_or(0, |t| t[17]));
-            let Some(&(n, seq)) = p.world.next.get(&id) else { return (b, None) };
-            let dt = if p.ff { 0.0 } else { 1.0 / p.rate.max(1.0) };
+            let Some(s) = p.world.next.get(&id) else { return (settle(p, id, b), None) };
+            let n = s.n;
+            let dt = if p.ff { 0.0 } else { s.dt.unwrap_or(0.0) };
             if dt == 0.0 || (r[5] - n[5]).abs() as f32 / 32.0 > 1.25 { return (b, None); }
-            let since = p.world.applied_at.map_or(0.0, |t| t.elapsed().as_secs_f32());
-            let f = (((p.world.applies - seq) as f32 * dt + since) / ((n[7] as f32 + 1.0) * dt)).clamp(0.0, 1.0);
+            // DE's slide ends after k7 + 1 ticks, but a step in a journey (k7 0x4000) often takes one more and ticks come
+            // in at whole frames: a little longer here, so the horse doesn't stop before each step (it can't fall
+            // behind: the next slide starts where it is)
+            let extra = if r[7] & 0x4000 != 0 { 1.0 } else { 0.5 };
+            let f = (p.now.saturating_duration_since(s.at).as_secs_f32() / ((n[7] as f32 + 1.0 + extra) * dt)).clamp(0.0, 1.0);
+            let a = s.from.filter(|a| (a[0] - b[0]).hypot(a[1] - b[1]) < 48.0).unwrap_or(b); // farther: a jump, keep it
             let to = replay::sprite_px(&n, n[8], n[9], -n[5]);
             let next = (f > 0.5).then(|| (n[1] as i32, n[2] as i32, n[17] as i32));
-            ([b[0] + (to[0] - b[0]) * f, b[1] + (to[1] - b[1]) * f], next)
+            ([a[0] + (to[0] - a[0]) * f, a[1] + (to[1] - a[1]) * f], next)
+        }
+        /// Not the original's: a chimp without a slide whose position moved a little since the last frame (a step a
+        /// crowd blocked, so the record still holds its start; a step that began elsewhere) eases there over ~30 ms
+        /// instead of jumping. 200 knights in a crowd jumped some 35 times a second.
+        fn settle(p: &Play, id: i32, b: [f32; 2]) -> [f32; 2] {
+            let (Some(d), Some(t)) = (p.world.drawn.get(&id), p.world.drawn_at) else { return b };
+            let (e, gap) = (p.now.saturating_duration_since(t).as_secs_f32(), (b[0] - d[0]).hypot(b[1] - d[1]));
+            if p.ff || e > 0.1 || !(0.25..48.0).contains(&gap) { return b; }
+            let k = 1.0 - (-e / 0.03).exp();
+            [d[0] + (b[0] - d[0]) * k, d[1] + (b[1] - d[1]) * k]
         }
         let mut p = self.play.take().unwrap();
         // a tile whose graphic rises above its diamond: the engine's building height k18, or over 100 px (buildings,
@@ -1000,8 +1023,12 @@ impl App {
         // sort key = Unity sortingOrder (−20000 + row*49 + sub, CSHARP_NOTES §2 "Depth"): (row + layerDelay, sub), then
         // Unity z = 200 + y + id%10000/10000 (farther = higher on screen = first)
         let mut objs: Vec<((i32, i32, i32, i32), usize, [f32; 2], [f32; 4], [f32; 4], f32)> = vec![]; // .., scale
+        let mut drawn = vec![];
+        let dt = p.tick_s.max(1.0 / p.rate.max(1.0));
+        for s in p.world.next.values_mut() { s.dt.get_or_insert(dt); }
         for (&(_, id), r) in &p.world.objs {
             let (base, next) = if r[0] == 2 { chimp_base(&p, id, r) } else { ([0.0; 2], None) };
+            if r[0] == 2 { drawn.push((id, base)); }
             // GameMap.addUpdateOrg / addUpdateChimp / addUpdateBuildingAnim; k5 = -heightAboveGround×32 for org + chimp
             let pos = match r[0] {
                 1 => replay::sprite_px(r, 14, 8, -r[5]),
@@ -1113,6 +1140,8 @@ impl App {
             self.push_c(&mut p.objs, s, pos, k, color, team);
             p.obj_rows.resize(p.objs.len(), key.0);
         }
+        p.world.drawn.extend(drawn);
+        p.world.drawn_at = Some(p.now);
         self.play = Some(p);
     }
 
@@ -1191,6 +1220,18 @@ impl App {
                         wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(live::RADAR_N as u32 * 4), rows_per_image: None }, h.radar.size());
                     u.radar = true;
                 }
+            }
+            // the sim's real tick length (chimp_base): a running average over the ticks that came, per speed
+            if applied {
+                let now = Instant::now();
+                match p.tick_mark {
+                    Some((t0, k0, r)) if r == rate && p.playing => {
+                        let s = (now - t0).as_secs_f32() / (l.tick - k0).max(1) as f32;
+                        if l.tick > k0 && s < 0.25 { p.tick_s += (s - p.tick_s) * 0.1; }
+                    }
+                    _ => p.tick_s = 1.0 / rate,
+                }
+                p.tick_mark = Some((now, l.tick, rate));
             }
             n = 0;
         }
@@ -1774,9 +1815,10 @@ impl App {
                     println!("frame {}: time avg {avg:.2} ms, max {max:.2} ms", self.frames);
                     self.frame_times.clear();
                 }
+                if let Some(p) = &mut self.play { p.now = now; }
                 if self.play.is_some() && self.frames > 0 { self.tick_replay(self.frame_times.last().copied().unwrap_or(0.0) / 1000.0, 0); }
-                // units sliding between tiles (record 0x34) move every frame, not just every tick
-                if self.play.as_ref().is_some_and(|p| !p.world.next.is_empty()) { self.rebuild_objs(); }
+                // units sliding between tiles (record 0x34) move every frame, not just every tick (unless a tick just did)
+                if self.play.as_ref().is_some_and(|p| !p.world.next.is_empty() && p.world.drawn_at != Some(now)) { self.rebuild_objs(); }
                 self.scripted_input(el);
                 self.loading_tick(el); // loader.rs: finished map atlases in, a background game start that is ready
                 #[cfg(feature = "live")]
