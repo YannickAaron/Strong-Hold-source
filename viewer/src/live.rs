@@ -60,6 +60,12 @@ impl Verdict {
 #[cfg(feature = "live")]
 pub use sim::Live;
 
+/// A tool the sim can run (`Verdict::unported` is for the rest); 0 = none.
+#[cfg(feature = "live")]
+pub fn ported(tool: i32) -> bool { tool != 0 && shc_sim::mapaction::supported(tool) }
+#[cfg(not(feature = "live"))]
+pub fn ported(_: i32) -> bool { false }
+
 /// Tools driven by press / drag / release (walls, stairs, moat dig / undig, pitch ditch): `mapaction::is_drag`.
 #[cfg(feature = "live")]
 pub fn is_drag(tool: i32) -> bool { shc_sim::mapaction::is_drag(tool) }
@@ -1134,6 +1140,7 @@ impl Thread {
                         }
                         Ok(Cmd::Click(x, y)) => {
                             hover = None;
+                            if !tool.1 && ported(tool.0) { continue; } // refused by the game: nothing to click with
                             let (v, n) = if tool.1 { l.click(tool.0, x, y) } else { (Verdict::unported(tool.0, x, y), 0) };
                             println!("click mapper {} at tile {x},{y}: {v:?}, {n} chore(s)", tool.0);
                             set(v, !playing);
@@ -1162,7 +1169,12 @@ impl Thread {
                     }
                 }
                 if let Some((x, y)) = hover {
-                    set(match tool { (t, true) if is_drag(t) => l.drag_input(t, 0, x, y).0, (t, true) => l.hover(t, x, y), (t, false) => Verdict::unported(t, x, y) }, !playing);
+                    match tool {
+                        (t, true) if is_drag(t) => set(l.drag_input(t, 0, x, y).0, !playing),
+                        (t, true) => set(l.hover(t, x, y), !playing),
+                        (t, false) if !ported(t) => set(Verdict::unported(t, x, y), !playing),
+                        _ => {} // the game refused the tool (walls without stone, a tent without an engineer): no ghost
+                    }
                 }
                 if step || (playing && l.net_ready() && pace.due(Instant::now(), rate)) {
                     l.view = rect.map(camera);
