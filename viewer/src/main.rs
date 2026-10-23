@@ -16,6 +16,7 @@ mod macos;
 mod map;
 mod menu;
 mod custom_lords; // DE's CustomLords / CustomMedia folders: custom AI lords (custom_lords.rs)
+mod lord_share; // a custom lord's .zip import, custom lords in LAN games (lord_share.rs)
 mod paths; // per-OS game / cache / data folders
 mod setup; // first run: the user's own copy of the game (Steam download), exported once (setup/)
 #[cfg(feature = "live")]
@@ -30,6 +31,8 @@ mod stats; // per-player stats over time: F3 overlay + end screen (stats.rs)
 mod loader; // start-up loading off the UI thread (loader.rs)
 #[cfg(test)]
 mod perf; // load-time / game-speed measurements
+#[cfg(test)]
+mod lindschied_check; // Lord David von Lindschied: his folder loads, the AI plays his castles
 use std::{collections::{BTreeMap, HashMap}, ops::Range, path::PathBuf, sync::Arc, time::Instant};
 use wgpu::util::DeviceExt;
 use winit::{
@@ -99,14 +102,35 @@ fn export_tables() -> (Vec<Atlas>, Vec<(String, Sprite)>) {
     if let Some(t) = loader::tables::load(&dir) { return t; } // the parse below, cached as binary (loader.rs)
     let read = |f: &str| std::fs::read_to_string(dir.join(f))
         .unwrap_or_else(|e| panic!("{}: {e} (run re/scripts/export_atlases.py first)", dir.join(f).display()));
-    let atlases = read("atlases.tsv").lines().map(|l| {
+    let t = parse_tables(&read("atlases.tsv"), &read("sprites.tsv"));
+    loader::tables::save(&dir, &t);
+    t
+}
+
+/// atlases.tsv + sprites.tsv text (also a custom lord's sprite/, custom_lords::add_sprites).
+fn parse_tables(atlases: &str, sprites: &str) -> (Vec<Atlas>, Vec<(String, Sprite)>) {
+    let atlases = atlases.lines().map(|l| {
         let c: Vec<&str> = l.split('\t').collect();
         Atlas { name: c[1].into(), w: c[2].parse().unwrap(), h: c[3].parse().unwrap() }
     }).collect();
-    let sprites = read("sprites.tsv").lines().map(sprite_row).collect();
-    let t = (atlases, sprites);
-    loader::tables::save(&dir, &t);
-    t
+    let sprites = sprites.lines().map(sprite_row).collect();
+    (atlases, sprites)
+}
+
+/// SHC_AI=n (screenshots): the lobby's / --skirmish's one AI is lord n (1000 = the first custom lord).
+fn dev_ai() -> Option<usize> { std::env::var("SHC_AI").ok()?.parse().ok() }
+
+/// SHC_FIGHT=n (screenshots of a lord's walk / fight / death): n of your swordsmen (type 27) on player 2's keep roof at
+/// the start, waiting for his lord (placed there at ~tick 100). Height: the keep tile's (terrain HEIGHT).
+#[cfg(feature = "live")]
+fn dev_fight(l: &mut live::Live) {
+    let Some(n) = std::env::var("SHC_FIGHT").ok().and_then(|v| v.parse::<i16>().ok()) else { return };
+    let Some((x, y)) = l.keep_of(2) else { eprintln!("SHC_FIGHT: player 2 has no keep"); return };
+    use shc_sim::terrain as t;
+    let m = l.mem();
+    let h = m.u8(t::at(t::HEIGHT, 1, t::row_off(m, y as i32) + x as i32)) as i16;
+    for k in 0..n { shc_sim::units::helpers::spawn(m, 1, 1, (x + k % 5 - 2) * 8, (y + k / 5 % 5 - 2) * 8, h, 27); } // 5×5 over the roof
+    println!("SHC_FIGHT: {n} swordsmen on player 2's keep at {x},{y} h {h}");
 }
 
 /// "body_hunter-1716x" -> ("body_hunter-x", 1716). Frames of one animation share the key.
@@ -164,6 +188,23 @@ fn delayed_unit_stays_behind_tall_tiles() {
     assert_eq!(behind_tall(hut, 11, 9, 2 + 1), 3, "a delay short of the building is kept");
     assert_eq!(behind_tall(hut, 12, 8, 4 + 5), 9, "standing on the tall tile: the full delay");
     assert_eq!(behind_tall(|x, y| (x, y) == (12, 9), 11, 9, 2 + 5), 2, "column 21 overlaps too: stops before row 3");
+}
+
+/// GameMap.addUpdateFly's digits of a floating number, ones first: GM 202 frames 2..11 = '0'..'9', then 12 = the
+/// minus in the next slot (none at 5 digits); capped at 99999.
+fn info_digits(v: i32) -> Vec<i16> {
+    let mut d: Vec<i16> = v.unsigned_abs().min(99999).to_string().bytes().rev().map(|b| (b - b'0') as i16 + 2).collect();
+    if v < 0 && d.len() < 5 { d.push(12); }
+    d
+}
+
+#[test]
+fn floating_number_digits() {
+    assert_eq!(info_digits(0), [2]);
+    assert_eq!(info_digits(305), [7, 2, 5]);
+    assert_eq!(info_digits(-4), [6, 12]);
+    assert_eq!(info_digits(123456), [11, 11, 11, 11, 11]);
+    assert_eq!(info_digits(-12345), [7, 6, 5, 4, 3]);
 }
 
 fn runs(tris: &[Tri], rows: &[i32]) -> Vec<Run> {
@@ -414,7 +455,8 @@ struct Play {
 
 impl App {
     fn new() -> Self {
-        let (atlases, named) = load_tables();
+        let (mut atlases, mut named) = load_tables();
+        custom_lords::add_sprites(&mut atlases, &mut named); // the custom lords' own map sprites (their sprite/ folders)
         let mut anims: BTreeMap<String, Vec<(u32, usize)>> = BTreeMap::new();
         for (i, (name, _)) in named.iter().enumerate() {
             if let Some((k, n)) = split_frame(name) { anims.entry(k).or_default().push((n, i)); }
@@ -451,9 +493,10 @@ impl App {
         if let Some(m) = arg("--skirmish") { // --skirmish "Crater Lake": new skirmish vs the Rat, skipping the lobby
             let mut lobby = skirmish::Lobby::from_settings(skirmish::maps_dir().join(format!("{m}.map"))); // your Options colour
             if std::env::var_os("SHC_TEAMS").is_some() { (lobby.team, lobby.ais) = (1, vec![(0, 1), (1, 2)]); } // + the Snake; the Rat on your team
+            if let Some(n) = dev_ai() { lobby.ais = vec![(n, 0)]; }
             lobby.hill = std::env::var("SHC_KOTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0); // SHC_KOTH=300: King of the Hill
             match skirmish::start(&lobby) {
-                Ok(mem) => app.start_live(live::Live::from_mem(mem).with_hill(lobby.hill), None),
+                Ok(mem) => { let mut l = live::Live::from_mem(mem).with_hill(lobby.hill); dev_fight(&mut l); app.start_live(l, None) }
                 Err(e) => panic!("{e}"),
             }
         }
@@ -496,6 +539,11 @@ impl App {
             if app.ui.is_none() { panic!("the menu needs the UI export: run re/scripts/export_ui_atlas.py (viewer/README.md)"); }
             if !cache_dir().join("ui/frontend.rgba").exists() { println!("no main-menu art: run re/scripts/export_frontend.py"); }
             app.menu = Some(menu::Menu::main());
+            if std::env::var_os("SHC_LOBBY").is_some() { // SHC_LOBBY=1 (screenshots): straight into the skirmish lobby
+                let mut l = skirmish::Lobby::from_settings(PathBuf::new());
+                if let Some(n) = dev_ai() { l.ais = vec![(n, 0)]; }
+                app.menu = Some(menu::Menu::skirmish_again(l));
+            }
             // IntroSequence first; --skip-intro = the original's skipintro setting. Scripted runs (SHC_SHOT / SHC_INPUT)
             // skip it unless SHC_INTRO=1.
             let scripted = std::env::var_os("SHC_SHOT").is_some() || std::env::var_os("SHC_INPUT").is_some();
@@ -524,7 +572,9 @@ impl App {
         let recs = l.records();
         println!("live: sim tick {}, {} tile records", l.tick(), recs.len());
         let hud = l.hud();
-        self.focus = l.keep().map(|(x, y)| replay::to_west_pub(l.rotation(), x, y)).or(cam);
+        // SHC_KEEP=p (screenshots): the camera on player p's keep instead
+        let keep = match std::env::var("SHC_KEEP").ok().and_then(|v| v.parse().ok()) { Some(p) => l.keep_of(p), None => l.keep() };
+        self.focus = keep.map(|(x, y)| replay::to_west_pub(l.rotation(), x, y)).or(cam);
         let names = std::mem::take(&mut self.names);
         self.start_play(vec![recs], vec![hud], 0, &names);
         self.names = names;
@@ -802,7 +852,7 @@ impl App {
     /// All frames whose name is `<prefix> <n>`, in frame order.
     fn frames_of(names: &[String], prefix: &str) -> Vec<usize> {
         let mut v: Vec<(u32, usize)> = names.iter().enumerate()
-            .filter_map(|(i, n)| n.strip_prefix(prefix)?.strip_prefix(' ')?.parse().ok().map(|f| (f, i))).collect();
+            .filter_map(|(i, n)| n.strip_prefix(prefix)?.trim_start().parse().ok().map(|f| (f, i))).collect(); // "name 012" or "body_lord-12"
         v.sort();
         v.into_iter().map(|(_, i)| i).collect()
     }
@@ -945,7 +995,7 @@ impl App {
         };
         // sort key = Unity sortingOrder (−20000 + row*49 + sub, CSHARP_NOTES §2 "Depth"): (row + layerDelay, sub), then
         // Unity z = 200 + y + id%10000/10000 (farther = higher on screen = first)
-        let mut objs: Vec<((i32, i32, i32, i32), usize, [f32; 2], [f32; 4], [f32; 4])> = vec![];
+        let mut objs: Vec<((i32, i32, i32, i32), usize, [f32; 2], [f32; 4], [f32; 4], f32)> = vec![]; // .., scale
         for (&(_, id), r) in &p.world.objs {
             let (base, next) = if r[0] == 2 { chimp_base(&p, id, r) } else { ([0.0; 2], None) };
             // GameMap.addUpdateOrg / addUpdateChimp / addUpdateBuildingAnim; k5 = -heightAboveGround×32 for org + chimp
@@ -991,7 +1041,22 @@ impl App {
                 key.0 = behind_tall(|x, y| tall(&p, x, y), x, y, key.0);
             }
             let file = match r[0] { 6 => 173, 7 => 54, _ => r[3] };
-            match p.gm.body(file, r[4]) { Some(s) => objs.push((key, s, pos, color, team)), None => *p.misses.entry(file).or_default() += 1 }
+            let own = if r[0] == 2 { p.gm.lord(file, r[4], r[7]) } else { None }; // a custom lord's own sprite
+            // past half its step (`next`), interpChimp shows the body's in-between frame (altFrame1Set). ponytail: the
+            // siege engines' turning lerp, which skips it, isn't ported
+            match own.or_else(|| p.gm.body_x(file, r[4], next.is_some())) { Some(s) => objs.push((key, s, pos, color, team, 1.0)), None => *p.misses.entry(file).or_default() += 1 }
+            // addUpdateFly, gameObjectType 40..47 (the floating numbers over buildings: keep gold, popularity, market):
+            // children of the scroll, in Unity units of 64 px: the icon GM 202 frame k17 at x -0.75 (scale 1 for the
+            // faces 128..130, 0.5 for the gold 171, else 0.4; sortingOrder +1) and the number k18 + k19·10⁴ in black
+            // digits from x 0.95 leftwards, 0.3 apart (+2). ponytail: one alpha for all (C# fades each child 2 steps more)
+            if r[0] == 3 && (40..=47).contains(&r[20]) {
+                let at = |dx: f32| [pos[0] + dx * 64.0, pos[1]];
+                let k = match r[17] { 128..=130 => 1.0, 171 => 0.5, _ => 0.4 };
+                if let Some(s) = p.gm.body(202, r[17]) { objs.push(((key.0, key.1 + 1, key.2, key.3), s, at(-0.75), color, [0.0; 4], k)); }
+                for (i, img) in info_digits(r[18] as i32 + r[19] as i32 * 10000).into_iter().enumerate() {
+                    if let Some(s) = p.gm.body(202, img) { objs.push(((key.0, key.1 + 2, key.2, key.3), s, at(0.95 - 0.3 * i as f32), [0.0, 0.0, 0.0, alpha], [0.0; 4], 1.0)); }
+                }
+            }
             // the chimp's other sprites (addUpdateChimp), each in its sortingOrder slot after the body (+8):
             // GO2 / GO3 = file k13 (low 11 bits, colour above) frames k14 / k16 at yOffset2 / yOffset3 (+9 / +10), and
             // from record 0x33: siege flag GM 189 k4 at (k1, k2) (+11), health bar / selection GM 16 k10 at (k8, k9)
@@ -1001,7 +1066,7 @@ impl App {
                 let v = replay::pivot((r[20] & 0xff) as i32);
                 let slot = |k: i32| (key.0, key.1 + k, key.2, key.3);
                 let mut add = |k: i32, file: i16, img: i16, at: [f32; 2], a: f32, team: [f32; 4]| match p.gm.body(file, img) {
-                    Some(s) if img > 0 => objs.push((slot(k), s, at, [1.0, 1.0, 1.0, a], team)),
+                    Some(s) if img > 0 => objs.push((slot(k), s, at, [1.0, 1.0, 1.0, a], team, 1.0)),
                     _ => {}
                 };
                 let (f2, rope) = (r[13] & 0x7ff, p.world.tele.get(&id).map_or(0, |t| t[19]));
@@ -1034,14 +1099,14 @@ impl App {
             let front = [(-2, -2), (3, -2), (-2, 3), (3, 3)].map(|(dx, dy)| { let (a, c) = replay::to_west_pub(p.world.rot, (b.hill.x + dx) as i16, (b.hill.y + dy) as i16); a as i32 - c as i32 });
             let row = if b.fort > 0 { front.into_iter().max().unwrap_or(0) + 1 } else { replay::row(i) };
             if let Some(s) = p.gm.body(76, frame) {
-                objs.push(((row, 41, 0, 0), s, [x, y - r[5] as f32 * 2.0 - lift], [1.0; 4], p.gm.team(76, owner as i16, &p.world.colours)));
+                objs.push(((row, 41, 0, 0), s, [x, y - r[5] as f32 * 2.0 - lift], [1.0; 4], p.gm.team(76, owner as i16, &p.world.colours), 1.0));
             }
         }
         objs.sort_by_key(|o| o.0);
         p.objs.clear();
         p.obj_rows.clear();
-        for (key, s, pos, color, team) in objs {
-            self.push_c(&mut p.objs, s, pos, 1.0, color, team);
+        for (key, s, pos, color, team, k) in objs {
+            self.push_c(&mut p.objs, s, pos, k, color, team);
             p.obj_rows.resize(p.objs.len(), key.0);
         }
         self.play = Some(p);
@@ -1557,6 +1622,11 @@ impl App {
         if let (WindowEvent::MouseInput { button: MouseButton::Left, state, .. }, Some(u), false) = (&ev, self.ui.as_mut(), scripted()) { u.down = state.is_pressed(); }
         match ev {
             WindowEvent::CloseRequested => el.exit(),
+            // a custom lord's .zip dropped on the window: imported (lord_share.rs); the Add-AI book's list shows the result
+            WindowEvent::DroppedFile(p) if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) => {
+                lord_share::import_ui(&p, false);
+                eprintln!("lord import {}: {:?}", p.display(), lord_share::MESSAGE.lock().unwrap());
+            }
             WindowEvent::Resized(sz) => if let Some(g) = &mut self.gfx {
                 g.config.width = sz.width.max(1);
                 g.config.height = sz.height.max(1);
@@ -1897,7 +1967,7 @@ impl App {
                 let hud = match (&mut self.menu, &mut self.ui) {
                     (Some(m), Some(u)) if self.intro.is_none() => {
                         // front end: its backdrop video's frame due now (menu.rs draws it)
-                        if let (false, Some(h)) = (m.is_pause(), &g.hud) { self.menu_loop.update(&g.queue, &h.video); }
+                        if let (false, false, Some(h)) = (m.is_pause(), video::full_busy(), &g.hud) { self.menu_loop.update(&g.queue, &h.video); }
                         let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
                         // a briefing lists the running game's objectives (FatControler.UpdateObjectiveRows)
                         if let Some(st) = self.play.as_ref().and_then(|p| p.huds.get(p.at.saturating_sub(1))) { m.goals = (st.ev.goals.clone(), st.ev.campaign, st.ev.timer); }

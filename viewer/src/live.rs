@@ -156,9 +156,11 @@ mod sim {
 
         /// Centre tile of player 1's keep (kinds 0x28..0x2c, record +0xee/+0xf0 = top-left, +0xf8 = size): where the
         /// game puts the camera after loading. State 1 = placed this tick: a new skirmish's keeps until the first tick.
-        pub fn keep(&self) -> Option<(i16, i16)> {
+        pub fn keep(&self) -> Option<(i16, i16)> { self.keep_of(self.me) }
+        /// Player p's keep tile.
+        pub fn keep_of(&self, p: i32) -> Option<(i16, i16)> {
             use shc_sim::buildings as b;
-            let i = (1..b::SLOTS).find(|&i| matches!(b::state(&self.m, i), 1 | 2) && b::owner(&self.m, i) == self.me && (0x28..=0x2c).contains(&b::kind(&self.m, i)))?;
+            let i = (1..b::SLOTS).find(|&i| matches!(b::state(&self.m, i), 1 | 2) && b::owner(&self.m, i) == p && (0x28..=0x2c).contains(&b::kind(&self.m, i)))?;
             let (r, n) = (b::rec(i), self.m.i32(b::rec(i) + 0xf8) as i16);
             Some((self.m.i16(r + 0xee) + n / 2, self.m.i16(r + 0xf0) + n / 2))
         }
@@ -325,7 +327,9 @@ mod sim {
 
         /// SHC_SAY=id (scripted screenshots): the first AI lord's speech `id` 1..33 (FUN_180102bc0), as the AI posts it.
         pub fn say(&mut self, id: i32) {
-            let lord = (0..0x26u64).find(|&k| self.m.i32(0x18404a8e4 + k * 0x5e4) > 0).unwrap_or(0); // 0x1e..: custom lords
+            // player 2's own lord when it is a custom one (engine kind 30 + slot, custom_lords::by_kind), else as before
+            let kind = self.m.i32(0x188571c34 + 2 * 4);
+            let lord = if (30..=37).contains(&kind) { kind as u64 } else { (0..0x26u64).find(|&k| self.m.i32(0x18404a8e4 + k * 0x5e4) > 0).unwrap_or(0) }; // 0x1e..: custom lords
             shc_sim::hudmsg::f102bc0(&mut self.m, 0x181b60e70, 2, lord as i32, id);
         }
 
@@ -920,6 +924,7 @@ impl Live {
     pub fn set_rations(&mut self, _: i32) {}
     pub fn radar(&mut self, _: [i32; 4]) -> Vec<u32> { vec![] }
     pub fn keep(&self) -> Option<(i16, i16)> { None }
+    pub fn keep_of(&self, _: i32) -> Option<(i16, i16)> { None }
     pub fn save(&mut self, _: &std::path::Path) -> std::io::Result<()> { Ok(()) }
     pub fn editor_input(&mut self, _: EdIn) {}
     pub fn editor_player(&mut self, _: i32) {}

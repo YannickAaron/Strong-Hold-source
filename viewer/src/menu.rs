@@ -27,6 +27,8 @@ mod credits; // FRONT_Credits (credits.rs)
 mod lobby; // the skirmish lobby's map list search / sort and its options popup (lobby.rs)
 #[path = "editor.rs"]
 pub mod editor; // the map editor: FRONT_EditorSetup and its in-game panel (editor.rs)
+#[path = "lord_info.rs"]
+mod lord_info; // a custom lord's backstory page, opened from the lobby (lord_info.rs)
 #[path = "coa.rs"]
 pub mod coa; // the coat of arms: compositing, the faces, Options > Coat of Arms (coa.rs)
 
@@ -157,12 +159,12 @@ const NOT_YET: &str = "Not in the native port yet.";
 pub enum Go { Load(PathBuf), Replay(PathBuf), Start(Lobby), Quit, Resume, ToMenu, Save(PathBuf), Restart, Mission(i32), Brief(i32), QuitMission(usize), FreeBuild(PathBuf, skirmish::FreeBuild), Scenario(PathBuf, i32), Settings(Option<u8>), Tutorial, Trail(i32, i32, i32), Lan(Box<mp_menu::Started>), Editor(editor::Start) }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Act { Skirmish, LoadList, Quit, Back, Pick(usize), Fair(i32), Goods(i32), Outposts, AddAiOpen, AddAiClose, AddLord(usize), DelAi(usize), TeamsOpen, TeamsClose, TeamFace(usize), TeamCancel, Restart, Campaigns, Campaign(usize), ToCampaigns, Mission(i32), PlayMission, Difficulty, BriefStart, BriefQuit, BriefTab(u8), Hint(usize), HelpBack, StoryAdvance, Sandbox, SoloOpen(bool), SoloNext, SoloPlay, SoloDifficulty, Advanced, Cycle(u8), Faction(i32), Flag(u8), Include(u8), Options, OptPage(u8), OptBack, OptFolder, ScreenMode, ApplyMode, Check(u8), Slider(u8), Group(u8, bool), Reset(u8), Colour(i32), HkRow(u16), HkSlot(u8), HkClose, HkApply, HkClear, HkCancel, HkPreset(bool), Nop, Tutorial, Start, Resume, ToMenu, Save, Trail(trail_menu::A), Mp(mp_menu::A), Help(help::A), Lobby(lobby::A), Update, GameFiles,
+enum Act { Skirmish, LoadList, Quit, Back, Pick(usize), Fair(i32), Goods(i32), Outposts, AddAiOpen, AddAiClose, AddLord(usize), DelAi(usize), LordInfo(usize), LordInfoClose, LordTrailer, TeamsOpen, TeamsClose, TeamFace(usize), TeamCancel, Restart, Campaigns, Campaign(usize), ToCampaigns, Mission(i32), PlayMission, Difficulty, BriefStart, BriefQuit, BriefTab(u8), Hint(usize), HelpBack, StoryAdvance, Sandbox, SoloOpen(bool), SoloNext, SoloPlay, SoloDifficulty, Advanced, Cycle(u8), Faction(i32), Flag(u8), Include(u8), Options, OptPage(u8), OptBack, OptFolder, ScreenMode, ApplyMode, Check(u8), Slider(u8), Group(u8, bool), Reset(u8), Colour(i32), HkRow(u16), HkSlot(u8), HkClose, HkApply, HkClear, HkCancel, HkPreset(bool), Nop, Tutorial, Start, Resume, ToMenu, Save, Trail(trail_menu::A), Mp(mp_menu::A), Help(help::A), Lobby(lobby::A), Update, GameFiles,
     WinSize, SaveGo, Delete(usize), Yes, No, Sort(u8), Credits, Ed(editor::A), Coa(coa::A), NameBox }
 
 /// `Missions(c, m)`: campaign c (0..7) with mission m selected.
 /// `Load`: the save browser; `Save`: the Save Game dialog (the same list, own saves only, and a name box).
-enum Screen { Main, Load, Save, Lobby(Lobby), Pause, Campaigns, Missions(usize, i32), Briefing(Brief), Story(Story), Sandbox, Solo(Solo), Options(Opt), Trail(trail_menu::T), Mp(mp_menu::T), Credits(credits::Credits), Help(Box<help::Help>), Editor(editor::T) }
+enum Screen { Main, Load, Save, Lobby(Lobby), Pause, Campaigns, Missions(usize, i32), Briefing(Brief), Story(Story), Sandbox, Solo(Solo), Options(Opt), Trail(trail_menu::T), Mp(mp_menu::T), Credits(credits::Credits), Help(Box<help::Help>), Editor(editor::T), Lord(Box<lord_info::Page>) }
 
 /// The save browser's popup: overwrite this file / delete this file?
 #[derive(Clone, PartialEq)]
@@ -294,7 +296,6 @@ pub struct Menu {
     progress: skirmish::Progress, // campaign screens: unlocked / won missions
     can_restart: bool,         // pause menu: the game came from the lobby (Restart Mission replays it)
     add_ai: bool,              // Lobby: the Add-AI face grid is open
-    custom_list: bool,         // Add-AI: the custom lords' list (the book) replaces the hover panel
     teams_open: bool,          // Lobby: the round-table Teams popup is open
     team_pick: Option<usize>,  // Teams: the picked-up member (0 = you, 1.. = AI k - 1)
     brief: Option<String>,     // Lobby: the selected map's own briefing (user maps)
@@ -325,7 +326,7 @@ static SORT: std::sync::Mutex<(u8, bool)> = std::sync::Mutex::new((1, false));
 static LAST_SAVE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 impl Menu {
-    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, custom_list: false, teams_open: false, team_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default(), mouse: ([0.0; 2], false) } }
+    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, teams_open: false, team_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default(), mouse: ([0.0; 2], false) } }
     pub fn pause(can_restart: bool) -> Self { Menu { screen: Screen::Pause, in_game: true, can_restart, ..Self::main() } }
     /// Back from a sub-screen: the pause menu in game, else the main menu.
     fn home(&self) -> Self { if self.in_game { Self::pause(self.can_restart) } else { Self::main() } }
@@ -378,6 +379,7 @@ impl Menu {
             Screen::Trail(t) => trail_menu::screen_image(&t),
             Screen::Help(ref h) => Some(h.image()),
             Screen::Credits(c) => c.image(),
+            Screen::Lord(ref p) => Some(format!("lord:{}", p.name)), // lord_info.rs
             _ => None,
         }
     }
@@ -400,6 +402,7 @@ impl Menu {
             Screen::Options(op) if op.typing => { if let Screen::Options(op) = &mut self.screen { op.typing = false; } None } // and the name box
             Screen::Options(_) => self.close_options(),
             Screen::Help(_) => self.help_close(),
+            Screen::Lord(_) => { self.lord_close(); None }
             Screen::Editor(t) if t.loading() => { self.ed_back(); None } // the map list back to the setup (editor.rs)
             Screen::Load | Screen::Save if self.confirm.is_some() => { self.confirm = None; None } // Esc = No
             _ => { *self = self.home(); None }
@@ -693,15 +696,18 @@ impl Menu {
                     crate::audio::story(None, Some(&st.speech()));
                 } else { return self.story_end() }
             }
+            (Screen::Lord(p), Act::StoryAdvance) => p.all = true, // the whole story at once
+            (Screen::Lord(_), Act::LordInfoClose) => self.lord_close(),
+            (Screen::Lord(p), Act::LordTrailer) => p.watch = !p.watch, // "Watch his story" / a click on the playing trailer
             (Screen::Lobby(l), a) => match a {
                 Act::Pick(i) => { l.map = self.files[i].clone(); self.select(i) }
                 Act::Fair(v) => { l.fairness = v; crate::audio::ui(crate::audio::ui_id::GOLD[(v.clamp(1, 5) - 1) as usize], 1.0) }
                 Act::Goods(v) => l.goods = v,
                 Act::Outposts => l.outposts = !l.outposts,
-                Act::AddAiOpen => { self.add_ai = true; self.custom_list = false; crate::custom_lords::rescan(); crate::audio::speech(2, "Genie_03.wav") }
-                Act::AddAiClose => { self.add_ai = false; self.custom_list = false; }
-                // the book: the custom lords' list (CustomLords folders), one click adds one (FRONT_Multiplayer CustomLordList)
-                Act::AddLord(98) => self.custom_list = !self.custom_list,
+                Act::AddAiOpen => { self.add_ai = true; crate::custom_lords::rescan(); *crate::lord_share::MESSAGE.lock().unwrap() = None; crate::audio::speech(2, "Genie_03.wav") }
+                Act::AddAiClose => self.add_ai = false,
+                // our backstory page of custom lord `n` (lobby lord index), its neutral video exported for it
+                Act::LordInfo(n) => if let Some(c) = crate::custom_lords::of_lord(n) { let l = l.clone(); self.lord_open(c, l, false) },
                 // FRONT_Multiplayer AddSkirmishPlayer: refused once the lobby holds the map's start positions (its
                 // maxPlayers, at most 8), as the Add AI button already is
                 Act::AddLord(n) if self.mp.net.as_ref().map_or(1, |n| n.lobby.humans.len()) + l.ais.len()
@@ -898,7 +904,7 @@ impl Menu {
         let out = &mut out;
         match self.screen {
             Screen::Main | Screen::Load | Screen::Save | Screen::Lobby(_) | Screen::Sandbox | Screen::Mp(_) | Screen::Editor(_) => backdrop(out, w, h),
-            Screen::Campaigns | Screen::Missions(..) | Screen::Story(_) => {
+            Screen::Campaigns | Screen::Missions(..) | Screen::Story(_) | Screen::Lord(_) => {
                 // the screen's 16:9 image, UniformToFill
                 let k = (w / 1920.0).max(h / 1080.0);
                 quad(out, SCREEN, [(w - 1920.0 * k) / 2.0, (h - 1080.0 * k) / 2.0, (w + 1920.0 * k) / 2.0, (h + 1080.0 * k) / 2.0], SCREEN_UV, [1.0; 4]);
@@ -973,6 +979,10 @@ impl Menu {
             Screen::Editor(t) => {
                 self.screen = Screen::Editor(t);
                 self.ed_draw(ui, out, t, cursor);
+            }
+            Screen::Lord(mut p) => {
+                self.lord_draw(ui, out, &mut p, w, h, cursor);
+                self.screen = Screen::Lord(p);
             }
         }
         if let Some(e) = &self.error { let e = e.clone(); self.text(ui, out, &e, dw / 2.0, dh * 0.972, dh / 41.5, 0.5, [1.0, 0.4, 0.3, 1.0]); }
@@ -1901,6 +1911,10 @@ impl Menu {
             self.label(ui, out, kind, 92.0, y + 14.0, 15.0, 0.0, BLACK);
             self.label(ui, out, name, 202.0, y + 14.0, 15.0, 0.0, BLACK);
             if i >= nh { self.img_button(ui, out, ["UI-Buttons L009", "UI-Buttons L010", "UI-Buttons L009"], 488.0, y + 1.0, 26.0, 26.0, Some(Act::DelAi(i - nh)), cursor); }
+            // a custom lord's backstory (lord_info.rs)
+            if let Some(&(n, _)) = l.ais.get(i.wrapping_sub(nh)).filter(|a| crate::custom_lords::lord_of(a.0).is_some()) {
+                self.info_badge(ui, out, 458.0, y + 4.0, 20.0, Act::LordInfo(n), cursor);
+            }
         }
 
         // map info + radar
@@ -1953,6 +1967,7 @@ impl Menu {
         let back = if self.add_ai { Act::AddAiClose } else if self.teams_open { Act::TeamsClose } else { Act::Back };
         self.img_button(ui, out, ["UI-Buttons B005", "UI-Buttons B006", "UI-Buttons B005"], 43.0, 700.0, 106.0, 47.0, Some(back), cursor);
         let ok = (!l.ais.is_empty() || nh > 1) && nh + l.ais.len() <= positions && self.mp_can_start();
+        if let Some(why) = self.mp_missing_lords() { self.para(ui, out, &why, 700.0, 655.0, 500.0, 15.0, [0.6, 0.1, 0.05, 1.0]); } // LAN: Start waits for everyone's custom lords
         self.img_button(ui, out, ["UI-Buttons B001", "UI-Buttons B002", "UI-Buttons B004"], 1216.0, 700.0, 107.0, 47.0, ok.then_some(Act::Start), cursor);
         self.img_button(ui, out, ["SkirmishMasters", "SkirmishMastersOver", "SkirmishMasters"], 870.0, 670.0, 96.0, 88.0, None, cursor);
         self.img_button(ui, out, ["MPLoad", "MPLoad_over", "MPLoad"], 1026.0, 684.0, 60.0, 60.0, Some(Act::LoadList), cursor);
@@ -2087,41 +2102,75 @@ impl Menu {
         }
     }
 
-    /// Show_AddAIPanel: the lord faces (72 px every 80 px), and the rollover panel for the face under the cursor.
+    /// Show_AddAIPanel: the lord faces (72 px every 80 px), then the custom lords' faces (CustomLords folders, a (!)
+    /// for the backstory page), Random and the Import tile, and the rollover panel for the face under the cursor. More than
+    /// 4 rows shrink the grid to fit the panel.
     fn add_ai_popup(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, cursor: [f32; 2]) {
         const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+        const IMPORT: usize = usize::MAX;
         self.frame(out, 50.0, 380.0, 700.0, 360.0, true);
         self.frame(out, 780.0, 380.0, 534.0, 360.0, true);
         // the panels swallow clicks (what they cover stays inert)
         for p in [self.r(32.0, 362.0, 736.0, 396.0), self.r(762.0, 362.0, 570.0, 396.0)] { self.hits.push((p, Act::AddAiOpen)); }
+        let customs = crate::custom_lords::count();
+        // the built-in lords, the custom lords, Random, Import
+        let tiles: Vec<usize> = FACES.iter().map(|f| f.1).filter(|&n| n != 99).chain((0..customs).map(|k| crate::custom_lords::BASE + k)).chain([99, IMPORT]).collect();
+        let k = (4.0 / tiles.len().div_ceil(8) as f32).min(1.0);
         let mut hover = None;
-        for (c, &(face, n)) in FACES.iter().enumerate() {
-            let p = self.r(70.0 + 80.0 * (c % 8) as f32, 400.0 + 80.0 * (c / 8) as f32, 72.0, 72.0);
-            let avail = n == 99 || n < LORDS.len() || n == 98 && crate::custom_lords::count() > 0 && self.mp.net.is_none();
-            if face.starts_with("Face") {
-                ui.img(out, "Face Background Generic", p, [1.0; 4]);
-                ui.img(out, face, p, [1.0; 4]);
-                if !avail { ui.img(out, &format!("{face}_Locked"), p, [1.0; 4]); }
-            } else {
-                ui.img_fit(out, face, p, [1.0; 4]);
+        for (c, &n) in tiles.iter().enumerate() {
+            let p = self.r(70.0 + 80.0 * k * (c % 8) as f32, 400.0 + 80.0 * k * (c / 8) as f32, 72.0 * k, 72.0 * k);
+            let custom = crate::custom_lords::of_lord(n).filter(|_| n != IMPORT);
+            if n == IMPORT {
+                let (w, h) = (p[2] - p[0], p[3] - p[1]);
+                ui.img_fit(out, "shield_load", [p[0] + w * 0.2, p[1] + h * 0.06, p[2] - w * 0.2, p[3] - h * 0.3], [1.0; 4]);
                 ui.img(out, "Face Border", p, [1.0; 4]);
+                self.label(ui, out, "Import", 70.0 + 80.0 * k * (c % 8) as f32 + 36.0 * k, 400.0 + 80.0 * k * (c / 8) as f32 + 62.0 * k, 14.0 * k, 0.5, BLACK);
+                self.hits.push((p, Act::Lobby(lobby::A::ImportLord)));
+            } else if let Some(cl) = &custom {
+                ui.img(out, "Face Background Generic", p, [1.0; 4]);
+                if !crate::custom_lords::draw_face(out, cl, p, [1.0; 4]) { ui.img(out, FACES.iter().find(|f| f.1 == crate::custom_lords::parent(cl)).map_or("", |f| f.0), p, [1.0; 4]); }
+                ui.img(out, "Face Border", p, [1.0; 4]);
+                self.hits.push((p, Act::AddLord(n)));
+            } else {
+                let face = FACES.iter().find(|f| f.1 == n).map_or("", |f| f.0);
+                let avail = n == 99 || n < LORDS.len();
+                if face.starts_with("Face") {
+                    ui.img(out, "Face Background Generic", p, [1.0; 4]);
+                    ui.img(out, face, p, [1.0; 4]);
+                    if !avail { ui.img(out, &format!("{face}_Locked"), p, [1.0; 4]); }
+                } else {
+                    ui.img_fit(out, face, p, [1.0; 4]);
+                    ui.img(out, "Face Border", p, [1.0; 4]);
+                }
+                if avail { self.hits.push((p, Act::AddLord(n))); }
             }
             if Self::inside(p, cursor) { hover = Some(n); }
-            if avail { self.hits.push((p, Act::AddLord(n))); }
+            // the (!) corner badge: the custom lord's backstory page (lord_info.rs); pushed last, so it wins the click
+            if custom.is_some() { self.info_badge(ui, out, 70.0 + 80.0 * k * (c % 8) as f32 + 50.0 * k, 400.0 + 80.0 * k * (c / 8) as f32 + 2.0 * k, 20.0 * k, Act::LordInfo(n), cursor); }
         }
         self.img_button(ui, out, ["UI-Buttons S043", "UI-Buttons S044", "UI-Buttons S043"], 711.0, 390.0, 29.0, 29.0, Some(Act::AddAiClose), cursor);
-        if self.custom_list {
-            self.label(ui, out, &ui.text_of("TEXT_CUSTOMISATION_022"), 1047.0, 402.0, 22.0, 0.5, BLACK);
-            for (k, name) in crate::custom_lords::names().iter().enumerate().take(13) {
-                let p = self.r(800.0, 436.0 + 22.0 * k as f32, 494.0, 22.0);
-                let on = Self::inside(p, cursor);
-                self.label(ui, out, name, 810.0, 440.0 + 22.0 * k as f32, 18.0, 0.0, if on { [0.45, 0.1, 0.1, 1.0] } else { BLACK });
-                self.hits.push((p, Act::AddLord(crate::custom_lords::BASE + k)));
+        // an import waiting on "Replace?" / the last import's result (lobby.rs) take the rollover panel's place
+        if self.lord_import_row(ui, out, cursor, hover.is_none()) { return; }
+        match hover {
+            Some(IMPORT) => {
+                self.label(ui, out, "Import lord", 1047.0, 402.0, 22.0, 0.5, BLACK);
+                self.para(ui, out, "Pick a custom lord's .zip (a CustomLords/<name>/ folder inside). He joins the faces here.", 790.0, 430.0, 500.0, 16.0, BLACK);
             }
-            return;
-        }
-        match hover.filter(|&n| n < 29) {
-            Some(n) => {
+            Some(n) if crate::custom_lords::lord_of(n).is_some() => {
+                let Some(c) = crate::custom_lords::of_lord(n) else { return };
+                self.label(ui, out, &c.name, 1047.0, 402.0, 22.0, 0.5, BLACK);
+                let p = self.r(790.0, 420.0, 100.0, 100.0);
+                ui.img(out, "Face Background Generic", p, [1.0; 4]);
+                if !crate::custom_lords::draw_face(out, &c, p, [1.0; 4]) { ui.img(out, FACES.iter().find(|f| f.1 == crate::custom_lords::parent(&c)).map_or("", |f| f.0), p, [1.0; 4]); }
+                ui.img(out, "Face Border", p, [1.0; 4]);
+                self.label(ui, out, "(!) his story", 905.0, 470.0, 16.0, 0.0, BLACK);
+                let mut y = 530.0;
+                for k in 0..5 {
+                    let Some(v) = crate::custom_lords::help(&c, k) else { continue };
+                    y = self.para(ui, out, &format!("{}: {v}", ui.text_of(&format!("TEXT_AI_LORD_HELP_{:03}", k + 1))), 790.0, y + 3.0, 500.0, 16.0, BLACK);
+                }
+            }
+            Some(n) if n < 29 => {
                 self.label(ui, out, &ui.text_of(&lord_keys(n).0), 1047.0, 402.0, 22.0, 0.5, BLACK);
                 let p = self.r(790.0, 420.0, 100.0, 100.0);
                 ui.img(out, "Face Background Generic", p, [1.0; 4]);
@@ -2132,8 +2181,19 @@ impl Menu {
                     y = self.para(ui, out, &line, 790.0, y + 3.0, 500.0, 16.0, BLACK);
                 }
             }
-            None => { self.label(ui, out, &ui.text_of("TEXT_XPLAY_WAITING_ROOM_402"), 1047.0, 402.0, 22.0, 0.5, BLACK); }
+            _ => { self.label(ui, out, &ui.text_of("TEXT_XPLAY_WAITING_ROOM_402"), 1047.0, 402.0, 22.0, 0.5, BLACK); }
         }
+    }
+
+    /// A round "(!)" badge, `d` design px across at x, y (top left): more about a custom lord.
+    fn info_badge(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, x: f32, y: f32, d: f32, a: Act, cursor: [f32; 2]) {
+        let p = self.r(x, y, d, d);
+        let hot = Self::inside(p, cursor);
+        let ring: Vec<[f32; 2]> = (0..20).map(|i| { let t = i as f32 / 20.0 * std::f32::consts::TAU; [(p[0] + p[2]) / 2.0 + t.cos() * (p[2] - p[0]) / 2.0, (p[1] + p[3]) / 2.0 + t.sin() * (p[3] - p[1]) / 2.0] }).collect();
+        Ui::fill_convex(out, &ring, if hot { [0.55, 0.06, 0.03, 1.0] } else { [0.32, 0.03, 0.02, 0.95] });
+        self.label(ui, out, "!", x + d / 2.0, y + d / 2.0, d * 0.8, 0.5, [0.905, 0.73, 0.402, 1.0]);
+        if hot { crate::audio::hover(p, crate::audio::ui_id::RED_BUTTON, 1.0); }
+        self.hits.push((p, a));
     }
 }
 
@@ -2153,11 +2213,11 @@ const COLOUR_SHIELDS: [&str; 8] = ["UI-Buttons H016", "UI-Buttons H010", "UI-But
 const KEEP_SHIELDS: [&str; 8] = ["UI-Buttons H034", "UI-Buttons H032", "UI-Buttons H033", "UI-Buttons H031", "UI-Buttons H035", "UI-Buttons H036", "UI-Buttons H037", "UI-Buttons H038"];
 
 /// The Add-AI grid in XAML order: face sprite, lord index (`LORDS`; 27/28 Surgeon / Baibars have no castle layouts
-/// here; 99 random, 98 custom lord).
-const FACES: [(&str, usize); 31] = [("Face 01", 0), ("Face 02", 1), ("Face 03", 2), ("Face 04", 3), ("Face 05", 4), ("Face 06", 5), ("Face 07", 6), ("Face 08", 7),
+/// here; 99 random). The custom lords go before Random in the grid (add_ai_popup).
+const FACES: [(&str, usize); 30] = [("Face 01", 0), ("Face 02", 1), ("Face 03", 2), ("Face 04", 3), ("Face 05", 4), ("Face 06", 5), ("Face 07", 6), ("Face 08", 7),
     ("Face 09", 8), ("Face 10", 9), ("Face 11", 10), ("Face 12", 11), ("Face 13", 12), ("Face 14", 13), ("Face 15", 14), ("Face 16", 15),
     ("Face 17", 16), ("Face 18", 17), ("Face 19", 18), ("Face 20", 19), ("Face 25", 24), ("Face 21", 20), ("Face 22", 21), ("Face 23", 22),
-    ("Face 24", 23), ("Face 26", 25), ("Face 27", 26), ("Face 28", 27), ("Face 29", 28), ("shield_options", 99), ("shield_book", 98)];
+    ("Face 24", 23), ("Face 26", 25), ("Face 27", 26), ("Face 28", 27), ("Face 29", 28), ("shield_options", 99)];
 
 /// GameData.starting_gold_table: (you, computer) by game type (Normal, Crusader, Deathmatch) and fairness 1..5.
 const START_GOLD: [[(i32, i32); 5]; 3] = [
@@ -2210,7 +2270,7 @@ fn computer_name_key(n: usize) -> String {
 
 /// Lord n's short name and title string keys (Translate: lookUpText is 0-based, so keys are + 1).
 fn lord_keys(n: usize) -> (String, String) {
-    if let Some(c) = crate::custom_lords::of_lord(n) { return (c.name, String::new()); }
+    if n >= crate::custom_lords::BASE { return (crate::lord_share::name_of(n), String::new()); }
     let (s, k) = match n { 0..=15 => ("TEXT_XPLAY_WAITING_ROOM", 240 + 9 * n), 16..=24 => ("TEXT_NEW_CTEXT", 89 + 9 * (n - 16)), _ => ("TEXT_NEW_CTEXT", 454 + 17 * (n - 25)) };
     (format!("{s}_{k:03}"), format!("{s}_{:03}", k + 1))
 }
@@ -2430,6 +2490,7 @@ fn help_blocks(id: i32) -> Vec<(u8, String)> {
 /// story background with HistoricalCampaign-Drawing-<k> and -Map-<k> packed below it (SCREEN_H rows, see STORY_ART).
 pub fn screen_pixels(name: &str) -> Option<Vec<u8>> {
     if let Some(n) = name.strip_prefix("credits:") { return credits::pixels(n.parse().ok()?); }
+    if let Some(n) = name.strip_prefix("lord:") { return lord_info::pixels(n); }
     let dir = crate::cache_dir().join("ui/screens");
     let read = |n: &str| std::fs::read(dir.join(format!("{n}.rgba"))).ok();
     let full = |p: &Vec<u8>| p.len() == 1920 * 1080 * 4;

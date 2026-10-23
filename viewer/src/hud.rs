@@ -1104,7 +1104,7 @@ impl Ui {
     }
 
     /// A convex polygon `pts` (screen px) on the white texel block, like `fill`.
-    fn fill_convex(out: &mut Vec<HudTri>, pts: &[[f32; 2]], color: [f32; 4]) {
+    pub(crate) fn fill_convex(out: &mut Vec<HudTri>, pts: &[[f32; 2]], color: [f32; 4]) {
         let t = 1.0 / FONT_PX as f32;
         let v = |p: [f32; 2]| Vert { pos: p, uv: [t, t], color, team: [0.0; 4] };
         for k in 1..pts.len() - 1 { out.push((1, [v(pts[0]), v(pts[k]), v(pts[k + 1])])); }

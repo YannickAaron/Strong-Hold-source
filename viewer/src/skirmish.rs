@@ -405,13 +405,17 @@ fn presets_round_trip() {
 
 /// The front end's lobby calls as a `Setup` (what `Setup::from_calls` reads from a recording).
 #[cfg(feature = "live")]
-pub fn setup(l: &Lobby) -> shc_sim::setup::Setup {
+pub fn setup(l: &Lobby) -> shc_sim::setup::Setup { setup_at(l, 2) }
+
+/// `setup` with the AIs as players `first`.. (a LAN game: after its humans).
+#[cfg(feature = "live")]
+pub fn setup_at(l: &Lobby, first: i32) -> shc_sim::setup::Setup {
     let cs = shc_sim::data::aivs(); // aiv.tsv, from the first-run setup
     let mut s = shc_sim::setup::Setup { preinit: [1, 0, 0, 0, 0, 0, l.extreme_trail as i32], positions: [-10; 8], aiv_choice: [-1; 8], seed: l.seed, ..Default::default() };
     s.humans.push((1, l.team, true, l.lord_kind));
     let mut rotation = [0; 8];
-    for (k, &(lord, team)) in l.ais.iter().enumerate().take(7) {
-        let p = k as i32 + 2;
+    for (k, &(lord, team)) in l.ais.iter().enumerate().take(9 - first.clamp(2, 8) as usize) {
+        let p = k as i32 + first;
         // a custom lord (FRONT_Multiplayer.StartSkirmishGame): lord type 29 + slot, its .aivjson castles as custom
         // AIVs (none: the parent lord's defaults), then its config (DLL_SetExtendedLordConfig)
         if let Some(c) = crate::custom_lords::of_lord(lord) {

@@ -1962,6 +1962,7 @@ version = "0.1.0"
 dependencies = [
  "block2",
  "bytemuck",
+ "flate2",
  "fontdue",
  "image",
  "libc",

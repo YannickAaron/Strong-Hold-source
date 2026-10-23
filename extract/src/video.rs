@@ -250,6 +250,25 @@ pub fn export_custom(webm: &Path, out: &Path, name: &str) -> Result<()> {
     bink_wav(out, name, audio)
 }
 
+/// `webm`'s frames through `f` (each must come out `w`×`h`) as `<out>/<name>.vid`, BC3 with its alpha, no sound: the
+/// viewer's own clips of a custom lord's video (the backstory page's living portrait). Existing files are kept.
+pub fn export_custom_as(webm: &Path, out: &Path, name: &str, (w, h): (usize, usize), f: impl Fn(Rgba) -> Rgba) -> Result<()> {
+    if out.join(format!("{name}.vid")).exists() { return Ok(()); }
+    fs::create_dir_all(out)?;
+    let (fr, _) = frames(webm)?;
+    write_vid(out, &format!("{name}.vid"), fr.map(|r| r.map(&f)), &[0], 0, (w, h), FPS, true)
+}
+
+/// A custom lord's story trailer (CustomLords/<lord>/trailer.webm, our extension) as a full-screen `<out>/<name>.vid`
+/// (W×H BC1, the victory / defeat videos' format, scaled to cover) + `<name>.wav`. Existing files are kept.
+pub fn export_custom_full(webm: &Path, out: &Path, name: &str) -> Result<()> {
+    if out.join(format!("{name}.vid")).exists() { return Ok(()); }
+    fs::create_dir_all(out)?;
+    let (fr, audio) = frames(webm)?;
+    write_vid(out, &format!("{name}.vid"), fit(fr, W, H, H), &[0], 0, (W, H), FPS, false)?;
+    bink_wav(out, name, audio)
+}
+
 /// `export_more`'s missing files: (source webm, output stem, full screen), the minimap clips first.
 pub fn more_todo(data: &Path, out: &Path) -> Vec<(std::path::PathBuf, String, bool)> {
     let vids = data.join("Assets/GUI/Video");

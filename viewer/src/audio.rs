@@ -132,6 +132,10 @@ mod imp {
         if let Some(c) = crate::custom_lords::of_lord(lord) { if let Some(p) = crate::custom_lords::lobby_wav(&c, "ADD_PLAYER").filter(|_| !talking(3)) { UI.with(|q| q.borrow_mut().push(Req::File(3, p))) } return; }
         if let Some(l) = lord_line(lord, "add").filter(|_| !talking(3)) { speech(3, &l) }
     }
+    /// A custom lord's line `key` (its CustomMedia `<KEY>.wav`) on channel 3: lord_info.rs's backstory page.
+    pub fn custom_line(c: &crate::custom_lords::Custom, key: &str) {
+        if let Some(p) = crate::custom_lords::lobby_wav(c, key) { UI.with(|q| q.borrow_mut().push(Req::File(3, p))) }
+    }
     /// Lobby: AI `lord` removed (FRONT_Multiplayer:3467), unless channel 3 is talking.
     pub fn genie_kick(lord: usize) {
         if let Some(c) = crate::custom_lords::of_lord(lord) { if let Some(p) = crate::custom_lords::lobby_wav(&c, "KICK_PLAYER").filter(|_| !talking(3)) { UI.with(|q| q.borrow_mut().push(Req::File(3, p))) } return; }
@@ -358,7 +362,7 @@ mod imp {
 }
 
 #[cfg(feature = "live")]
-pub use imp::{forward, game_over, genie_add, genie_kick, genie_team, hover, menu, music, music_state, set_volumes, speech, speech_state, startup, story, tick, ui, video};
+pub use imp::{custom_line, forward, game_over, genie_add, genie_kick, genie_team, hover, menu, music, music_state, set_volumes, speech, speech_state, startup, story, tick, ui, video};
 #[cfg(not(feature = "live"))]
 pub fn tick(_: impl Fn(i32, i32) -> [f32; 2], _: f32, _: f32) {}
 #[cfg(not(feature = "live"))]
@@ -383,6 +387,8 @@ pub fn set_volumes(_: f32, _: f32, _: f32, _: f32, _: f32, _: bool) {}
 pub fn speech(_: i32, _: &str) {}
 #[cfg(not(feature = "live"))]
 pub fn genie_add(_: usize) {}
+#[cfg(not(feature = "live"))]
+pub fn custom_line(_: &crate::custom_lords::Custom, _: &str) {}
 #[cfg(not(feature = "live"))]
 pub fn genie_kick(_: usize) {}
 #[cfg(not(feature = "live"))]

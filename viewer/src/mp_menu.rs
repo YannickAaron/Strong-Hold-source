@@ -44,7 +44,7 @@ fn player_name() -> String { super::coa::player_name() }
 
 /// The skirmish lobby's view of a LAN lobby (map path, AIs, options; your team = the host's).
 fn to_skirmish(l: &lan::Lobby, seed: i32) -> Lobby {
-    Lobby { map: skirmish::maps_dir().join(&l.map), team: l.humans.first().map_or(0, |h| h.team), ais: l.ais.clone(), fairness: l.fairness,
+    Lobby { map: skirmish::maps_dir().join(&l.map), team: l.humans.first().map_or(0, |h| h.team), ais: crate::lord_share::from_wire(&l.ais, &l.customs), fairness: l.fairness,
         goods: l.goods, outposts: l.outposts, seed, hill: l.hill, ..Lobby::new(skirmish::maps_dir().join(&l.map)) }
 }
 
@@ -63,7 +63,14 @@ impl Menu {
     pub(super) fn mp_humans(&self) -> usize { self.mp.net.as_ref().map_or(1, |n| n.lobby.humans.len()) }
 
     /// Only the host may press Play in a LAN lobby, and only with somebody to play against.
-    pub(super) fn mp_can_start(&self) -> bool { self.mp.net.as_ref().is_none_or(|n| n.is_host()) }
+    pub(super) fn mp_can_start(&self) -> bool { self.mp.net.as_ref().is_none_or(|n| n.is_host() && n.lobby.humans.iter().all(|h| h.missing.is_empty())) }
+
+    /// LAN lobby: who lacks which custom lord ("Ann needs Lord X"), None = everyone has them.
+    pub(super) fn mp_missing_lords(&self) -> Option<String> {
+        let n = self.mp.net.as_ref()?;
+        let who: Vec<String> = n.lobby.humans.iter().filter(|h| !h.missing.is_empty()).map(|h| format!("{} needs {}", h.name, h.missing.join(", "))).collect();
+        (!who.is_empty()).then(|| format!("{}: import the lord's zip there, or remove him.", who.join("; ")))
+    }
 
     /// The skirmish list's lobby (as Act::Skirmish opens it) on `map` (None: Crater Lake, else the first).
     fn mp_open_lobby(&mut self, map: Option<&str>) {
@@ -251,8 +258,9 @@ impl Menu {
         let mut humans = net.lobby.humans.clone();
         if let Some(h) = humans.first_mut() { h.team = l.team; }
         let map = l.map.file_name().map_or(String::new(), |f| f.to_string_lossy().into_owned());
-        let ais = l.ais.iter().take(8usize.saturating_sub(humans.len())).copied().collect();
-        let new = lan::Lobby { map, humans, ais, fairness: l.fairness, goods: l.goods, outposts: l.outposts, speed, coop: net.lobby.coop,
+        let ais: Vec<(usize, i32)> = l.ais.iter().take(8usize.saturating_sub(humans.len())).copied().collect();
+        let (ais, customs) = crate::lord_share::to_wire(&ais);
+        let new = lan::Lobby { map, humans, ais, customs, fairness: l.fairness, goods: l.goods, outposts: l.outposts, speed, coop: net.lobby.coop,
             slots: self.mp.save_slots.iter().copied().take(net.lobby.humans.len()).collect(), spectators: net.lobby.spectators.clone(),
             loaded: self.mp.save.is_some(), hill: l.hill };
         if self.mp.pushed.as_ref() != Some(&new) || new != net.lobby {

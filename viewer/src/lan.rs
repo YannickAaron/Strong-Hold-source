@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 pub const DISCOVERY_PORT: u16 = 47777;
 pub const GAME_PORT: u16 = 47778;
-const VERSION: u32 = 6;
+const VERSION: u32 = 7; // 7: custom lords (Lobby.customs, Human.missing, Msg::Have)
 /// Input delay at the start, before any round trip is measured: the original's LAN floor (FUN_180027f00).
 pub const DELAY: i32 = 10;
 /// The fewest ticks from a command to its exec tick: the gate needs P ≥ T + 2 with P = tick + delay − 1.
@@ -49,6 +49,8 @@ pub struct Human {
     pub team: i32,
     pub lord: i32, // lord look (DLL_RegisterMultiplayerUser lordType), -1 = the map's
     pub coa: String, // coat of arms (AvatarDesign string, the "lordtype|coa" lobby member data), "" = none
+    /// The lobby's custom lords this player lacks (by name, from its Msg::Have): the host cannot start until none.
+    pub missing: Vec<String>,
 }
 
 /// The lobby the host edits and every peer mirrors. Players: the humans (host first), then the AI lords.
@@ -71,12 +73,14 @@ pub struct Lobby {
     pub loaded: bool,
     /// King of the Hill to this many points, 0 = conquest (skirmish::Lobby::hill).
     pub hill: i32,
+    /// The custom lords among `ais` (an AI `custom_lords::BASE + i` is entry i): name and checksum (lord_share.rs).
+    pub customs: Vec<(String, u64)>,
 }
 
 impl Lobby {
     pub fn new(host: &str) -> Self {
-        Lobby { map: "Crater Lake.map".into(), humans: vec![Human { name: host.into(), team: 0, lord: -1, coa: crate::menu::coa::mine().code() }], ais: vec![], fairness: 3, goods: 1,
-            outposts: true, speed: 40, coop: None, slots: vec![], spectators: vec![], loaded: false, hill: 0 }
+        Lobby { map: "Crater Lake.map".into(), humans: vec![Human { name: host.into(), team: 0, lord: -1, coa: crate::menu::coa::mine().code(), missing: vec![] }], ais: vec![], fairness: 3, goods: 1,
+            outposts: true, speed: 40, coop: None, slots: vec![], spectators: vec![], loaded: false, hill: 0, customs: vec![] }
     }
     pub fn players(&self) -> usize { self.humans.len() + self.ais.len() }
     /// The player number of human k (0 = the host).
@@ -131,6 +135,8 @@ pub enum Msg {
     Paused { by: i32, left: i32 },
     /// To the host: a player asks for game speed `rate`; from the host: everyone runs at `rate` now.
     Speed { rate: i32 },
+    /// Client → host, in the lobby: the lobby's custom lords this player lacks (empty = has them all).
+    Have { from: i32, missing: Vec<String> },
 }
 
 // ---- wire format: [u32 len][kind u8][fields], little endian, strings / blobs u32-length-prefixed
@@ -148,7 +154,10 @@ impl W {
     fn join(&mut self, j: Join) -> &mut Self { match j { Join::Play => self.u8(0).i32(0), Join::Rejoin(p) => self.u8(1).i32(p), Join::Spectate => self.u8(2).i32(0) } }
     fn lobby(&mut self, l: &Lobby) -> &mut Self {
         self.str(&l.map).i32(l.humans.len() as i32);
-        for h in &l.humans { self.str(&h.name).i32(h.team).i32(h.lord).str(&h.coa); }
+        for h in &l.humans {
+            self.str(&h.name).i32(h.team).i32(h.lord).str(&h.coa).i32(h.missing.len() as i32);
+            for n in &h.missing { self.str(n); }
+        }
         self.i32(l.ais.len() as i32);
         for &(lord, team) in &l.ais { self.i32(lord as i32).i32(team); }
         self.i32(l.fairness).i32(l.goods).u8(l.outposts as u8).i32(l.speed);
@@ -157,7 +166,9 @@ impl W {
         for &s in &l.slots { self.i32(s); }
         self.i32(l.spectators.len() as i32);
         for s in &l.spectators { self.str(s); }
-        self.u8(l.loaded as u8).i32(l.hill)
+        self.u8(l.loaded as u8).i32(l.hill).i32(l.customs.len() as i32);
+        for (n, s) in &l.customs { self.str(n).u64(*s); }
+        self
     }
 }
 
@@ -180,13 +191,16 @@ impl R<'_> {
     fn join(&mut self) -> Option<Join> { let (k, p) = (self.u8()?, self.i32()?); Some(match k { 0 => Join::Play, 1 => Join::Rejoin(p), _ => Join::Spectate }) }
     fn lobby(&mut self) -> Option<Lobby> {
         let map = self.str()?;
-        let humans = (0..self.len()?).map(|_| Some(Human { name: self.str()?, team: self.i32()?, lord: self.i32()?, coa: self.str()? })).collect::<Option<_>>()?;
+        let humans = (0..self.len()?).map(|_| Some(Human { name: self.str()?, team: self.i32()?, lord: self.i32()?, coa: self.str()?,
+            missing: (0..self.len()?).map(|_| self.str()).collect::<Option<_>>()? })).collect::<Option<_>>()?;
         let ais = (0..self.len()?).map(|_| Some((self.i32()? as usize, self.i32()?))).collect::<Option<_>>()?;
         let (fairness, goods, outposts, speed) = (self.i32()?, self.i32()?, self.u8()? != 0, self.i32()?);
         let coop = if self.u8()? != 0 { Some((self.i32()?, self.i32()?, self.u8()? != 0)) } else { None };
         let slots = (0..self.len()?).map(|_| self.i32()).collect::<Option<_>>()?;
         let spectators = (0..self.len()?).map(|_| self.str()).collect::<Option<_>>()?;
-        Some(Lobby { map, humans, ais, fairness, goods, outposts, speed, coop, slots, spectators, loaded: self.u8()? != 0, hill: self.i32()? })
+        let (loaded, hill) = (self.u8()? != 0, self.i32()?);
+        let customs = (0..self.len()?).map(|_| Some((self.str()?, self.u64()?))).collect::<Option<_>>()?;
+        Some(Lobby { map, humans, ais, fairness, goods, outposts, speed, coop, slots, spectators, loaded, hill, customs })
     }
 }
 
@@ -226,6 +240,7 @@ impl Msg {
             Msg::Paused { by, left } => { w.u8(21).i32(*by).i32(*left); }
             Msg::Say { from, to, text } => { w.u8(22).i32(*from).u32(*to).str(text); }
             Msg::Speed { rate } => { w.u8(23).i32(*rate); }
+            Msg::Have { from, missing } => { w.u8(24).i32(*from).i32(missing.len() as i32); for n in missing { w.str(n); } }
         }
         let mut out = (w.0.len() as u32).to_le_bytes().to_vec();
         out.extend(w.0);
@@ -279,6 +294,7 @@ impl Msg {
             20 => Msg::Pause { from: r.i32()?, on: r.u8()? != 0 },
             21 => Msg::Paused { by: r.i32()?, left: r.i32()? },
             23 => Msg::Speed { rate: r.i32()? },
+            24 => { let from = r.i32()?; Msg::Have { from, missing: (0..r.len()?).map(|_| r.str()).collect::<Option<_>>()? } }
             _ => return None,
         })
     }
@@ -437,6 +453,9 @@ pub struct Net {
     stop: Arc<AtomicBool>,
     port: u16,
     pub sent_bytes: u64,
+    /// Client, lobby: the customs table and local lord count last checked, and the missing list last sent.
+    lords_checked: Option<(Vec<(String, u64)>, usize)>,
+    lords_reported: Option<Vec<String>>,
 }
 
 impl Drop for Net {
@@ -459,7 +478,7 @@ impl Net {
         let (announce, stop) = (Arc::new(Mutex::new(String::new())), Arc::new(AtomicBool::new(false)));
         responder(disc, announce.clone(), stop.clone());
         let n = Net { me: 1, host: true, lobby: Lobby::new(name), chat: vec![], started: None, state: false, save: None, error: None, listener: Some(l), pending: vec![],
-            peers: vec![], addrs: vec![], host_addr: None, host_id: 1, lost: vec![], name: name.into(), announce, stop, port, sent_bytes: 0 };
+            peers: vec![], addrs: vec![], host_addr: None, host_id: 1, lost: vec![], name: name.into(), announce, stop, port, sent_bytes: 0, lords_checked: None, lords_reported: None };
         n.set_announce();
         Ok(n)
     }
@@ -495,7 +514,7 @@ impl Net {
         let lobby = lobby.unwrap_or_else(|| Lobby::new(""));
         Ok(Net { me, host: false, lobby, chat: vec![], started, state, save: None, error: None, listener: Some(own), pending: vec![], peers: vec![(0, c)], addrs,
             host_addr: Some(addr), host_id: 1, lost: vec![], name: name.into(), announce: Default::default(), stop: Arc::new(AtomicBool::new(true)),
-            port: listen_port, sent_bytes: 0 })
+            port: listen_port, sent_bytes: 0, lords_checked: None, lords_reported: None })
     }
 
     pub fn is_host(&self) -> bool { self.host }
@@ -604,7 +623,7 @@ impl Net {
                 Join::Play if self.started.is_none() && self.lobby.players() < 8 => {
                     let me = (2..=8).find(|p| !taken(*p, &self.peers) && !self.lobby.player_numbers().contains(p)).unwrap_or(8);
                     let mut l = self.lobby.clone();
-                    l.humans.push(Human { name, team: 0, lord: -1, coa });
+                    l.humans.push(Human { name, team: 0, lord: -1, coa, missing: vec![] });
                     l.ais.truncate(8 - l.humans.len());
                     self.peers.push((me, c));
                     self.set_lobby(l);
@@ -661,16 +680,22 @@ impl Net {
                         if self.host { self.relay(&m); }
                     }
                     Msg::Start { lobby, seed, delay, state } if !self.host => { self.started = Some((lobby.clone(), *seed, *delay)); self.state = *state }
+                    Msg::Have { missing, .. } if self.host && self.started.is_none() => {
+                        let mut l = self.lobby.clone();
+                        if let Some(k) = l.player_numbers().iter().position(|&q| q == from) { l.humans[k].missing = missing.clone(); }
+                        if l != self.lobby { self.set_lobby(l); }
+                    }
                     Msg::Turn { .. } | Msg::Hash { .. } => {
                         if self.host { self.send(&m, from); }
                         out.push(m);
                     }
-                    Msg::Hello { .. } | Msg::Welcome { .. } | Msg::Lobby(_) | Msg::Peers(_) | Msg::Start { .. } | Msg::Refused(_) => {}
+                    Msg::Hello { .. } | Msg::Welcome { .. } | Msg::Lobby(_) | Msg::Peers(_) | Msg::Start { .. } | Msg::Refused(_) | Msg::Have { .. } => {}
                     _ => out.push(m),
                 }
             }
             if closed { gone.push(from); }
         }
+        self.report_lords();
         for p in gone {
             self.peers.retain(|(q, _)| *q != p);
             self.addrs.retain(|(q, _)| *q != p);
@@ -692,6 +717,21 @@ impl Net {
             }
         }
         out
+    }
+
+    /// Client, lobby: tell the host which of the lobby's custom lords this machine lacks, when that changed (a new
+    /// lobby, or a lord imported here meanwhile).
+    fn report_lords(&mut self) {
+        if self.host || self.started.is_some() { return; }
+        let key = (self.lobby.customs.clone(), crate::custom_lords::count());
+        if self.lords_checked.as_ref() == Some(&key) { return; }
+        self.lords_checked = Some(key);
+        let missing = crate::lord_share::missing(&self.lobby.customs);
+        if self.lords_reported.as_ref() == Some(&missing) { return; }
+        self.lords_reported = Some(missing.clone());
+        let m = Msg::Have { from: self.me, missing };
+        let me = self.me;
+        self.send(&m, me); // a client's one peer is the host (id 0)
     }
 
     /// Host, lobby: player `gone` left; the clients after it get the next lower number (their Welcome again).
@@ -741,17 +781,15 @@ pub fn game(l: &Lobby, me: i32, seed: i32) -> Result<shc_sim::mem::Mem, String> 
         return Ok(start_mem(&s, &file, seed));
     }
     let map = crate::skirmish::maps_dir().join(&l.map);
-    let base = crate::skirmish::Lobby {
-        ais: l.ais.clone(), fairness: l.fairness, goods: l.goods, outposts: l.outposts, seed,
-        ..crate::skirmish::Lobby::new(map.clone())
-    };
+    // the custom lords by this machine's own list (name + checksum); one missing here cannot start
+    let ais = crate::lord_share::from_wire(&l.ais, &l.customs);
+    if let Some(n) = crate::lord_share::missing(&l.customs).first() { return Err(format!("{n} is not installed here: import his zip first")); }
+    let base = crate::skirmish::Lobby { ais, fairness: l.fairness, goods: l.goods, outposts: l.outposts, seed, ..crate::skirmish::Lobby::new(map.clone()) };
     let n = crate::skirmish::start_positions(&map).ok_or(format!("{} is not a skirmish map", l.map))?;
     if (n as usize) < l.players() { return Err(format!("{} has {n} start positions for {} players", l.map, l.players())); }
-    let mut s = crate::skirmish::setup(&base);
-    s.preinit[0] = 0; // networked MP (MP state 1)
     let h = l.humans.len() as i32;
-    for a in &mut s.ais { a.0 += h - 1; }
-    for a in &mut s.aivs { a.0 += h - 1; }
+    let mut s = crate::skirmish::setup_at(&base, h + 1); // the AIs after the humans
+    s.preinit[0] = 0; // networked MP (MP state 1)
     s.humans = l.humans.iter().enumerate().map(|(k, u)| (k as i32 + 1, u.team, k as i32 + 1 == me, u.lord)).collect();
     // start position k → player k + 1 (MultiplayerSetupTransferData words 10..17)
     for k in 0..8 {
@@ -1815,7 +1853,8 @@ mod tests {
     #[test]
     fn messages_round_trip() {
         let mut l = Lobby::new("host");
-        l.humans.push(Human { name: "zwei".into(), team: 2, lord: 5, coa: "0222110191010".into() });
+        l.humans.push(Human { name: "zwei".into(), team: 2, lord: 5, coa: "0222110191010".into(), missing: vec!["Lord T".into()] });
+        l.customs = vec![("Lord T".into(), 0x1234_5678_9abc_def0)];
         l.ais.push((4, 1));
         (l.coop, l.slots, l.spectators, l.loaded, l.hill) = (Some((2, 7, true)), vec![1, 3], vec!["watcher".into()], true, 300);
         let a: SocketAddr = "192.168.1.20:47790".parse().unwrap();
@@ -1826,7 +1865,7 @@ mod tests {
             Msg::Rtt { max_ms: 3 }, Msg::Hold { at: 9, why: "x".into(), state: vec![2, 100] }, Msg::PageHashes { from: 2, hashes: vec![0, u64::MAX] },
             Msg::Pages { to: 2, last: true, idx: vec![4, 9], lz: vec![1, 2] }, Msg::Synced { from: 2 },
             Msg::Go { at: 9, through: vec![(1, 20)], active: vec![1, 2], rules: b"koth1,5".to_vec() }, Msg::Joined { who: 100, tick: 0, through: 0 }, Msg::Pause { from: 2, on: true }, Msg::Paused { by: 2, left: 1 },
-            Msg::Speed { rate: 65 }] {
+            Msg::Speed { rate: 65 }, Msg::Have { from: 2, missing: vec!["Lord T".into()] }] {
             let e = m.encode();
             assert_eq!(u32::from_le_bytes(e[..4].try_into().unwrap()) as usize, e.len() - 4);
             assert_eq!(format!("{:?}", Msg::decode(&e[4..]).unwrap()), format!("{m:?}"));
@@ -2454,5 +2493,67 @@ mod tests {
         println!("{ticks} ticks in {:?}: host {:?}, client {:?}", start.elapsed(), (a.0, a.1, a.2), (b.0, b.1, b.2));
         assert_eq!(a.3, b.3, "final sync sums differ");
         assert!(a.2 >= ticks as u64 - 2 && b.2 >= ticks as u64 - 2, "sync checks compared: {} / {}", a.2, b.2);
+    }
+
+    /// A custom lord in a LAN game: a lord the client lacks shows in its Have and blocks the host's Start (the
+    /// lobby's `missing`); once only lords both have are in, the game starts with the custom lord registered as DE
+    /// does (player 3 = after the 2 humans, lord slot 3 + 0x1d) and both peers stay in sync. SHC_MP_TICKS (2,000).
+    #[cfg(feature = "live")]
+    #[test]
+    fn custom_lord_lan() {
+        if !crate::skirmish::maps_dir().join("Crater Lake.map").exists() { return; }
+        use crate::{custom_lords::BASE, lord_share};
+        let ticks: i32 = std::env::var("SHC_MP_TICKS").ok().and_then(|v| v.parse().ok()).unwrap_or(2_000);
+        // a player folder with "Test Lord": Frederick's config, flat field names, his castles by fallback
+        let dir = std::env::temp_dir().join(format!("shc-lan-lord-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("CustomLords/Test Lord")).unwrap();
+        let row: Vec<&str> = include_str!("../../re/data/ai_lords.tsv").lines().find(|l| l.starts_with("10\t")).unwrap().split('\t').skip(1).collect();
+        let names = include_str!("../../re/data/aic_fields.tsv").lines().skip(1).map(|l| l.split('\t').nth(3).unwrap());
+        let body: Vec<String> = names.zip(&row).take(280).map(|(n, v)| format!("\"{n}\":{v}")).collect();
+        std::fs::write(dir.join("CustomLords/Test Lord/Test Lord.lordjson"), format!("{{\"lord\":{{{}}}}}", body.join(","))).unwrap();
+        crate::skirmish::set_test_profile(dir.clone());
+        assert_eq!(crate::custom_lords::rescan(), 1);
+        let mut host = Net::test_host();
+        let addr = SocketAddr::from(([127, 0, 0, 1], host.port()));
+        let join = std::thread::spawn(move || Net::join(addr, "Gast").expect("join"));
+        let t0 = Instant::now();
+        while host.lobby.humans.len() < 2 && t0.elapsed() < Duration::from_secs(5) { host.poll(); std::thread::sleep(Duration::from_millis(2)); }
+        let mut client = join.join().unwrap();
+        let (ais, customs) = lord_share::to_wire(&[(BASE, 0)]);
+        assert_eq!((ais.clone(), customs.len(), customs[0].0.as_str()), (vec![(BASE, 0)], 1, "Test Lord"));
+        // a lord nobody has, next to Test Lord: the client reports it, the lobby marks it
+        let wait = |host: &mut Net, client: &mut Net, want: Vec<String>| {
+            let t = Instant::now();
+            while (host.lobby.humans[1].missing != want || client.lobby.humans[1].missing != want) && t.elapsed() < Duration::from_secs(5) {
+                host.poll(); client.poll(); std::thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!((&host.lobby.humans[1].missing, &client.lobby.humans[1].missing), (&want, &want), "host and client see who lacks what");
+        };
+        let mut l = host.lobby.clone();
+        (l.ais, l.customs) = (vec![(BASE, 0), (BASE + 1, 0)], vec![customs[0].clone(), ("Ghost".into(), 7)]);
+        host.set_lobby(l);
+        wait(&mut host, &mut client, vec!["Ghost".into()]);
+        assert!(game(&host.lobby, 1, 1).is_err_and(|e| e.contains("Ghost")), "no start with a lord missing here");
+        let mut l = host.lobby.clone();
+        (l.ais, l.customs) = (ais, customs);
+        host.set_lobby(l);
+        wait(&mut host, &mut client, vec![]);
+        let (lobby, seed, delay) = host.start(1792400000, DELAY);
+        while client.started.is_none() && t0.elapsed() < Duration::from_secs(10) { client.poll(); std::thread::sleep(Duration::from_millis(2)); }
+        let (cl, cs, cd) = client.started.clone().expect("client got Start");
+        let m = game(&lobby, 1, seed).expect("custom lord game");
+        assert_eq!((m.i32(0x188571c34 + 3 * 4), m.i32(shc_sim::ai::F + (3 + 0x1d) * 0x5e4)), (3 + 0x1d, 9), "the AI is the custom lord, Frederick's config");
+        assert_eq!(crate::custom_lords::in_game(3).map(|c| c.name), Some("Test Lord".into()));
+        let done = Arc::new(std::sync::Barrier::new(2));
+        let d2 = done.clone();
+        let (da, db) = (dir.clone(), dir.clone()); // the player folder is per thread in tests
+        let a = std::thread::spawn(move || { crate::skirmish::set_test_profile(da); peer(host, lobby, seed, delay, ticks, done) });
+        let b = std::thread::spawn(move || { crate::skirmish::set_test_profile(db); peer(client, cl, cs, cd, ticks, d2) });
+        let (a, b) = (a.join().expect("host peer"), b.join().expect("client peer"));
+        assert_eq!(a.3, b.3, "final sync sums differ");
+        assert!(a.2 >= ticks as u64 - 2 && b.2 >= ticks as u64 - 2, "sync checks compared: {} / {}", a.2, b.2);
+        crate::custom_lords::set_in_game(3, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

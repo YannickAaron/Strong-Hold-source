@@ -167,7 +167,7 @@ impl World {
         let mut chimp = None; // the last chimp record: continuations 0x35, 0x33, 0x34 follow it
         self.applies += 1;
         self.applied_at = Some(std::time::Instant::now());
-        for r in tick {
+        for (k, r) in tick.iter().enumerate() {
             if r[0] == ROTATION {
                 if r[1] != self.rot { self.rotate(r[1], dirty); }
                 if r[2..11].iter().any(|&c| c != 0) { self.colours = std::array::from_fn(|k| r[2 + k].clamp(0, 8) as u8); }
@@ -189,7 +189,12 @@ impl World {
                 let id = r[10] as i32;
                 chimp = Some(id);
                 for m in [&mut self.marks, &mut self.tele] { m.remove(&id); }
-                self.next.remove(&id);
+                // addUpdateChimp's flag4: a record without its 0x34 while the last slide still runs (now < nextTimeEnd,
+                // one engine frame later in a journey: k7 bit 0x4000) keeps sliding. A horse sends a new frame every 2
+                // ticks but a step every 4..6, so dropping the slide here snapped it back to the step's start mid-step
+                let slides = tick[k + 1..].iter().take_while(|q| (0x33..=0x35).contains(&q[0])).any(|q| q[0] == 0x34);
+                let running = |&(n, seq): &(Rec, u64)| self.applies - seq <= n[7].max(0) as u64 + (r[7] & 0x4000 != 0) as u64;
+                if slides || !self.next.get(&id).is_some_and(running) { self.next.remove(&id); }
             }
             let mut r = *r;
             if (0..N as i16).contains(&r[1]) && (0..N as i16).contains(&r[2]) {
@@ -220,7 +225,8 @@ impl World {
 }
 
 /// GM file id -> sprite index lookup + team palette, from gm.tsv (re/scripts/gen_gm_table.py).
-pub struct Gm { files: HashMap<i16, Vec<(String, bool, i32)>>, names: HashMap<String, usize>, palettes: HashMap<i16, Vec<[f32; 3]>>, sassanid_stables: bool }
+/// `lords`: per player, the custom lord whose own map sprite its lord wears (custom_lords::sprite_of, at game start).
+pub struct Gm { files: HashMap<i16, Vec<(String, bool, i32)>>, names: HashMap<String, usize>, palettes: HashMap<i16, Vec<[f32; 3]>>, sassanid_stables: bool, lords: [Option<String>; 9] }
 
 impl Gm {
     pub fn new(names: &[String]) -> Self {
@@ -244,7 +250,8 @@ impl Gm {
         // SHC_SASSANID_STABLE=1 (dev, until the sim's tiler emits gm 1045 for marked stables): every stables draws as
         // the Sassanid Stable
         let sassanid_stables = std::env::var_os("SHC_SASSANID_STABLE").is_some();
-        Self { files, names: names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect(), palettes, sassanid_stables }
+        let lords = std::array::from_fn(|p| crate::custom_lords::sprite_of(p).filter(|s| names.iter().any(|n| *n == format!("{s}/body_lord-1"))));
+        Self { files, names: names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect(), palettes, sassanid_stables, lords }
     }
 
     /// A Sassanid Stable's tile piece: gm 1045, images 569..604 (the stables' numbering).
@@ -266,10 +273,23 @@ impl Gm {
         Some([-32.0 * d, -16.0 * d])
     }
 
+    /// A lord (any lord skin, UNIT_BEHAVIOUR.md §55 u.0x434) of a player whose custom lord brings its own sprite:
+    /// that sprite's frame for body `image`, owner = record colour k7 (the player before `World::colours`).
+    pub fn lord(&self, file: i16, image: i16, colour: i16) -> Option<usize> {
+        if !matches!(file, 100 | 205 | 226..=228 | 230..=232) { return None; }
+        let slug = self.lords.get((colour & 0x3fff) as usize)?.as_ref()?;
+        self.names.get(&format!("{slug}/body_lord-{}", image as i32 - 1)).copied()
+    }
+
     /// `gmSprites[file][image]`: the entry with the largest ID_Offset <= image wins (sea_new vs sea_shore).
-    fn get(&self, file: i16, image: i32) -> Option<usize> {
+    fn get(&self, file: i16, image: i32) -> Option<usize> { self.get_x(file, image, false) }
+
+    /// `alt`: GetGMSprite(.., altFrame: true), DE's in-between frame "<name>-<n>x" of a dash-named file; the plain
+    /// frame where it has none.
+    fn get_x(&self, file: i16, image: i32, alt: bool) -> Option<usize> {
         let (name, dash, off) = self.files.get(&file)?.iter().filter(|e| e.2 <= image).max_by_key(|e| e.2)?;
         let key = if *dash { format!("{name}-{}", image - off) } else { format!("{name} {:03}", image - off) };
+        if alt && *dash { if let Some(&s) = self.names.get(&format!("{key}x")) { return Some(s); } }
         self.names.get(&key).copied()
     }
 
@@ -343,13 +363,16 @@ impl Gm {
     }
 
     /// SpriteMapping.getBodyImage: frame is 1-based except for a few files (CSHARP_NOTES §2).
-    pub fn body(&self, file: i16, image: i16) -> Option<usize> {
+    pub fn body(&self, file: i16, image: i16) -> Option<usize> { self.body_x(file, image, false) }
+
+    /// `body` with SetBodySprite's altFrame (interpChimp: a walking chimp past half its step).
+    pub fn body_x(&self, file: i16, image: i16, alt: bool) -> Option<usize> {
         let direct = matches!(file, 16 | 22 | 28 | 54 | 105 | 116 | 136 | 158 | 198);
         if file == 85 && image > 101 {
             // GM_FLOAT_POP_CIRC overflow frames live in GM_FLOAT_POP_CIRC_2 (218): SpriteMapping.getBodyImage
             return self.get(218, image as i32 - 202 - 1);
         }
-        self.get(file, image as i32 - if direct { 0 } else { 1 })
+        self.get_x(file, image as i32 - if direct { 0 } else { 1 }, alt)
     }
 }
 
@@ -483,3 +506,20 @@ fn player_colours_follow_the_engine() {
     assert_eq!(w.colours, c);
 }
 
+/// A knight from the original's recording (rec_1792328742 t1617..1621): a step every 4 ticks (0x34 k7 3), a new frame
+/// every 2. The frame-only record halfway keeps the slide (addUpdateChimp flag4); one after the slide's end drops it.
+#[test]
+fn horse_keeps_sliding_on_frame_records() {
+    let mut w = World::new();
+    let chimp = |img: i16, dx: i16| { let mut r = [0i16; 21]; (r[0], r[1], r[2], r[3], r[4], r[8], r[10]) = (2, 473, 475, 44, img, dx, 7); r };
+    let mut next = [0i16; 21];
+    (next[0], next[1], next[2], next[7], next[8]) = (0x34, 473, 475, 3, 10);
+    w.apply(&[chimp(183, 16), next], &mut vec![]);
+    w.apply(&[], &mut vec![]);
+    w.apply(&[chimp(191, 16)], &mut vec![]);
+    assert!(w.next.contains_key(&7), "frame record 2 ticks into a 4-tick step: still sliding");
+    w.apply(&[], &mut vec![]);
+    w.apply(&[], &mut vec![]);
+    w.apply(&[chimp(199, 10)], &mut vec![]);
+    assert!(!w.next.contains_key(&7), "after the step: at the record's position");
+}

@@ -16,6 +16,8 @@ fontdue = "0.9"
 shc-sim = { path = "../sim", optional = true }
 shc-audio = { path = "../audio", optional = true }
 shc-extract = { path = "../extract" }
+# lord_share.rs: a lord zip's deflate entries. In the lock already (png pulls it in): nothing new to download.
+flate2 = "1.1"
 # help.rs: the help pages' pictures. The same crate and features shc-extract already builds: nothing new to download.
 image = { version = "0.25", default-features = false, features = ["png"] }
 

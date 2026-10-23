@@ -54,12 +54,14 @@ impl Atlases {
         let (bgl, screen, sampler, black, total) = (bgl.clone(), screen.clone(), sampler.clone(), black.clone(), jobs.len());
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
-            let read = |n: &str| std::fs::read(crate::cache_dir().join(format!("{n}.bc"))).unwrap();
+            let read = |n: &str| std::fs::read(crate::cache_dir().join(format!("{n}.bc"))).unwrap(); // a custom lord's atlas: an absolute path
             for (i, (name, w, h)) in jobs.into_iter().enumerate() {
                 let own = BUNDLED.iter().find(|b| b.0 == name);
+                // a custom lord's atlas (custom_lords::add_sprites: a full path) has its BC1 mask next to it
+                let custom = std::path::Path::new(&name).is_absolute() && std::path::Path::new(&format!("{name}_m.bc")).is_file();
                 let mask = match own {
                     Some(b) => Some(upload(&dev, &name, &inflate(b.2), w, h, wgpu::TextureFormat::Bc1RgbaUnorm, 8)),
-                    None => masks.iter().find(|m| m.0 == i).map(|&(_, mw, mh, f)| {
+                    None => masks.iter().find(|m| m.0 == i).map(|&(_, mw, mh, f)| (mw, mh, f)).or(custom.then_some((w, h, 10))).map(|(mw, mh, f)| {
                         let (f, b) = if f == 12 { (wgpu::TextureFormat::Bc3RgbaUnorm, 16) } else { (wgpu::TextureFormat::Bc1RgbaUnorm, 8) };
                         upload(&dev, &name, &read(&format!("{name}_m")), mw, mh, f, b)
                     }),

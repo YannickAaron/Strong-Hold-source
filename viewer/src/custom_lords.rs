@@ -7,6 +7,11 @@
 //! (FRONT_Multiplayer.StartSkirmishGame): lord type 29 + slot, its castles as custom AIVs, then
 //! `DLL_SetExtendedLordConfig` (sim `ai::set_extended_lord_config`), which makes the engine's speech lines
 //! "*<player>*SK_<KEY>" (hudmsg::f102bc0); audio.rs, video.rs and hud.rs resolve those here.
+//! Our extension, also in CustomLords/<Name>/: `help.txt` (the Add-AI panel's 5 rows, `TEXT_AI_LORD_HELP_001 ="..."`
+//! .. `_005`, and `TITLE`), `bio.txt` (the backstory page's text), `portrait.png` + `arms.png` (its pictures),
+//! `trailer.webm` (its story video, played full screen) and `sprite/` (the lord's own map
+//! sprite: `atlases.tsv` + `sprites.tsv` as export_atlases.py writes them, one BC7 atlas `<name>.bc` + BC1 mask
+//! `<name>_m.bc`, frames named `body_lord-<n>`), used for that player's lord only.
 //! ponytail: the first .lordjson and all .aivjson of a folder (DE's AI Settings popup picks among several); Workshop
 //! folders and the duplicate-name nicknames (NICKNAME1..8) are not read; LAN lobbies hide the custom lords (the
 //! peers' sims would need the same files).
@@ -21,8 +26,9 @@ pub struct Custom {
     pub name: String,
     pub config: Vec<i32>,      // the 377 AIC fields (re/data/aic_fields.tsv order)
     pub aivs: Vec<Vec<i16>>,   // castles as DLL_ImportAIV blobs
-    pub avatar: Option<Vec<u8>>, // avatar.png as 130² RGBA (the coat-of-arms face sheet's slot size)
+    pub avatar: Option<Vec<u8>>, // face.png (alpha) or avatar.png as 130² RGBA (the coat-of-arms face sheet's slot size)
     pub media: Option<PathBuf>,  // CustomMedia/<name>
+    pub dir: PathBuf,            // CustomLords/<name>
 }
 
 /// The lords found. Tests: one list per thread, as their profile folder is (parallel tests rescan and start games).
@@ -66,10 +72,11 @@ pub fn rescan() -> usize {
 pub fn count() -> usize { list().len() }
 pub fn names() -> Vec<String> { list().iter().map(|c| c.name.clone()).collect() }
 pub fn get(k: usize) -> Option<Custom> { list().get(k).cloned() }
+pub fn find(name: &str) -> Option<Custom> { list().iter().find(|c| c.name == name).cloned() }
 /// Lobby lord index `n` as a custom lord index.
 pub fn lord_of(n: usize) -> Option<usize> { n.checked_sub(BASE) }
 /// The custom lord of lobby lord index `n` (a stale list, e.g. another thread's rescan in the tests, is scanned again).
-pub fn of_lord(n: usize) -> Option<Custom> { let k = lord_of(n)?; get(k).or_else(|| { rescan(); get(k) }) }
+pub fn of_lord(n: usize) -> Option<Custom> { let k = lord_of(n).filter(|&k| k < 900)?; get(k).or_else(|| { rescan(); get(k) }) } // 900..: a LAN lord missing here (lord_share)
 /// The built-in lord (`skirmish::LORDS` index) a custom lord was made from: AIC opponent_type is the lord + 1 for the
 /// built-ins and DE's editor keeps it; falls back to the Rat. Its default castles / face stand in where needed.
 pub fn parent(c: &Custom) -> usize {
@@ -78,18 +85,60 @@ pub fn parent(c: &Custom) -> usize {
 }
 
 pub fn set_in_game(p: usize, c: Option<Custom>) {
-    if let Some(c) = &c {
-        // the reaction videos as minimap clips (video.rs plays .vid files only), off the UI thread
-        if let Some(m) = c.media.clone() {
-            let slug = slug(&c.name);
-            std::thread::spawn(move || for mood in ["angry", "happy", "neutral", "sad"] {
-                if let Some(src) = file_in(&m, &format!("{mood}.webm")) {
-                    if let Err(e) = shc_extract::video::export_custom(&src, &crate::cache_dir().join("video"), &format!("custom_{slug}_{mood}")) { eprintln!("custom lord video {}: {e}", src.display()); }
-                }
+    if let Some(c) = &c { export_videos(c); }
+    if (1..9).contains(&p) { in_game_all()[p] = c; }
+}
+/// The reaction videos as minimap clips (video.rs plays .vid files only), off the UI thread (export_custom keeps the
+/// ones exported before).
+pub fn export_videos(c: &Custom) {
+    let slug = slug(&c.name);
+    // the story trailer (our extension): full screen, the backstory page's "Watch his story"
+    // (one export per lord at a time: the page can be opened again while it runs, ~1 min)
+    static BUSY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    if let Some(src) = file_in(&c.dir, "trailer.webm") {
+        let stem = format!("custom_{slug}_trailer");
+        if !BUSY.lock().unwrap().contains(&stem) {
+            BUSY.lock().unwrap().push(stem.clone());
+            std::thread::spawn(move || {
+                if let Err(e) = shc_extract::video::export_custom_full(&src, &crate::cache_dir().join("video"), &stem) { eprintln!("custom lord trailer {}: {e}", src.display()); }
+                BUSY.lock().unwrap().retain(|s| *s != stem);
             });
         }
     }
-    if (1..9).contains(&p) { in_game_all()[p] = c; }
+    let Some(m) = c.media.clone() else { return };
+    std::thread::spawn(move || for mood in ["angry", "happy", "neutral", "sad"] {
+        let (dir, stem) = (crate::cache_dir().join("video"), format!("custom_{slug}_{mood}"));
+        if let Some(src) = file_in(&m, &format!("{mood}.webm")) {
+            if let Err(e) = shc_extract::video::export_custom(&src, &dir, &stem) { eprintln!("custom lord video {}: {e}", src.display()); }
+            // the neutral one again as the backstory page's living portrait (lord_info.rs): video.rs's banner slot
+            // (528×308), the oval fade in its alpha
+            if mood == "neutral" {
+                if let Err(e) = shc_extract::video::export_custom_as(&src, &dir, &format!("custom_{slug}_portrait"), (528, 308), portrait_frame) { eprintln!("custom lord portrait video {}: {e}", src.display()); }
+            }
+        }
+    });
+}
+/// A video frame as the portrait clip's: scaled to cover 528×308 (a fifth of the overhang off the top), faded to an oval.
+fn portrait_frame(f: shc_extract::tex::Rgba) -> shc_extract::tex::Rgba {
+    let (w, h) = (528, 308);
+    let k = (w as f32 / f.w as f32).max(h as f32 / f.h as f32);
+    let (sw, sh) = (((f.w as f32 * k).ceil() as usize).max(w), ((f.h as f32 * k).ceil() as usize).max(h));
+    let mut o = f.resize(sw, sh).crop((sw - w) / 2, (sh - h) / 5, w, h);
+    for y in 0..h { for x in 0..w { o.px[(y * w + x) * 4 + 3] = (oval(x, y, w, h) * 255.0).round() as u8; } }
+    o
+}
+/// The backstory portrait's fade at pixel (x, y) of `w`×`h`: 1 inside 60 % of the ellipse, smoothly 0 at its edge.
+pub fn oval(x: usize, y: usize, w: usize, h: usize) -> f32 {
+    let (dx, dy) = ((x as f32 + 0.5) / w as f32 * 2.0 - 1.0, (y as f32 + 0.5) / h as f32 * 2.0 - 1.0);
+    let t = ((1.0 - (dx * dx + dy * dy).sqrt()) / 0.4).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+/// The lord has a story trailer (trailer.webm), exported or not yet.
+pub fn has_trailer(c: &Custom) -> bool { file_in(&c.dir, "trailer.webm").is_some() }
+/// The lord's `mood` video ("angry".., "portrait", "trailer") as video.rs's .vid name, once exported (`export_videos`).
+pub fn vid(c: &Custom, mood: &str) -> Option<String> {
+    let f = format!("custom_{}_{mood}.vid", slug(&c.name));
+    crate::cache_dir().join("video").join(&f).exists().then_some(f)
 }
 pub fn in_game(p: usize) -> Option<Custom> { in_game_all().get(p).cloned().flatten() }
 /// The custom lord behind an engine lord kind (computer_register / PlayStateReturnData: 30 + slot = player + 0x1d).
@@ -126,14 +175,55 @@ pub fn video_stem(p: usize, key: &str) -> Option<String> {
     crate::cache_dir().join("video").join(format!("{stem}.vid")).exists().then_some(stem)
 }
 /// Player p's line KEY as its text.txt line.
-pub fn text(p: usize, key: &str) -> Option<String> {
-    let f = file_in(&in_game(p)?.media?, "text.txt")?;
-    let t = std::fs::read_to_string(f).ok()?;
+pub fn text(p: usize, key: &str) -> Option<String> { kv(&std::fs::read_to_string(file_in(&in_game(p)?.media?, "text.txt")?).ok()?, key) }
+/// `KEY ="text"` lines (DE's text.txt): KEY's text.
+fn kv(t: &str, key: &str) -> Option<String> {
     t.lines().find_map(|l| {
         let (k, v) = l.split_once('=')?;
         (k.trim().eq_ignore_ascii_case(key)).then(|| v.trim().trim_matches('"').to_string())
     })
 }
+/// The Add-AI panel's row k (0..5, label TEXT_AI_LORD_HELP_00<k+1>) from help.txt.
+pub fn help(c: &Custom, k: usize) -> Option<String> { help_text(c, &format!("TEXT_AI_LORD_HELP_{:03}", k + 1)) }
+/// help.txt's line `key`: the 5 rows, and `TITLE` (the backstory page's subtitle).
+pub fn help_text(c: &Custom, key: &str) -> Option<String> {
+    kv(&std::fs::read_to_string(file_in(&c.dir, "help.txt")?).ok()?, key).filter(|v| !v.is_empty())
+}
+/// bio.txt: the backstory, paragraphs split by blank lines.
+pub fn bio(c: &Custom) -> Vec<String> {
+    let t = file_in(&c.dir, "bio.txt").and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default().replace("\r\n", "\n");
+    t.split("\n\n").map(|p| p.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|p| !p.is_empty()).collect()
+}
+/// Picture `file` of the lord's folder (portrait.png, arms.png) as `w`×`h` RGBA, scaled to cover and cut to fit: centred
+/// across, a fifth of the overhang taken from the top (faces sit high). None without one.
+pub fn picture(c: &Custom, file: &str, w: u32, h: u32) -> Option<Vec<u8>> {
+    let img = image::open(file_in(&c.dir, file)?).ok()?;
+    let k = (w as f32 / img.width() as f32).max(h as f32 / img.height() as f32);
+    let img = img.resize_exact(((img.width() as f32 * k).ceil() as u32).max(w), ((img.height() as f32 * k).ceil() as u32).max(h), image::imageops::FilterType::Triangle);
+    Some(img.crop_imm((img.width() - w) / 2, (img.height() - h) / 5, w, h).to_rgba8().into_raw())
+}
+
+/// Startup (main.rs, after load_tables): every custom lord's `sprite/` atlas and frames appended, the atlas named by
+/// its full path (loader.rs reads `<name>.bc` / `<name>_m.bc`), the frames as `<slug>/<frame>` for `Gm::lord`.
+pub fn add_sprites(atlases: &mut Vec<crate::Atlas>, named: &mut Vec<(String, crate::Sprite)>) {
+    rescan();
+    for c in list().iter() {
+        let dir = c.dir.join("sprite");
+        let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok();
+        let (Some(a), Some(s)) = (read("atlases.tsv"), read("sprites.tsv")) else { continue };
+        let Ok((mut a, s)) = std::panic::catch_unwind(|| crate::parse_tables(&a, &s)) else { eprintln!("custom lord {}: bad sprite/ tables", c.name); continue };
+        let base = atlases.len() as u32;
+        let ok = a.iter().all(|a| dir.join(format!("{}.bc", a.name)).is_file()) && s.iter().all(|(_, p)| (p.atlas as usize) < a.len());
+        if !ok { eprintln!("custom lord {}: sprite/ incomplete, not used", c.name); continue; }
+        for x in &mut a { x.name = dir.join(&x.name).to_string_lossy().into_owned(); }
+        let n = s.len();
+        named.extend(s.into_iter().map(|(k, mut p)| { p.atlas += base; (format!("{}/{k}", slug(&c.name)), p) }));
+        atlases.extend(a);
+        println!("custom lord {}: {n} sprite frames", c.name);
+    }
+}
+/// Player p's custom lord's sprite prefix (`add_sprites`), when it has one.
+pub fn sprite_of(p: usize) -> Option<String> { in_game(p).filter(|c| c.dir.join("sprite/sprites.tsv").is_file()).map(|c| slug(&c.name)) }
 /// Lobby: the lord's ADD_PLAYER / KICK_PLAYER wav (FRONT_Multiplayer AddCustomLord).
 pub fn lobby_wav(c: &Custom, key: &str) -> Option<PathBuf> { file_in(c.media.as_ref()?, &format!("{key}.wav")) }
 
@@ -158,9 +248,10 @@ fn load(dir: &Path) -> Option<Custom> {
     let ext = |p: &Path, e: &str| p.extension().is_some_and(|x| x.eq_ignore_ascii_case(e));
     let config = files.iter().filter(|p| ext(p, "lordjson")).find_map(|p| lordjson(&std::fs::read_to_string(p).ok()?))?;
     let aivs = files.iter().filter(|p| ext(p, "aivjson")).filter_map(|p| aivjson(&std::fs::read_to_string(p).ok()?)).collect();
-    let avatar = files.iter().find(|p| p.file_name().is_some_and(|f| f.eq_ignore_ascii_case("avatar.png"))).and_then(|p| avatar(&std::fs::read(p).ok()?));
+    // face.png (our extension: the figure on alpha, the faces' stone wall shows around him) before DE's opaque avatar.png
+    let avatar = ["face.png", "avatar.png"].iter().find_map(|n| files.iter().find(|p| p.file_name().is_some_and(|f| f.eq_ignore_ascii_case(n))).and_then(|p| avatar(&std::fs::read(p).ok()?)));
     let media = roots().into_iter().map(|r| r.join("CustomMedia").join(&name)).find(|d| d.is_dir());
-    Some(Custom { name, config, aivs, avatar, media })
+    Some(Custom { name, config, aivs, avatar, media, dir: dir.to_path_buf() })
 }
 
 /// A .lordjson (LordRoot { lord: NewAIC }) as the 377 AIC fields: EngineInterface.CreateAILordConfigData copies
@@ -309,6 +400,55 @@ mod tests {
             }
             set_in_game(2, None);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Our own files: help.txt rows (DE's text.txt format), bio.txt paragraphs (CRLF too), portrait.png, and the
+    /// sprite/ folder appended to the sprite tables and worn by player 2's lord only.
+    #[test]
+    fn help_bio_portrait_sprite() {
+        let dir = test_folder("own");
+        let lord = dir.join("CustomLords/Test Lord");
+        std::fs::write(lord.join("help.txt"), "TEXT_AI_LORD_HELP_001 =\"Cold steel.\"\ntext_ai_lord_help_005 = \"“Gnade? Nein.”\"\nTEXT_AI_LORD_HELP_003 =\"\"\nTITLE =\"the Cold\"\n").unwrap();
+        std::fs::write(lord.join("bio.txt"), "A second son,\r\nno land.\r\n\r\nHe burns  farms.\r\n").unwrap();
+        let mut png = Vec::new();
+        image::write_buffer_with_format(&mut std::io::Cursor::new(&mut png), &[9u8, 8, 7, 255].repeat(20 * 10), 20, 10, image::ExtendedColorType::Rgba8, image::ImageFormat::Png).unwrap();
+        std::fs::write(lord.join("portrait.png"), png).unwrap();
+        crate::skirmish::set_test_profile(dir.clone());
+        assert_eq!(rescan(), 1);
+        let c = get(0).unwrap();
+        assert_eq!((0..5).map(|k| help(&c, k)).collect::<Vec<_>>(), [Some("Cold steel.".into()), None, None, None, Some("“Gnade? Nein.”".into())]);
+        assert_eq!(help_text(&c, "TITLE").as_deref(), Some("the Cold"));
+        assert!(!has_trailer(&c));
+        std::fs::write(lord.join("Trailer.webm"), b"").unwrap(); // found case-blind, like DE's media files
+        assert!(has_trailer(&c) && vid(&c, "trailer").is_none(), "not exported yet: the page says it is preparing");
+        assert_eq!(bio(&c), ["A second son, no land.", "He burns farms."]);
+        assert_eq!(picture(&c, "portrait.png", 6, 4).map(|p| (p.len(), p[..4].to_vec())), Some((6 * 4 * 4, vec![9, 8, 7, 255])));
+        assert_eq!(picture(&c, "portrait.png", 4, 6).map(|p| p.len()), Some(4 * 6 * 4), "cut to fit the other way");
+        assert!(picture(&c, "arms.png", 4, 4).is_none());
+        // the living portrait's frames: video.rs's banner slot size, opaque middle, clear corners
+        let f = portrait_frame(shc_extract::tex::Rgba { w: 348, h: 348, px: vec![200; 348 * 348 * 4] });
+        assert_eq!((f.w, f.h, f.px[(154 * 528 + 264) * 4 + 3], f.px[3], f.px[(307 * 528 + 527) * 4 + 3]), (528, 308, 255, 0, 0));
+        assert_eq!(find("Test Lord").map(|c| c.dir), Some(lord.clone()));
+        // sprite/ without its atlas file: not used
+        let sp = lord.join("sprite");
+        std::fs::create_dir_all(&sp).unwrap();
+        std::fs::write(sp.join("atlases.tsv"), "0\tbody_lord\t4\t4\t25\n").unwrap();
+        std::fs::write(sp.join("sprites.tsv"), "body_lord-0\t0\t0\t0\t4\t4\t0.5\t0.5\t-2,2;-2,-2;2,-2\nbody_lord-1\t0\t0\t0\t4\t4\t0.5\t0.5\t-2,2;-2,-2;2,-2\n").unwrap();
+        let (mut atlases, mut named) = (vec![crate::Atlas { name: "AllTileSprites".into(), w: 8, h: 8 }], vec![]);
+        add_sprites(&mut atlases, &mut named);
+        assert_eq!((atlases.len(), named.len()), (1, 0));
+        std::fs::write(sp.join("body_lord.bc"), [0u8; 16]).unwrap();
+        add_sprites(&mut atlases, &mut named);
+        assert_eq!((atlases.len(), atlases[1].name.clone(), named.len()), (2, sp.join("body_lord").to_string_lossy().into_owned(), 2));
+        assert_eq!((named[1].0.as_str(), named[1].1.atlas), ("test_lord/body_lord-1", 1));
+        // only the lords of the player who has it: any lord skin, frame = image - 1, owner = colour k7
+        let names: Vec<String> = ["body_lord-0", "body_lord-1"].iter().map(|s| s.to_string()).chain(named.iter().map(|n| n.0.clone())).collect();
+        set_in_game(2, Some(c));
+        let gm = crate::replay::Gm::new(&names);
+        assert_eq!((gm.lord(100, 2, 2), gm.lord(226, 1, 2), gm.lord(100, 2, 3), gm.lord(44, 2, 2), gm.lord(100, 9, 2)), (Some(3), Some(2), None, None, None));
+        set_in_game(2, None);
+        assert_eq!(crate::replay::Gm::new(&names).lord(100, 2, 2), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

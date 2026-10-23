@@ -333,6 +333,15 @@ pub fn radar(out: &mut Vec<HudTri>, e: &Engine, p: [f32; 4], arab: bool) -> bool
     w == Some(true)
 }
 
+/// lord_info.rs: a custom lord's living portrait `file` (custom_lords::vid "portrait", 528×308 with its alpha) looped
+/// into rect `p`, in the end banner's slot (free in the front end). False = not exported yet (or not started: nothing
+/// drawn this frame).
+pub fn lord(out: &mut Vec<HudTri>, file: &str, p: [f32; 4], alpha: f32) -> bool {
+    let w = want(0, file.to_string(), 0, Mode::Loop);
+    if w == Some(true) { quad(out, SMALL, p, [0.0, 0.0, BANNER[0] as f32 / SMALL_W as f32, BANNER[1] as f32 / SMALL_H as f32], [1.0, 1.0, 1.0, alpha]) }
+    w == Some(true)
+}
+
 /// endgame.rs: IngameUIScreens.triggerVideos' banner `key` (`banner_<faction>_<victory|defeat>`, the uri ends in '*':
 /// played once, then its last frame stays) into rect `p` (528 × 307 design px). True also on the frame it starts (nothing
 /// drawn: the drop begins empty). False = not exported or main.rs doesn't `pump` yet: draw the still.
@@ -341,6 +350,10 @@ pub fn banner(out: &mut Vec<HudTri>, key: &str, p: [f32; 4]) -> bool {
     if w == Some(true) { quad(out, SMALL, p, [0.0, 0.0, BANNER[0] as f32 / SMALL_W as f32, (BANNER[1] - 1) as f32 / SMALL_H as f32], [1.0; 4]) }
     w.is_some()
 }
+
+/// The full-screen slot is playing (`mission_over`, a custom lord's trailer): main.rs leaves the menu backdrop loop,
+/// which shares its texture, alone meanwhile.
+pub fn full_busy() -> bool { SLOTS.with(|s| s.borrow()[2].now.is_some()) }
 
 /// endgame.rs: HUD_MissionOver.LoadVideoBackground's video `name` (`crusader_win`, `desert_background`, ...) over the
 /// whole `w`×`h` window, black behind it (the Grid's Background; the Viewbox keeps 16:9), its last frame held, or
