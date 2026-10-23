@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 pub const DISCOVERY_PORT: u16 = 47777;
 pub const GAME_PORT: u16 = 47778;
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 /// Input delay at the start, before any round trip is measured: the original's LAN floor (FUN_180027f00).
 pub const DELAY: i32 = 10;
 /// The fewest ticks from a command to its exec tick: the gate needs P ≥ T + 2 with P = tick + delay − 1.
@@ -126,6 +126,8 @@ pub enum Msg {
     Pause { from: i32, on: bool },
     /// From the host: the game is paused by player `by` (0 = running again), who has `left` pauses left.
     Paused { by: i32, left: i32 },
+    /// To the host: a player asks for game speed `rate`; from the host: everyone runs at `rate` now.
+    Speed { rate: i32 },
 }
 
 // ---- wire format: [u32 len][kind u8][fields], little endian, strings / blobs u32-length-prefixed
@@ -219,6 +221,7 @@ impl Msg {
             Msg::Pause { from, on } => { w.u8(20).i32(*from).u8(*on as u8); }
             Msg::Paused { by, left } => { w.u8(21).i32(*by).i32(*left); }
             Msg::Say { from, to, text } => { w.u8(22).i32(*from).u32(*to).str(text); }
+            Msg::Speed { rate } => { w.u8(23).i32(*rate); }
         }
         let mut out = (w.0.len() as u32).to_le_bytes().to_vec();
         out.extend(w.0);
@@ -270,6 +273,7 @@ impl Msg {
             19 => Msg::Joined { who: r.i32()?, tick: r.i32()?, through: r.i32()? },
             20 => Msg::Pause { from: r.i32()?, on: r.u8()? != 0 },
             21 => Msg::Paused { by: r.i32()?, left: r.i32()? },
+            23 => Msg::Speed { rate: r.i32()? },
             _ => return None,
         })
     }
@@ -900,6 +904,12 @@ pub struct Status {
     pub pause: bool,
     /// Paused by (player, pauses that player has left).
     pub paused: Option<(i32, i32)>,
+    /// UI → game: this player asks for game speed n (keys, Options slider; the host decides).
+    pub speed: Option<i32>,
+    /// Game → UI: the speed everyone runs at from now on (main.rs `rate`).
+    pub rate: Option<i32>,
+    /// The Options GameSpeed setting last seen in this game: only a change of it is a speed request (`speed_setting`).
+    pub cfg_speed: i32,
     pub delay: i32,
     pub rtt_ms: f32,
     /// The players' colours (`replay::colours`, from the engine after each tick; 0 = the default).
@@ -965,6 +975,7 @@ pub struct Lockstep {
     dead_host: Option<i32>,           // new host: the old one, kicked at the migration hold
     paused_by: i32,                   // the player who paused the game (0 = running)
     pauses: BTreeMap<i32, i32>,       // host: pauses used per player
+    speed: i32,                       // the game speed everyone runs at (ticks/s; the lobby's at the start)
 }
 
 #[cfg(feature = "live")]
@@ -976,12 +987,12 @@ impl Lockstep {
         let teams = net.lobby.humans.iter().enumerate().map(|(k, h)| (net.lobby.player_of(k), h.team)).collect();
         let status = Arc::new(Mutex::new(Status { players, teams, me: net.me, chat: net.chat.clone(), delay, ..Default::default() }));
         let through = active.iter().map(|&p| (p, tick + delay - 1)).collect();
-        let spectator = net.me >= SPECTATOR;
+        let (spectator, speed) = (net.me >= SPECTATOR, net.lobby.speed);
         let mut ls = Lockstep { me: net.me, spectator, net, delay, adaptive: true, resync: true, hash_every: HASH_EVERY, rejoin_wait: REJOIN_WAIT, promised: tick + delay - 1,
             through, active, inbox: vec![], kicks: vec![], own: Default::default(), theirs: Default::default(), last: tick, error: None,
             hashes_checked: 0, resyncs: 0, log: vec![], status, epoch: Instant::now(), rtt: Default::default(), max_rtt: 0.0,
             pinged: Instant::now(), adapted: Instant::now(), steps: vec![], stepped: None, hold: None, lost: Default::default(), migrate: None, retried: Instant::now(),
-            dead_host: None, paused_by: 0, pauses: Default::default() };
+            dead_host: None, paused_by: 0, pauses: Default::default(), speed };
         // the host of a loaded game / with spectators: they get its state at the first tick
         if ls.net.is_host() {
             let state: Vec<i32> = ls.net.peers.iter().map(|(p, _)| *p).filter(|&p| ls.net.lobby.loaded || p >= SPECTATOR).collect();
@@ -1026,11 +1037,14 @@ impl Lockstep {
     fn log(&mut self, s: String) { eprintln!("lan {}: {s}", self.me); self.log.push(s); }
 
     fn poll(&mut self) {
-        let (say, pause) = { let mut s = self.status.lock().unwrap(); (std::mem::take(&mut s.say), std::mem::take(&mut s.pause)) };
+        let (say, pause, speed) = { let mut s = self.status.lock().unwrap(); (std::mem::take(&mut s.say), std::mem::take(&mut s.pause), s.speed.take()) };
         for (text, to) in say { self.net.say_to(&text, to); }
         if pause && !self.spectator {
             let on = self.paused_by == 0;
             if self.net.is_host() { self.pause(self.me, on) } else { self.net.send(&Msg::Pause { from: self.me, on }, self.me) }
+        }
+        if let Some(rate) = speed.filter(|_| !self.spectator) {
+            if self.net.is_host() { self.set_speed(rate) } else { self.net.send(&Msg::Speed { rate }, self.me) }
         }
         let msgs = self.net.poll();
         { let mut s = self.status.lock().unwrap(); if s.chat.len() != self.net.chat.len() { s.chat = self.net.chat.clone(); } } // also while held
@@ -1097,6 +1111,8 @@ impl Lockstep {
                 }
                 Msg::Pause { from, on } if self.net.is_host() => self.pause(from, on),
                 Msg::Paused { by, left } if !self.net.is_host() => self.set_paused(by, left),
+                Msg::Speed { rate } if self.net.is_host() => self.set_speed(rate),
+                Msg::Speed { rate } => { self.speed = rate; self.status.lock().unwrap().rate = Some(rate); }
                 Msg::Joined { who, tick, through } if self.net.is_host() => {
                     self.lost.remove(&who);
                     if who < SPECTATOR {
@@ -1144,6 +1160,18 @@ impl Lockstep {
         let (by, left) = (if on { from } else { 0 }, PAUSES - self.pauses.get(&from).copied().unwrap_or(0));
         self.net.send(&Msg::Paused { by, left }, self.me);
         self.set_paused(by, left);
+    }
+
+    /// Host: a player's speed request, 10..90 by 5 like the original's MP: everyone runs at it from now on. Ours (the
+    /// original keeps the lobby's speed in multiplayer); pacing only, the sim never sees it. The lockstep gate holds
+    /// every peer to the slowest, so one shared speed is the only one that takes effect.
+    fn set_speed(&mut self, rate: i32) {
+        let rate = (rate / 5 * 5).clamp(10, 90);
+        if rate == self.speed { return; }
+        self.speed = rate;
+        self.net.send(&Msg::Speed { rate }, self.me);
+        self.status.lock().unwrap().rate = Some(rate);
+        self.log(format!("game speed {rate}"));
     }
 
     fn set_paused(&mut self, by: i32, left: i32) {
@@ -1265,6 +1293,7 @@ impl Lockstep {
             let at = h.at;
             let go = Msg::Go { at, through, active: self.active.clone() };
             self.net.send(&go, self.me);
+            self.net.send(&Msg::Speed { rate: self.speed }, self.me); // joiners start at the lobby's
             let why = h.why.clone();
             if !h.state.is_empty() && why.contains("desync") { self.resyncs += 1; }
             self.hold = None;
@@ -1658,6 +1687,7 @@ impl crate::App {
                 (self.menu, self.last_lobby, self.campaign) = (None, None, None);
                 let mut l = crate::live::Live::from_mem(m);
                 if ls.spectator { l.me = 0; }
+                ls.status().lock().unwrap().cfg_speed = crate::skirmish::Settings::load().game_speed() as i32;
                 *UI.lock().unwrap() = Some(ls.status());
                 *CHAT.lock().unwrap() = ChatUi::default();
                 l.net = Some(ls);
@@ -1709,14 +1739,34 @@ impl crate::App {
     pub(crate) fn lan_pause(&mut self) -> bool {
         UI.lock().unwrap().as_ref().map(|st| st.lock().unwrap().pause = true).is_some()
     }
+}
+
+/// main.rs speed keys: in a LAN game ask the host for game speed `rate` (Lockstep::set_speed; it comes back as
+/// Status.rate). True = handled.
+pub(crate) fn ask_speed(rate: f32) -> bool {
+    UI.lock().unwrap().as_ref().map(|st| st.lock().unwrap().speed = Some(rate as i32)).is_some()
+}
+
+/// main.rs Options changed: in a LAN game only a moved GameSpeed slider asks for a speed (another option keeps the
+/// game's). True = in a LAN game.
+pub(crate) fn speed_setting(cfg: f32) -> bool {
+    let Some(st) = UI.lock().unwrap().clone() else { return false };
+    let mut s = st.lock().unwrap();
+    if s.cfg_speed != cfg as i32 { (s.cfg_speed, s.speed) = (cfg as i32, Some(cfg as i32)); }
+    true
+}
+
+#[cfg(feature = "live")]
+impl crate::App {
 
     /// Every frame: the menu's LAN session (a client's game start), a LAN game that stopped (desync without resync,
     /// host gone for good: back to the menu with the reason), what the game waits for in the window title.
     pub(crate) fn lan_tick(&mut self, el: &winit::event_loop::ActiveEventLoop) {
         if let Some(go) = self.menu.as_mut().and_then(|m| m.mp_poll()) { self.menu_go(go, el); }
         let Some(st) = UI.lock().unwrap().clone() else { return };
-        if self.play.is_none() { *UI.lock().unwrap() = None; return; }
-        let s = st.lock().unwrap().clone();
+        let Some(p) = &mut self.play else { *UI.lock().unwrap() = None; return };
+        let s = { let mut s = st.lock().unwrap(); let c = s.clone(); s.rate = None; c };
+        if let Some(r) = s.rate { p.rate = r as f32; } // the host set everyone's game speed (Lockstep::set_speed)
         if let Some(e) = s.error {
             *UI.lock().unwrap() = None;
             self.menu_go(crate::menu::Go::ToMenu, el);
@@ -1756,7 +1806,8 @@ mod tests {
             Msg::Left { who: 2, at: 99 }, Msg::Chat { from: 1, text: "hallo ü".into() }, Msg::Ping { from: 1, t: 5 }, Msg::Pong { from: 2, to: 1, t: 5 },
             Msg::Rtt { max_ms: 3 }, Msg::Hold { at: 9, why: "x".into(), state: vec![2, 100] }, Msg::PageHashes { from: 2, hashes: vec![0, u64::MAX] },
             Msg::Pages { to: 2, last: true, idx: vec![4, 9], lz: vec![1, 2] }, Msg::Synced { from: 2 },
-            Msg::Go { at: 9, through: vec![(1, 20)], active: vec![1, 2] }, Msg::Joined { who: 100, tick: 0, through: 0 }, Msg::Pause { from: 2, on: true }, Msg::Paused { by: 2, left: 1 }] {
+            Msg::Go { at: 9, through: vec![(1, 20)], active: vec![1, 2] }, Msg::Joined { who: 100, tick: 0, through: 0 }, Msg::Pause { from: 2, on: true }, Msg::Paused { by: 2, left: 1 },
+            Msg::Speed { rate: 65 }] {
             let e = m.encode();
             assert_eq!(u32::from_le_bytes(e[..4].try_into().unwrap()) as usize, e.len() - 4);
             assert_eq!(format!("{:?}", Msg::decode(&e[4..]).unwrap()), format!("{m:?}"));
@@ -1886,6 +1937,29 @@ mod tests {
         for _ in 1..PAUSES { n.pause(2, true); assert_eq!(n.paused_by, 2); n.pause(2, false); }
         n.pause(2, true);
         assert_eq!(n.paused_by, 0, "4th pause refused");
+    }
+
+    /// The game speed (ours): the client's speed key reaches everyone through the host, 10..90 by 5; the games stay
+    /// in sync.
+    #[cfg(feature = "live")]
+    #[test]
+    fn speed_for_everyone() {
+        if !maps() { return; }
+        let ls = start(1, 10);
+        let st: Vec<_> = ls.iter().map(|l| l.net.as_ref().unwrap().status()).collect();
+        let rates = || st.iter().map(|s| s.lock().unwrap().rate.take()).collect::<Vec<_>>();
+        st[1].lock().unwrap().speed = Some(63);
+        let ls = run_for(ls, 300);
+        assert_eq!(rates(), [Some(60), Some(60)], "{} / {}", log(&ls[0]), log(&ls[1]));
+        st[0].lock().unwrap().speed = Some(500);
+        let ls = run_for(ls, 300);
+        assert_eq!(rates(), [Some(90), Some(90)]);
+        st[1].lock().unwrap().speed = Some(90); // unchanged: nothing sent
+        let ls = run_for(ls, 300);
+        assert_eq!(rates(), [None, None]);
+        let at = ls[0].tick().max(ls[1].tick()) + 100;
+        let mut ls = run_all(ls, at);
+        assert_eq!(sums(&mut ls[0]), sums(&mut ls[1]));
     }
 
     /// The in-game chat: a line typed on the client (the chat line's keys) reaches the host, whose message list

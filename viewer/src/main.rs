@@ -712,7 +712,8 @@ impl App {
             },
             // Options changed settings.cfg: the running game's speed (Director.SetEngineFrameRate); Apply's screen mode
             menu::Go::Settings(mode) => {
-                if let Some(p) = &mut self.play { p.rate = skirmish::Settings::load().game_speed(); }
+                let speed = skirmish::Settings::load().game_speed();
+                if let Some(p) = &mut self.play { if !lan::speed_setting(speed) { p.rate = speed } } // LAN: the host's (lan.rs)
                 self.keys = keys::Keys::load();
                 if let (Some(mode), Some(g)) = (mode, &self.gfx) { ux::set_mode(&g.window, mode); }
                 self.apply_options(); // VSync, cursor lock, background mute (ux.rs)
@@ -1215,7 +1216,8 @@ impl App {
             #[cfg(feature = "live")]
             "QuickLoad" => { let q = saves::quick_path(); if q.exists() { let _ = self.load_in_background(menu::Go::Load(q)); } }
             "ToggleStats" => self.stats.on = !self.stats.on, // the port's stats overlay (stats.rs), F3 by default (keys.rs EXTRA)
-            "IncreaseEngineSpeed" | "DecreaseEngineSpeed" => p.rate = live::speed_step(p.rate, f == "IncreaseEngineSpeed"),
+            // a LAN game: the host sets it for everyone (lan.rs)
+            "IncreaseEngineSpeed" | "DecreaseEngineSpeed" => { let r = live::speed_step(p.rate, f == "IncreaseEngineSpeed"); if !lan::ask_speed(r) { p.rate = r } }
             // X / Z zoom in / out, Q / E rotate the map left / right (not while paused)
             "ZoomIn" | "ZoomOut" if p.playing => self.adjust_zoom(if f == "ZoomIn" { 0.5 } else { -0.5 }),
             "MapRotateLeft" | "MapRotateRight" if p.playing => self.rotate_map(f == "MapRotateRight"),
