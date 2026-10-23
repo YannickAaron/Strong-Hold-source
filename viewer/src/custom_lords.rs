@@ -241,7 +241,7 @@ pub fn draw_face(out: &mut Vec<crate::hud::HudTri>, c: &Custom, p: [f32; 4], col
 
 /// One CustomLords/<Name> folder; None without a .lordjson (DE also wants an .aivjson; we fall back to the parent's
 /// castles).
-fn load(dir: &Path) -> Option<Custom> {
+pub(crate) fn load(dir: &Path) -> Option<Custom> {
     let name = dir.file_name()?.to_string_lossy().into_owned();
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).collect();
     files.sort();

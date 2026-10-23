@@ -49,14 +49,16 @@ pub struct Player {
 }
 
 impl Player {
-    /// `<cache>/video/<name>`, which must be `size` (w, h, bytes per block) to fit its texture; None = not exported.
+    /// `<cache>/video/<name>`, which must fit `size` (w, h, bytes per block) of its texture (smaller is drawn from the
+    /// top-left: `trailer`); None = not exported.
     fn open(name: &str, mode: Mode, size: [u32; 3]) -> Option<Self> {
         let mut file = File::open(crate::cache_dir().join("video").join(name)).ok()?;
         let mut h = [0u8; 24];
         file.read_exact(&mut h).ok()?;
         let u = |i: usize| u32::from_le_bytes(h[i..i + 4].try_into().unwrap());
         let bpb = match &h[..4] { b"SHCV" => 8, b"SHC3" => 16, _ => return None };
-        if [u(4), u(8), bpb] != size { return None; }
+        if u(4) > size[0] || u(8) > size[1] || bpb != size[2] { return None; }
+        let size = [u(4), u(8), bpb];
         let n = u(16) as usize;
         let mut lens = vec![0u8; n * 4];
         file.read_exact(&mut lens).ok()?;
@@ -349,6 +351,22 @@ pub fn banner(out: &mut Vec<HudTri>, key: &str, p: [f32; 4]) -> bool {
     let w = want(0, format!("{key}.vid"), 0, Mode::Hold);
     if w == Some(true) { quad(out, SMALL, p, [0.0, 0.0, BANNER[0] as f32 / SMALL_W as f32, (BANNER[1] - 1) as f32 / SMALL_H as f32], [1.0; 4]) }
     w.is_some()
+}
+
+/// lord_info.rs: a custom lord's story trailer `name` (custom_lords::vid "trailer", stored at its own size, e.g.
+/// 1280×720) played once in the full-screen slot, scaled to fit the `w`×`h` window over black. As `mission_over`:
+/// None = can't play, else Some(over).
+pub fn trailer(out: &mut Vec<HudTri>, name: &str, w: f32, h: f32) -> Option<bool> {
+    let shown = want(2, format!("{name}.vid"), 0, Mode::Once)?;
+    quad(out, TEX, [0.0, 0.0, w, h], ALL, [0.0; 4]);
+    let (over, vs) = SLOTS.with(|s| s.borrow()[2].now.as_ref().map_or((false, [W, H, 8]), |n| (n.done, n.p.size)));
+    if shown || over {
+        let (vw, vh) = (vs[0] as f32, vs[1] as f32);
+        let k = (w / vw).min(h / vh);
+        let (x, y) = ((w - vw * k) / 2.0, (h - vh * k) / 2.0);
+        quad(out, TEX, [x, y, w - x, h - y], [0.0, 0.0, vw / W as f32, vh / H as f32], [1.0; 4]);
+    }
+    Some(over)
 }
 
 /// The full-screen slot is playing (`mission_over`, a custom lord's trailer): main.rs leaves the menu backdrop loop,

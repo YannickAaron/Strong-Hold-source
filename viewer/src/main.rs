@@ -120,17 +120,21 @@ fn parse_tables(atlases: &str, sprites: &str) -> (Vec<Atlas>, Vec<(String, Sprit
 /// SHC_AI=n (screenshots): the lobby's / --skirmish's one AI is lord n (1000 = the first custom lord).
 fn dev_ai() -> Option<usize> { std::env::var("SHC_AI").ok()?.parse().ok() }
 
-/// SHC_FIGHT=n (screenshots of a lord's walk / fight / death): n of your swordsmen (type 27) on player 2's keep roof at
-/// the start, waiting for his lord (placed there at ~tick 100). Height: the keep tile's (terrain HEIGHT).
+/// SHC_FIGHT=n[,type[,dx,dy]] (screenshots of a lord's walk / fight / death): n of your troops (default swordsmen,
+/// type 27) on player 2's keep roof at the start, waiting for his lord (placed there at ~tick 100); with dx,dy the
+/// troops stand that many tiles off the keep on open ground instead (archers there draw the lord out: lord_go_keep).
 #[cfg(feature = "live")]
 fn dev_fight(l: &mut live::Live) {
-    let Some(n) = std::env::var("SHC_FIGHT").ok().and_then(|v| v.parse::<i16>().ok()) else { return };
-    let Some((x, y)) = l.keep_of(2) else { eprintln!("SHC_FIGHT: player 2 has no keep"); return };
+    let Ok(v) = std::env::var("SHC_FIGHT") else { return };
+    let f: Vec<i16> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    let (Some(&n), ty, (dx, dy)) = (f.first(), f.get(1).copied().unwrap_or(27), (f.get(2).copied().unwrap_or(0), f.get(3).copied().unwrap_or(0))) else { return };
+    let Some((kx, ky)) = l.keep_of(2) else { eprintln!("SHC_FIGHT: player 2 has no keep"); return };
+    let (x, y) = (kx + dx, ky + dy);
     use shc_sim::terrain as t;
     let m = l.mem();
     let h = m.u8(t::at(t::HEIGHT, 1, t::row_off(m, y as i32) + x as i32)) as i16;
-    for k in 0..n { shc_sim::units::helpers::spawn(m, 1, 1, (x + k % 5 - 2) * 8, (y + k / 5 % 5 - 2) * 8, h, 27); } // 5×5 over the roof
-    println!("SHC_FIGHT: {n} swordsmen on player 2's keep at {x},{y} h {h}");
+    for k in 0..n { shc_sim::units::helpers::spawn(m, 1, 1, (x + k % 5 - 2) * 8, (y + k / 5 % 5 - 2) * 8, h, ty as i32); } // 5×5 block
+    println!("SHC_FIGHT: {n} of type {ty} at {x},{y} h {h} (player 2's keep {kx},{ky})");
 }
 
 /// "body_hunter-1716x" -> ("body_hunter-x", 1716). Frames of one animation share the key.

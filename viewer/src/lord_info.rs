@@ -92,7 +92,7 @@ impl Menu {
         let label = if file.is_some() { "Watch his story" } else { "Preparing his story..." };
         self.glow(ui, out, label, 1400.0, 975.0, 380.0, None, file.as_ref().map(|_| Act::LordTrailer), cursor);
         let Some(stem) = file.as_deref().and_then(|f| f.strip_suffix(".vid")).filter(|_| p.watch) else { return };
-        match crate::video::mission_over(out, stem, false, w, h) {
+        match crate::video::trailer(out, stem, w, h) {
             Some(true) => p.watch = false, // over
             _ => self.hits.push(([0.0, 0.0, w, h], Act::LordTrailer)),
         }

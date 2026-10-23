@@ -259,13 +259,16 @@ pub fn export_custom_as(webm: &Path, out: &Path, name: &str, (w, h): (usize, usi
     write_vid(out, &format!("{name}.vid"), fr.map(|r| r.map(&f)), &[0], 0, (w, h), FPS, true)
 }
 
-/// A custom lord's story trailer (CustomLords/<lord>/trailer.webm, our extension) as a full-screen `<out>/<name>.vid`
-/// (W×H BC1, the victory / defeat videos' format, scaled to cover) + `<name>.wav`. Existing files are kept.
+/// A custom lord's story trailer (CustomLords/<lord>/trailer.webm, our extension, 30 fps like DE's media) as a
+/// `<out>/<name>.vid` for the full-screen slot at its own size (at most W×H, cut to whole 4×4 blocks; the viewer
+/// scales it up: a 720p trailer stays ~half the size of a W×H one) + `<name>.wav`. Existing files are kept.
 pub fn export_custom_full(webm: &Path, out: &Path, name: &str) -> Result<()> {
     if out.join(format!("{name}.vid")).exists() { return Ok(()); }
     fs::create_dir_all(out)?;
     let (fr, audio) = frames(webm)?;
-    write_vid(out, &format!("{name}.vid"), fit(fr, W, H, H), &[0], 0, (W, H), FPS, false)?;
+    let k = (W as f32 / fr.w as f32).min(H as f32 / fr.h as f32).min(1.0);
+    let (w, h) = (((fr.w as f32 * k) as usize) / 4 * 4, ((fr.h as f32 * k) as usize) / 4 * 4);
+    write_vid(out, &format!("{name}.vid"), fit(fr, w, h, h), &[0], 0, (w, h), FPS, false)?;
     bink_wav(out, name, audio)
 }
 

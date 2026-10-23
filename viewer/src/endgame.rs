@@ -49,8 +49,10 @@ pub fn radar_colours(m: &shc_sim::mem::Mem) -> [u8; 9] {
 }
 
 /// OnScreenText.getComputerName(lord kind, name variant) as a strings.tsv key; kind 0 = a human.
-/// The human's name: Options > Player Settings (else the login name); kinds 30.. (extended lords) fall back to kind 1.
+/// The human's name: Options > Player Settings (else the login name); kinds 30..=37 (extended lords) are the custom
+/// lord's own name (custom_lords::by_kind; text_of passes a non-key through), else they fall back to kind 1.
 pub(crate) fn name(kind: i32, v: i32) -> String {
+    if let Some(c) = crate::custom_lords::by_kind(kind) { return c.name; }
     let key = |sec: &str, base: i32| format!("{sec}_{:03}", base + v + 1); // lookUpText is 0-based
     match kind {
         0 => crate::menu::coa::player_name(),
@@ -505,4 +507,13 @@ fn lord_killed_ends_skirmish() {
         // the score screen's rows from the captured statistics: the Rat (gold, your lord) the greatest lord
         if lost { assert_eq!(crate::menu::trail_menu::masters::Score::new(crate::menu::trail_menu::masters::peek().unwrap()).rows(), [2, 1]); }
     }
+}
+
+/// A custom lord's keep says his own name (the who-owns label, scores, stats), not the Rat's (kind 1's).
+#[test]
+fn custom_lord_name() {
+    crate::custom_lords::set_in_game(7, Some(crate::custom_lords::Custom { name: "Lord Test".into(), ..Default::default() }));
+    assert_eq!(name(36, 0), "Lord Test"); // engine kind 29 + slot
+    crate::custom_lords::set_in_game(7, None);
+    assert_eq!(name(36, 0), "TEXT_XPLAY_WAITING_ROOM_112");
 }

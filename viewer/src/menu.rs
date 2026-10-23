@@ -882,6 +882,8 @@ impl Menu {
     /// The menu's triangles for a `w`×`h` (logical px) window.
     pub fn draw(&mut self, ui: &mut Ui, w: f32, h: f32, cursor: [f32; 2]) -> Vec<HudTri> {
         self.mouse = (cursor, ui.down);
+        // a lord's zip just imported (lord_share.rs): his page with his trailer; not in a LAN lobby (it would stop polling)
+        if self.mp.net.is_none() { if let Some(n) = crate::lord_share::OPEN.lock().unwrap().take() { self.open_after_import(&n); } }
         // FRONT_Multiplayer is a 1366×768 grid in its own Viewbox; everything else 1920×1080
         let (dw, dh) = match self.screen { Screen::Lobby(_) | Screen::Solo(_) => (1366.0, 768.0), Screen::Briefing(..) => (1365.0, 768.0), _ => (1920.0, 1080.0) };
         self.s = (w / dw).min(h / dh);

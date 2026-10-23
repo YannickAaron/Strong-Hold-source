@@ -130,13 +130,15 @@ fn read_zip(d: &[u8]) -> Result<Vec<Entry>, String> {
 /// A zip waiting for "replace?" (path, the names already there), and the last import's message (text, ok).
 pub static PENDING: Mutex<Option<(PathBuf, Vec<String>)>> = Mutex::new(None);
 pub static MESSAGE: Mutex<Option<(String, bool)>> = Mutex::new(None);
+/// The lord just imported: the menu opens his backstory page and plays his trailer (Menu::draw → open_after_import).
+pub static OPEN: Mutex<Option<String>> = Mutex::new(None);
 
 /// Import `file` from the Add-AI panel or a drop on the window: the result as MESSAGE, or PENDING when lords of the
 /// same name are there.
 pub fn import_ui(file: &Path, replace: bool) {
     *PENDING.lock().unwrap() = None;
     let msg = match import(file, replace) {
-        Ok(n) => (format!("Imported {}", n.join(", ")), true),
+        Ok(n) => { *OPEN.lock().unwrap() = n.first().cloned(); (format!("Imported {}", n.join(", ")), true) }
         Err(ImportErr::Exists(n)) => { *PENDING.lock().unwrap() = Some((file.to_path_buf(), n)); return; }
         Err(ImportErr::Bad(e)) => (format!("Not imported: {e}"), false),
     };
@@ -146,6 +148,7 @@ pub fn import_ui(file: &Path, replace: bool) {
 /// macOS: the file picker for a lord's .zip.
 #[cfg(target_os = "macos")]
 pub fn pick_zip() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("SHC_PICK") { return Some(p.into()); } // scripted runs: the file the picker would return
     use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
     let mtm = objc2_foundation::MainThreadMarker::new()?;
     let p = unsafe { NSOpenPanel::openPanel(mtm) };
@@ -286,7 +289,25 @@ mod tests {
         assert_eq!(import_into(&f, &root, true), Ok(vec!["Lord T".into()]));
         assert!(!root.join("CustomMedia/Lord T/old.wav").exists(), "replace swaps the whole folder");
         assert!(std::fs::read_dir(&root).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".lord-import")));
+        // the game's path (Import tile / a dropped zip): the result line, and his page to open with his trailer
+        crate::skirmish::set_test_profile(root.clone());
+        import_ui(&f, true);
+        assert_eq!((OPEN.lock().unwrap().take(), MESSAGE.lock().unwrap().clone().map(|m| m.1)), (Some("Lord T".into()), Some(true)));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Lord David's release zip (re/lindschied/pack_zip.py, uploaded to the release) imports whole, his sprite/ too.
+    #[test]
+    fn lord_david_zip_imports() {
+        let f = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../re/lindschied/Lord-David-von-Lindschied.zip");
+        if !f.exists() { return; }
+        let root = dir("david").join("profile");
+        assert_eq!(import_into(&f, &root, false), Ok(vec!["Lord David von Lindschied".into()]));
+        let (l, m) = (root.join("CustomLords/Lord David von Lindschied"), root.join("CustomMedia/Lord David von Lindschied"));
+        assert!(l.join("trailer.webm").exists() && l.join("face.png").exists() && l.join("sprite/sprites.tsv").exists());
+        assert_eq!(std::fs::read_dir(&m).unwrap().count(), 37, "32 wav (30 lines + lobby add / kick) + 4 webm + text.txt");
+        let c = custom_lords::load(&l).expect("loads");
+        assert_eq!(c.aivs.len(), 8);
     }
 
     #[test]
