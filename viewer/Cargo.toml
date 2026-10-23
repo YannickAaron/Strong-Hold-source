@@ -10,6 +10,8 @@ pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 shc-formats = { path = "../formats" }
 lz4_flex = "0.11"
+# the bundled Sassanid atlas (loader::BUNDLED) is zlib: already built for png (through image), nothing new to download
+miniz_oxide = "0.8"
 fontdue = "0.9"
 shc-sim = { path = "../sim", optional = true }
 shc-audio = { path = "../audio", optional = true }

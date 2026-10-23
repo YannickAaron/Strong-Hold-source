@@ -46,7 +46,7 @@ pub fn ensure() {
     #[cfg(target_os = "macos")]
     std::thread::spawn(|| { let _ = PENDING.set(update_todo()); });
     // SHC_CACHE: a developer's own export folder (re/scripts/export_*.py or `extract`): never re-exported
-    if std::env::var_os("SHC_CACHE").is_some() || ready(&d) { more(&d); sc2(&d); return; }
+    if std::env::var_os("SHC_CACHE").is_some() || ready(&d) { more(&d); drop_sc2(&d); return; }
     if std::env::var_os("SHC_SETUP_DONE").is_some() {
         eprintln!("setup: finished but the data still isn't complete ({}); giving up", d.cache.display());
         std::process::exit(1);
@@ -153,18 +153,14 @@ pub fn more(d: &Dirs) -> Option<std::thread::JoinHandle<()>> {
     }))
 }
 
-/// Crusader 2's Sassanid Knight sheet (extract::sc2, ~10 s) when SC2 is installed and the export lacks it: in the
-/// background like `more`; the viewer loads it from the next start. No SC2 = nothing happens.
-/// ponytail: the .tsv files are replaced (renamed) under a viewer that may be reading them at that moment; it reads
-/// them in its first second, the renders take ~10 s.
-pub fn sc2(d: &Dirs) -> Option<std::thread::JoinHandle<()>> {
-    if shc_extract::sc2::is_complete(&d.cache) || !d.cache.join("atlases.tsv").is_file() { return None; }
-    let (g, cache) = (paths::sc2_game()?, d.cache.clone());
-    Some(std::thread::spawn(move || {
-        #[cfg(target_os = "macos")]
-        unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0); }
-        if let Err(e) = shc_extract::sc2::export(&g, &cache) { eprintln!("setup: Crusader 2 units: {e}"); }
-    }))
+/// Up to 0.11 the app rendered Crusader 2's Sassanid Knight from the player's SC2 install into the export; it no longer
+/// reads Crusader 2. Takes those rows and files back out of the cache (cheap when they are gone: one small read).
+fn drop_sc2(d: &Dirs) {
+    match shc_extract::sc2::drop_export(&d.cache) {
+        Ok(true) => eprintln!("setup: removed the old Crusader 2 units from the export"),
+        Ok(false) => {}
+        Err(e) => eprintln!("setup: removing the old Crusader 2 units: {e}"),
+    }
 }
 
 /// Free bytes on the disk holding `p` (its nearest existing ancestor).

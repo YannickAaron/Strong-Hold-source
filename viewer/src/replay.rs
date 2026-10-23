@@ -220,7 +220,7 @@ impl World {
 }
 
 /// GM file id -> sprite index lookup + team palette, from gm.tsv (re/scripts/gen_gm_table.py).
-pub struct Gm { files: HashMap<i16, Vec<(String, bool, i32)>>, names: HashMap<String, usize>, palettes: HashMap<i16, Vec<[f32; 3]>> }
+pub struct Gm { files: HashMap<i16, Vec<(String, bool, i32)>>, names: HashMap<String, usize>, palettes: HashMap<i16, Vec<[f32; 3]>>, sassanid_stables: bool }
 
 impl Gm {
     pub fn new(names: &[String]) -> Self {
@@ -236,12 +236,34 @@ impl Gm {
                 }).collect());
             }
         }
-        // SHC_SC2_KNIGHT=1 (dev, until the lobby's Extended rules): knights draw with Crusader 2's sheet (gm 1044,
-        // extract::sc2) when the export has it
-        if std::env::var_os("SHC_SC2_KNIGHT").is_some() && names.iter().any(|n| n == "sc2_sassanid_knight-0") {
+        // SHC_SASSANID_KNIGHT=1 (dev, until the sim draws marked knights as gm 1044): every knight draws with our
+        // bundled Sassanid art
+        if std::env::var_os("SHC_SASSANID_KNIGHT").is_some() && names.iter().any(|n| n == "sassanid_knight-0") {
             if let Some(e) = files.get(&1044).cloned() { files.insert(44, e); }
         }
-        Self { files, names: names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect(), palettes }
+        // SHC_SASSANID_STABLE=1 (dev, until the sim's tiler emits gm 1045 for marked stables): every stables draws as
+        // the Sassanid Stable
+        let sassanid_stables = std::env::var_os("SHC_SASSANID_STABLE").is_some();
+        Self { files, names: names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect(), palettes, sassanid_stables }
+    }
+
+    /// A Sassanid Stable's tile piece: gm 1045, images 569..604 (the stables' numbering).
+    pub fn sassanid_stable(&self, file: i16, image: i16) -> bool {
+        (file == 1045 || (self.sassanid_stables && file == 7)) && (569..=604).contains(&image)
+    }
+
+    /// Not the original's: the stables' horse layer (anim_stables, gm 98: a head looking out over a dark stall block,
+    /// drawn at fixed offsets) on a Sassanid Stable. DE's offsets put the last horse past the footprint; ours stand
+    /// in our stall windows inside it, 1.35 tiles apart instead of 1.5 (re/scripts/sc2_spike/stable.py `HALL`).
+    /// Some(screen shift, world px); None = not drawn: images 38.. are DE's wooden empty stalls, and our windows show
+    /// an empty stall themselves.
+    pub fn stall(&self, w: &World, r: &Rec) -> Option<[f32; 2]> {
+        let on_ours = r[0] == 4 && r[3] == 98 && w.tiles.get(r[2] as usize * N + r[1] as usize).is_some_and(|t| self.sassanid_stable(t[3], t[4]));
+        if !on_ours { return Some([0.0; 2]); }
+        if r[4] >= 38 { return None; }
+        // slot 1..4 = the stall from the left: moved along the stall front by this many tiles (screen (-32, -16) px each)
+        let d = [0.0, -1.28, -1.15, -1.005, -0.81].get(r[5] as usize).copied().unwrap_or(0.0);
+        Some([-32.0 * d, -16.0 * d])
     }
 
     /// `gmSprites[file][image]`: the entry with the largest ID_Offset <= image wins (sea_new vs sea_shore).
@@ -254,6 +276,7 @@ impl Gm {
     /// SpriteMapping.setGenericBuildingTileGraphic -> (sprite, tile.light). `light` = record k6, which C# only uses
     /// for buildings1 / goods; everything else gets light 0 except the sea folds (CalcLightValueForSea -> 50..55).
     pub fn tile(&self, file: i16, image: i16, light: i16) -> (Option<usize>, i32) {
+        let file = if self.sassanid_stable(file, image) { 1045 } else { file };
         let (i, k6) = (image as i32, light as i32);
         let lit = (k6 - 2).max(0) + 10;
         let sea = |v: i32| if v <= 2 { 50 } else { v - 3 + 51 };
@@ -388,6 +411,48 @@ fn apply_incremental() {
     unit[3] = 0; // file 0 = delete
     w.apply(&[unit], &mut d);
     assert!(w.objs.is_empty());
+}
+
+/// The bundled Sassanid art (loader::BUNDLED) without any export: every body_knight frame number the sim draws
+/// (moves, the odd-slot block 720..975, idle, fight, deaths) resolves through gm 1044, and the stable's 36 tile pieces
+/// (tile_buildings2 images 569..604) through gm 1045, each inside the atlas.
+#[test]
+fn sassanid_frames_resolve() {
+    let mut t = (vec![], vec![]);
+    crate::loader::bundle(&mut t);
+    let (atlases, sprites) = t;
+    let names: Vec<String> = sprites.iter().map(|(n, _)| n.clone()).collect();
+    let gm = Gm::new(&names);
+    for (_, colour, mask, _) in crate::loader::BUNDLED { // BC7: 1 byte per pixel, BC1: half
+        let (w, h) = crate::loader::bundled_size(colour);
+        assert_eq!((crate::loader::inflate(&colour[8..]).len(), crate::loader::inflate(mask).len()), ((w * h) as usize, (w * h / 2) as usize));
+    }
+    let inside = |i: usize| { let s = &sprites[i].1; let a = &atlases[s.atlas as usize];
+        s.x >= 0.0 && s.y >= 0.0 && s.x + s.w <= a.w as f32 && s.y + s.h <= a.h as f32 };
+    // DE body_knight blocks (first frame, counters): frame = first + 8 * counter + facing
+    let blocks = [(0, 16), (128, 16), (384, 24), (576, 18), (720, 16), (848, 16), (1104, 24), (1296, 18), (1440, 24), (1632, 24)];
+    let frames: Vec<i32> = blocks.iter().flat_map(|&(lo, n)| lo..lo + n * 8).collect();
+    assert_eq!(frames.len(), 1568);
+    for f in frames { assert!(gm.get(1044, f).is_some_and(inside), "sassanid_knight frame {f}"); }
+    for image in 569..=604 { assert!(gm.tile(1045, image, 0).0.is_some_and(inside), "sassanid_stable image {image}"); }
+}
+
+/// The Sassanid Stable's horses: on a tile of ours (gm 1045) a stall horse moves to our window and DE's empty wooden
+/// stall (image 38..) is not drawn; on a DE stables (gm 7) both draw where the engine puts them.
+#[test]
+fn sassanid_stable_horses() {
+    let gm = Gm::new(&[]);
+    let mut w = World::new();
+    let (x, y) = (300usize, 400usize);
+    w.tiles[y * N + x][3..5].copy_from_slice(&[1045, 580]);
+    let mut horse = [0i16; 21];
+    (horse[0], horse[1], horse[2], horse[3], horse[4], horse[5]) = (4, x as i16, y as i16, 98, 12, 1);
+    let mut empty = horse;
+    empty[4] = 39;
+    assert_eq!(gm.stall(&w, &horse), Some([-32.0 * -1.28, -16.0 * -1.28]));
+    assert_eq!(gm.stall(&w, &empty), None);
+    w.tiles[y * N + x][3] = 7; // DE's stables
+    assert_eq!((gm.stall(&w, &horse), gm.stall(&w, &empty)), (Some([0.0; 2]), Some([0.0; 2])));
 }
 
 /// Options colour 3 (blue: red, orange, yellow, blue, ...) in a skirmish vs the Rat: player 1's sprites take colour 2 (blue), the Rat another; a save

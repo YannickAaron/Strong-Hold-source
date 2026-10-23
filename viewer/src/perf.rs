@@ -57,7 +57,7 @@ fn tables_cache() {
     if !dir.join("sprites.tsv").exists() { return; }
     let _ = std::fs::remove_file(dir.join("tables.bin")); // parse once without the cache
     let mut t = Lap::new();
-    let a = crate::load_tables();
+    let a = crate::export_tables();
     let parse = t.lap(&format!("load_tables, no cache ({} sprites)", a.1.len()));
     let b = crate::loader::tables::load(&dir).expect("load_tables wrote no cache");
     let cached = t.lap("loader::tables::load");
@@ -78,7 +78,7 @@ fn atlas_upload() {
     let inst = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     let Ok(ad) = pollster::block_on(inst.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })) else { return };
     let (dev, q) = pollster::block_on(ad.request_device(&wgpu::DeviceDescriptor { required_features: wgpu::Features::TEXTURE_COMPRESSION_BC, required_limits: ad.limits(), ..Default::default() })).unwrap();
-    let (atlases, _) = crate::load_tables();
+    let (atlases, _) = crate::export_tables(); // the files in the export (BUNDLED ones are not)
     // old: read + one write_texture per atlas on this thread, then the first frame's submit waits for the copy
     let mut t = Lap::new();
     let mut texs = vec![];

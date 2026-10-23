@@ -76,7 +76,25 @@ fn cache_dir() -> PathBuf {
     std::env::var_os("SHC_CACHE").map(PathBuf::from).unwrap_or_else(|| paths::cache("shc-viewer"))
 }
 
+/// The export's atlases and sprites, then the ones compiled into the app (loader::BUNDLED).
 fn load_tables() -> (Vec<Atlas>, Vec<(String, Sprite)>) {
+    let mut t = export_tables();
+    loader::bundle(&mut t);
+    t
+}
+
+/// One sprites.tsv row: name, atlas, x, y, w, h, pivot x, y (0..1 from the bottom left), mesh.
+fn sprite_row(l: &str) -> (String, Sprite) {
+    let c: Vec<&str> = l.split('\t').collect();
+    let f = |i: usize| c[i].parse::<f32>().unwrap();
+    let mesh = c[8].split(';').map(|p| {
+        let (x, y) = p.split_once(',').unwrap();
+        [x.parse().unwrap(), y.parse().unwrap()]
+    }).collect();
+    (c[0].to_string(), Sprite { atlas: c[1].parse().unwrap(), x: f(2), y: f(3), w: f(4), h: f(5), px: f(6), py: f(7), mesh })
+}
+
+fn export_tables() -> (Vec<Atlas>, Vec<(String, Sprite)>) {
     let dir = cache_dir();
     if let Some(t) = loader::tables::load(&dir) { return t; } // the parse below, cached as binary (loader.rs)
     let read = |f: &str| std::fs::read_to_string(dir.join(f))
@@ -85,15 +103,7 @@ fn load_tables() -> (Vec<Atlas>, Vec<(String, Sprite)>) {
         let c: Vec<&str> = l.split('\t').collect();
         Atlas { name: c[1].into(), w: c[2].parse().unwrap(), h: c[3].parse().unwrap() }
     }).collect();
-    let sprites = read("sprites.tsv").lines().map(|l| {
-        let c: Vec<&str> = l.split('\t').collect();
-        let f = |i: usize| c[i].parse::<f32>().unwrap();
-        let mesh = c[8].split(';').map(|p| {
-            let (x, y) = p.split_once(',').unwrap();
-            [x.parse().unwrap(), y.parse().unwrap()]
-        }).collect();
-        (c[0].to_string(), Sprite { atlas: c[1].parse().unwrap(), x: f(2), y: f(3), w: f(4), h: f(5), px: f(6), py: f(7), mesh })
-    }).collect();
+    let sprites = read("sprites.tsv").lines().map(sprite_row).collect();
     let t = (atlases, sprites);
     loader::tables::save(&dir, &t);
     t
@@ -130,6 +140,32 @@ struct HudGfx { screen_buf: wgpu::Buffer, buf: wgpu::Buffer, groups: [wgpu::Bind
 type Run = (i32, u32, Range<u32>);
 
 /// Consecutive runs of one (row, atlas) -> vertex range. Input must be grouped by row then atlas.
+/// The engine's layer delay (k12: its tile's hill shading, up to 5 rows) sorts a unit on open ground that far forward,
+/// so the original paints one standing just behind a building over the roof. Ours stops unit (x, y)'s row `sorted`
+/// before the first tall tile in front that its sprite overlaps (columns ±1); a unit standing on a tall tile itself
+/// (walls, keep, gatehouse) keeps the full delay. ponytail: a column band, not the sprite's real width
+fn behind_tall(tall: impl Fn(i32, i32) -> bool, x: i32, y: i32, sorted: i32) -> i32 {
+    if tall(x, y) { return sorted; }
+    let (row, col) = (x - y, x + y);
+    for r in row + 1..=sorted {
+        for c in col - 1..=col + 1 {
+            if (r + c) % 2 == 0 && tall((c + r) / 2, (c - r) / 2) { return r - 1; }
+        }
+    }
+    sorted
+}
+
+#[test]
+fn delayed_unit_stays_behind_tall_tiles() {
+    // a building on (12, 8) (row 4, column 20); the unit two rows behind it at (10, 8) (row 2, column 18)
+    let hut = |x: i32, y: i32| (x, y) == (12, 8);
+    assert_eq!(behind_tall(hut, 10, 8, 2 + 5), 2 + 5, "column 18 vs 20: not in front of it");
+    assert_eq!(behind_tall(hut, 11, 9, 2 + 5), 3, "column 20, delay 5: stops before the building's row 4");
+    assert_eq!(behind_tall(hut, 11, 9, 2 + 1), 3, "a delay short of the building is kept");
+    assert_eq!(behind_tall(hut, 12, 8, 4 + 5), 9, "standing on the tall tile: the full delay");
+    assert_eq!(behind_tall(|x, y| (x, y) == (12, 9), 11, 9, 2 + 5), 2, "column 21 overlaps too: stops before row 3");
+}
+
 fn runs(tris: &[Tri], rows: &[i32]) -> Vec<Run> {
     let mut out: Vec<Run> = vec![];
     for (i, (a, _)) in tris.iter().enumerate() {
@@ -885,9 +921,9 @@ impl App {
     fn rebuild_objs(&mut self) {
         /// A chimp's base point (replay::chimp_base), slid toward its 0x34 next tile: GameMap's interp from the
         /// record's position to nextPos over (k7 + 1) engine frames, unless the heights differ by more than 1.25
-        /// units; instant at fast-forward. Past half the way, also that tile's row and layer delay (k17): interpChimp
+        /// units; instant at fast-forward. Past half the way, also that tile and its layer delay (k17): interpChimp
         /// sorts the chimp there from then on (nextBaseSortLayer), so one walking behind a building goes under it.
-        fn chimp_base(p: &Play, id: i32, r: &replay::Rec) -> ([f32; 2], Option<(i32, i32)>) {
+        fn chimp_base(p: &Play, id: i32, r: &replay::Rec) -> ([f32; 2], Option<(i32, i32, i32)>) {
             let b = replay::chimp_base(r, p.world.tele.get(&id).map_or(0, |t| t[17]));
             let Some(&(n, seq)) = p.world.next.get(&id) else { return (b, None) };
             let dt = if p.ff { 0.0 } else { 1.0 / p.rate.max(1.0) };
@@ -895,10 +931,18 @@ impl App {
             let since = p.world.applied_at.map_or(0.0, |t| t.elapsed().as_secs_f32());
             let f = (((p.world.applies - seq) as f32 * dt + since) / ((n[7] as f32 + 1.0) * dt)).clamp(0.0, 1.0);
             let to = replay::sprite_px(&n, n[8], n[9], -n[5]);
-            let next = (f > 0.5).then(|| (replay::row(n[2] as usize * replay::N + n[1] as usize), n[17] as i32));
+            let next = (f > 0.5).then(|| (n[1] as i32, n[2] as i32, n[17] as i32));
             ([b[0] + (to[0] - b[0]) * f, b[1] + (to[1] - b[1]) * f], next)
         }
         let mut p = self.play.take().unwrap();
+        // a tile whose graphic rises above its diamond: the engine's building height k18, or over 100 px (buildings,
+        // walls, rocks, crops; the ground sets stay under)
+        let n = replay::N as i32;
+        let tall = |p: &Play, x: i32, y: i32| {
+            if x < 0 || y < 0 || x >= n || y >= n { return false; }
+            let t = p.world.tiles[(y * n + x) as usize];
+            !matches!(t[3], 0 | 38) && (t[18] != 0 || p.gm.tile(t[3], t[4], t[6]).0.is_some_and(|s| self.sprites[s].h > 100.0))
+        };
         // sort key = Unity sortingOrder (−20000 + row*49 + sub, CSHARP_NOTES §2 "Depth"): (row + layerDelay, sub), then
         // Unity z = 200 + y + id%10000/10000 (farther = higher on screen = first)
         let mut objs: Vec<((i32, i32, i32, i32), usize, [f32; 2], [f32; 4], [f32; 4])> = vec![];
@@ -916,9 +960,11 @@ impl App {
                 // addUpdateWallFillin (GM 54): + xoffset k8 / 32 units; addUpdatePixie: + (k8, -k9) / 32 units
                 7 | 8 | 9 => { let [x, y] = replay::sprite_px(r, 0, 0, if r[0] == 7 { -r[5] } else { 0 }); [x + r[8] as f32 * 2.0, y + if r[0] == 7 { 0.0 } else { r[9] as f32 * 2.0 }] }
                 _ => {
-                    // anim: base at tile offset 0, then + (k8, -k9)/32 units (y up) + half pixels k17/64, k18/128 units
+                    // anim: base at tile offset 0, then + (k8, -k9)/32 units (y up) + half pixels k17/64, k18/128 units;
+                    // a Sassanid Stable's horses at its own stalls (Gm::stall)
+                    let Some([sx, sy]) = p.gm.stall(&p.world, r) else { continue };
                     let [x, y] = replay::sprite_px(r, 0, 0, 0);
-                    [x + r[8] as f32 * 2.0 + r[17] as f32, y + r[9] as f32 * 2.0 + r[18] as f32 * 0.5]
+                    [x + r[8] as f32 * 2.0 + r[17] as f32 + sx, y + r[9] as f32 * 2.0 + r[18] as f32 * 0.5 + sy]
                 }
             };
             let Some(alpha) = replay::obj_alpha(r) else { continue };
@@ -939,7 +985,11 @@ impl App {
                 _ => if r[5] >= 25 { 1 } else { 16 + r[5] as i32 },
             };
             let mut key = (replay::row(r[2] as usize * replay::N + r[1] as usize) + delay as i32, sub, (pos[1] * 64.0) as i32, id % 10000);
-            if let Some((row, d)) = next { (key.0, key.1) = (row + d, 8 + if d > 0 { 34 } else { 0 }); } // interpChimp
+            if let Some((x, y, d)) = next { (key.0, key.1) = (x - y + d, 8 + if d > 0 { 34 } else { 0 }); } // interpChimp
+            if r[0] == 2 {
+                let (x, y) = next.map_or((r[1] as i32, r[2] as i32), |n| (n.0, n.1));
+                key.0 = behind_tall(|x, y| tall(&p, x, y), x, y, key.0);
+            }
             let file = match r[0] { 6 => 173, 7 => 54, _ => r[3] };
             match p.gm.body(file, r[4]) { Some(s) => objs.push((key, s, pos, color, team)), None => *p.misses.entry(file).or_default() += 1 }
             // the chimp's other sprites (addUpdateChimp), each in its sortingOrder slot after the body (+8):

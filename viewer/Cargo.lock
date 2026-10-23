@@ -1937,7 +1937,6 @@ dependencies = [
  "image",
  "lewton",
  "lz4_flex",
- "miniz_oxide 0.8.9",
  "regex",
  "texture2ddecoder",
 ]
@@ -1967,6 +1966,7 @@ dependencies = [
  "image",
  "libc",
  "lz4_flex",
+ "miniz_oxide 0.8.9",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

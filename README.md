@@ -5,7 +5,7 @@ Crusader: Definitive Edition, **except the simulation** (`sim/`). It's here so y
 Mac before you trust the DMG: every line that uses the network, your Steam sign-in, your disk or other programs is in
 this repository.
 
-Snapshot v0.11.1 (one commit per release; tags match the [releases](https://github.com/YannickAaron/Strong-Hold/releases)).
+Snapshot v0.11.2 (one commit per release; tags match the [releases](https://github.com/YannickAaron/Strong-Hold/releases)).
 
 ## What's here
 

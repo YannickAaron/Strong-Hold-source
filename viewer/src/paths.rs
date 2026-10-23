@@ -1,5 +1,5 @@
 //! Where the game and our own files live, per OS. The SHC_* env vars still win at the call sites (SHC_MAPS, SHC_SAVES,
-//! SHC_CACHE, SHC_AUDIO, SHC_PROFILE), plus SHC_GAME for the game's install folder (SHC_SC2_GAME: Crusader 2's).
+//! SHC_CACHE, SHC_AUDIO, SHC_PROFILE), plus SHC_GAME for the game's install folder.
 //! - Every OS: the game the first-run setup downloaded (app_data()/game) wins; the exports (shc-viewer, shc-audio) live
 //!   in app_data() too, so the OS never purges them.
 //! - macOS: else the game in CrossOver's "Steam" bottle; our files in ~/Library/Application Support.
@@ -31,12 +31,6 @@ fn steam_roots() -> Vec<PathBuf> {
     #[cfg(not(any(target_os = "macos", windows)))]
     let roots = { let h = home(); vec![h.join(".steam/steam"), h.join(".local/share/Steam"), h.join(".var/app/com.valvesoftware.Steam/.local/share/Steam")] };
     roots
-}
-
-/// Stronghold Crusader 2's install, if any (optional Crusader 2 units): SHC_SC2_GAME, else Steam's (CrossOver's).
-pub fn sc2_game() -> Option<PathBuf> {
-    let steam = steam_roots().into_iter().map(|r| r.join("steamapps/common").join(shc_extract::sc2::GAME));
-    env_dir("SHC_SC2_GAME").into_iter().chain(steam).find(|g| shc_extract::sc2::is_game(g))
 }
 
 /// The game's install folder: SHC_GAME, else the setup's download, else Steam's (CrossOver's on macOS).

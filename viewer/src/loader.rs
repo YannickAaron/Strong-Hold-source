@@ -6,6 +6,31 @@ use std::sync::mpsc::{channel, Receiver};
 /// copy, so a UI frame waits at most for one chunk's copy (not for 1.3 GB at its first submit).
 const CHUNK: usize = 8 << 20;
 
+/// Atlases compiled into the app, after the export's (our own art, not from any game: art/sassanid/PROVENANCE.md;
+/// built by re/scripts/sassanid/build_atlas.py): name, BC7 colour (width, height as u32 LE, then a zlib stream), BC1
+/// team-colour mask (zlib), sprites.tsv rows with atlas 0 = this atlas.
+pub const BUNDLED: [(&str, &[u8], &[u8], &str); 1] = [("sassanid", include_bytes!("../assets/sassanid/sassanid.bc.z"),
+    include_bytes!("../assets/sassanid/sassanid_m.bc.z"), include_str!("../assets/sassanid/sassanid.tsv"))];
+
+/// A BUNDLED colour stream's (width, height).
+pub fn bundled_size(colour: &[u8]) -> (u32, u32) {
+    let u = |o: usize| u32::from_le_bytes(colour[o..o + 4].try_into().unwrap());
+    (u(0), u(4))
+}
+
+/// A BUNDLED stream's raw BC blocks (the colour's after its 8-byte size).
+pub fn inflate(z: &[u8]) -> Vec<u8> { miniz_oxide::inflate::decompress_to_vec_zlib(z).expect("bundled atlas") }
+
+/// Appends the BUNDLED atlases and their sprites to the export's tables (the export's atlas indices stay).
+pub fn bundle((atlases, sprites): &mut (Vec<crate::Atlas>, Vec<(String, crate::Sprite)>)) {
+    for (name, colour, _, rows) in BUNDLED {
+        let i = atlases.len() as u32;
+        let (w, h) = bundled_size(colour);
+        atlases.push(crate::Atlas { name: name.into(), w, h });
+        sprites.extend(rows.lines().map(|l| { let (n, mut s) = crate::sprite_row(l); s.atlas += i; (n, s) }));
+    }
+}
+
 /// The map atlases uploading on a worker thread (read, create_texture, write_texture in `CHUNK`s through the cloned
 /// Device / Queue). Until an atlas is in, its slot in Gfx.groups is `placeholder` (transparent: nothing drawn).
 pub struct Atlases { rx: Receiver<(usize, wgpu::BindGroup)>, pub placeholder: wgpu::BindGroup, done: usize, total: usize }
@@ -22,22 +47,25 @@ impl Atlases {
         // masks.tsv: atlas index, w, h, unity format (10 = DXT1, 12 = DXT5). Missing file = old export, no masks.
         let masks: Vec<(usize, u32, u32, u32)> = std::fs::read_to_string(crate::cache_dir().join("masks.tsv")).unwrap_or_default().lines()
             .map(|l| { let c: Vec<u32> = l.split('\t').map(|v| v.parse().unwrap()).collect(); (c[0] as usize, c[1], c[2], c[3]) }).collect();
-        // atlases.tsv column 4, unity format: 25 = BC7 (DE's), 12 = DXT5 / BC3 (extract::sc2's renders)
-        let formats: Vec<u32> = std::fs::read_to_string(crate::cache_dir().join("atlases.tsv")).unwrap_or_default().lines()
-            .map(|l| l.split('\t').nth(4).and_then(|v| v.parse().ok()).unwrap_or(25)).collect();
-        let jobs: Vec<(String, u32, u32, u32)> = atlases.iter().enumerate().map(|(i, a)| (a.name.clone(), a.w, a.h, formats.get(i).copied().unwrap_or(25))).collect();
+        // every colour atlas is BC7 (DE's, and ours)
+        let jobs: Vec<(String, u32, u32)> = atlases.iter().map(|a| (a.name.clone(), a.w, a.h)).collect();
         let (tx, rx) = channel();
         let dev = (device.clone(), queue.clone());
         let (bgl, screen, sampler, black, total) = (bgl.clone(), screen.clone(), sampler.clone(), black.clone(), jobs.len());
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
-            for (i, (name, w, h, format)) in jobs.into_iter().enumerate() {
-                let mask = masks.iter().find(|m| m.0 == i).map(|&(_, mw, mh, f)| {
-                    let (f, b) = if f == 12 { (wgpu::TextureFormat::Bc3RgbaUnorm, 16) } else { (wgpu::TextureFormat::Bc1RgbaUnorm, 8) };
-                    upload(&dev, &format!("{name}_m"), mw, mh, f, b)
-                });
-                let f = if format == 12 { wgpu::TextureFormat::Bc3RgbaUnormSrgb } else { wgpu::TextureFormat::Bc7RgbaUnormSrgb };
-                let tex = upload(&dev, &name, w, h, f, 16);
+            let read = |n: &str| std::fs::read(crate::cache_dir().join(format!("{n}.bc"))).unwrap();
+            for (i, (name, w, h)) in jobs.into_iter().enumerate() {
+                let own = BUNDLED.iter().find(|b| b.0 == name);
+                let mask = match own {
+                    Some(b) => Some(upload(&dev, &name, &inflate(b.2), w, h, wgpu::TextureFormat::Bc1RgbaUnorm, 8)),
+                    None => masks.iter().find(|m| m.0 == i).map(|&(_, mw, mh, f)| {
+                        let (f, b) = if f == 12 { (wgpu::TextureFormat::Bc3RgbaUnorm, 16) } else { (wgpu::TextureFormat::Bc1RgbaUnorm, 8) };
+                        upload(&dev, &name, &read(&format!("{name}_m")), mw, mh, f, b)
+                    }),
+                };
+                let f = wgpu::TextureFormat::Bc7RgbaUnormSrgb;
+                let tex = match own { Some(b) => upload(&dev, &name, &inflate(&b.1[8..]), w, h, f, 16), None => upload(&dev, &name, &read(&name), w, h, f, 16) };
                 if tx.send((i, group(&dev.0, &bgl, &screen, &sampler, &tex, mask.as_ref().unwrap_or(&black)))).is_err() { return; }
             }
             println!("uploaded {total} atlases + {} masks in {:.2}s (worker thread)", masks.len(), t0.elapsed().as_secs_f32());
@@ -66,11 +94,10 @@ fn group(d: &wgpu::Device, bgl: &wgpu::BindGroupLayout, screen: &wgpu::Buffer, s
     })
 }
 
-/// Raw BC blocks from the export cache → texture, in `CHUNK`-sized bands of block rows. Unity row order = wgpu v
+/// Raw BC blocks (export cache or BUNDLED) → texture, in `CHUNK`-sized bands of block rows. Unity row order = wgpu v
 /// order (README).
-fn upload(dq: &(wgpu::Device, wgpu::Queue), name: &str, w: u32, h: u32, format: wgpu::TextureFormat, block: u32) -> wgpu::TextureView {
+fn upload(dq: &(wgpu::Device, wgpu::Queue), name: &str, data: &[u8], w: u32, h: u32, format: wgpu::TextureFormat, block: u32) -> wgpu::TextureView {
     let (device, queue) = dq;
-    let data = std::fs::read(crate::cache_dir().join(format!("{name}.bc"))).unwrap();
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(name), size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format,

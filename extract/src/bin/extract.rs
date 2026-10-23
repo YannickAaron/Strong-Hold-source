@@ -1,5 +1,5 @@
 //! Dev check: `cargo run --release --bin extract -- <step> <game dir> <out dir>` (steps: all, dll, ui, audio, atlases,
-//! frontend, video, more, webm <file>, sc2 (game dir = the SC2 install); `all` writes the sounds to <out dir>/../shc-audio).
+//! frontend, video, more, webm <file>; `all` writes the sounds to <out dir>/../shc-audio).
 fn main() -> shc_extract::Result<()> {
     let a: Vec<String> = std::env::args().collect();
     let (step, game, out) = (&a[1], std::path::Path::new(&a[2]), std::path::Path::new(&a[3]));
@@ -27,26 +27,6 @@ fn main() -> shc_extract::Result<()> {
             std::fs::write(out, im.px)?;
         }
         "ui" => shc_extract::ui::export(game, &data, out)?,
-        "sc2" => shc_extract::sc2::export(game, out)?,
-        "sc2png" => { // dev: one clip as a contact sheet <out>.png, 8 facings × counters (args: sc2png <SC2> <out> <clip> <n>)
-            let look = shc_extract::sc2::render::DE_LOOK;
-            let k = shc_extract::sc2::Knight::load(game, &look)?;
-            let n: u32 = a[5].parse()?;
-            let dur = k.duration(&a[4])?;
-            let fr: Vec<_> = (0..n * 8).map(|i| k.frame(&a[4], dur * (i / 8) as f32 / n as f32, true, i % 8, &look)).collect::<shc_extract::Result<_>>()?;
-            let (cw, ch) = (fr.iter().map(|f| f.w).max().unwrap(), fr.iter().map(|f| f.h).max().unwrap());
-            let mut im = image::RgbaImage::from_pixel(cw as u32 * n, ch as u32 * 8, image::Rgba([88, 104, 60, 255]));
-            for (i, f) in fr.iter().enumerate() {
-                let (ox, oy) = ((i as u32 / 8) * cw as u32, (i as u32 % 8) * ch as u32);
-                for (j, p) in f.rgba.chunks(4).enumerate() {
-                    let (x, y) = (ox + (j % f.w) as u32, oy + (j / f.w) as u32);
-                    let a = p[3] as f32 / 255.0;
-                    let d = im.get_pixel_mut(x, y);
-                    for c in 0..3 { d[c] = (p[c] as f32 * a + d[c] as f32 * (1.0 - a)) as u8; }
-                }
-            }
-            im.save(out)?;
-        }
         "all" => shc_extract::run(game, out, &out.join("../shc-audio"), &mut |l, f| eprint!("\r{:3.0}% {l:30}", f * 100.0))?,
         _ => return Err(format!("unknown step {step}").into()),
     }
