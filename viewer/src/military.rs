@@ -66,6 +66,7 @@ pub struct Troop {
     screen: [f32; 2],
     pub keys: [bool; 3], // shift, ctrl, alt (DLL_RunTick)
     units: BTreeMap<i32, Rec>, // last draw record per unit index: GameMap's chimps
+    narrow: bool,              // drop the selection before this press goes in (see `event`)
 }
 
 impl Troop {
@@ -95,6 +96,12 @@ impl Troop {
                 if self.action == 9 { self.action = 0; }
                 (self.start, self.start_w, self.cursor, self.screen) = (Some(s), w, w, s);
                 self.on_screen = self.grab(m, rot, view);
+                // ponytail: not the original's. With SH1 controls the engine only orders when the unit under the
+                // cursor is already selected, so a click can't pick one unit out of a group; deselect first and the
+                // press selects just it (no Shift / Ctrl: those add to the selection).
+                let sel = selected(m);
+                self.narrow = crate::menu::sh1_rts() && self.keys == [false; 3] && sel.len() > 1
+                    && self.under(m, rot).first().is_some_and(|i| sel.contains(i));
             }
             TroopIn::Release => {
                 if self.action == 8 {
@@ -117,6 +124,15 @@ impl Troop {
                 }
             }
         }
+    }
+
+    /// GameData: RunTick's completeSelectionBox (+0x3b8) > 0, the sim wants a fresh selection (a press on an
+    /// unselected own unit): CurrentAction 8, TroopSelector.startSelection at the mouse and triggerTroopsSelection, a
+    /// zero-size box there. The release then hands the units under the click to the engine, which keeps one.
+    pub fn complete_box(&mut self, m: &Mem, rot: i16) {
+        (self.action, self.on, self.established) = (8, true, false);
+        (self.start, self.start_w) = (Some(self.screen), self.cursor);
+        self.boxed = self.grab(m, rot, self.rect());
     }
 
     /// The drag box (world px), press → cursor.
@@ -173,6 +189,8 @@ impl Troop {
             num = 0;
         }
         if self.action == 9 && num == 3 { self.action = 0; }
+        // Troops_DeSelectExceptType (1022) with no type: everyone out of the selection, by the chore (LAN-safe)
+        if std::mem::take(&mut self.narrow) { shc_sim::frontend::game_action(m, 1022, 0, 0, 0, 0); }
         let under = self.under(m, rot);
         let os: &[i32] = if num == 1 { &self.on_screen } else { &[] };
         let sel = &self.boxed;
@@ -390,6 +408,62 @@ mod tests {
         println!("building {bid} at {bx},{by}: cursor {cursor:?}, group {g} target {target}");
         assert!(cursor.len() == 1 && cursor[0].0 == 107 && (48..64).contains(&cursor[0].1), "attack cursor (GM 107, frame 48 + animation): {cursor:?}");
         assert_eq!(target, bid, "no attack order on the enemy building");
+    }
+
+    /// SH1 controls: with a group selected, a click on one of its units leaves just that unit selected.
+    #[test]
+    fn click_one_out_of_group() {
+        let Some(mut l) = save("Crater Lake-1test.sav") else { return };
+        l.step();
+        let ids = own(l.mem(), 0x16);
+        let ps: Vec<[f32; 2]> = ids.iter().map(|&i| at(&l, i)).collect();
+        let (lo, hi) = ps.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])]));
+        let (a, z) = ([lo[0] - 10.0, lo[1] - 10.0], [hi[0] + 10.0, hi[1] + 10.0]);
+        l.troop_event(TroopIn::Cursor(a, a, [false; 3]));
+        l.troop_event(TroopIn::Press(a, a, [a[0] - 900.0, a[1] - 500.0, a[0] + 900.0, a[1] + 500.0]));
+        l.step();
+        l.troop_event(TroopIn::Cursor(z, [a[0] + 40.0, a[1] + 40.0], [false; 3]));
+        l.step();
+        l.troop_event(TroopIn::Release);
+        for _ in 0..3 { l.step(); }
+        let sel = selected(l.mem());
+        assert!(sel.len() > 1, "box selected {sel:?}");
+        // a selected archer that is front-most where it is clicked
+        let i = *ids.iter().find(|&&i| { let w = at(&l, i); l.troop.cursor = w; l.troop.under(l.mem_ref(), l.rotation()).first() == Some(&i) }).expect("no archer clear in front");
+        l.mouse = [tile(l.mem(), i).0, tile(l.mem(), i).1];
+        std::thread::sleep(std::time::Duration::from_millis(600)); // past the engine's double-click window
+        let w = at(&l, i);
+        click(&mut l, w);
+        l.step();
+        assert_eq!(selected(l.mem()), vec![i], "the click kept the group");
+    }
+
+    /// The troops panel's type filter: Troops_DeSelectExceptType (1022) keeps only that type, Troops_DeSelectType
+    /// (1021) drops it.
+    #[test]
+    fn select_type_from_panel() {
+        let Some(mut l) = save("Crater Lake-1test.sav") else { return };
+        l.step();
+        let all: Vec<i32> = l.troop.units.keys().copied().filter(|&i| alive(l.mem_ref(), i) && l.mem_ref().i16(u(i) + 0x6ee) == 1).collect();
+        let w: Vec<[f32; 2]> = all.iter().map(|&i| at(&l, i)).collect();
+        let (lo, hi) = w.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])]));
+        let (a, z) = ([lo[0] - 10.0, lo[1] - 10.0], [hi[0] + 10.0, hi[1] + 10.0]);
+        l.troop_event(TroopIn::Cursor(a, a, [false; 3]));
+        l.troop_event(TroopIn::Press(a, a, [a[0] - 900.0, a[1] - 500.0, a[0] + 900.0, a[1] + 500.0]));
+        l.step();
+        l.troop_event(TroopIn::Cursor(z, [a[0] + 40.0, a[1] + 40.0], [false; 3]));
+        l.step();
+        l.troop_event(TroopIn::Release);
+        for _ in 0..3 { l.step(); }
+        let types = |l: &mut Live| { let m = l.mem(); let mut t: Vec<i32> = selected(m).iter().map(|&i| ty(m, i)).collect(); t.dedup(); t.sort(); t.dedup(); t };
+        assert!(types(&mut l).len() > 1, "box got one type: {:?}", types(&mut l));
+        shc_sim::frontend::game_action(l.mem(), 1022, 0, 0x16, 0, 0);
+        l.step();
+        assert_eq!(types(&mut l), vec![0x16], "keep archers");
+        assert_eq!(selected(l.mem()).len(), own(l.mem(), 0x16).len());
+        shc_sim::frontend::game_action(l.mem(), 1021, 0, 0x16, 0, 0);
+        l.step();
+        assert!(selected(l.mem()).is_empty(), "archers dropped");
     }
 
     /// A unit standing on raised ground is drawn 2 × height px higher (record +5 = −height ×32); a click on its drawn

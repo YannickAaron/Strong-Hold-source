@@ -206,21 +206,31 @@ const CHECKS: [(u8, &str, &str, bool, f32, f32); 19] = [
 ];
 
 /// settings.cfg as Options last saved it (read once): what the rest of the app applies.
-static CFG: std::sync::Mutex<Option<skirmish::Settings>> = std::sync::Mutex::new(None);
+/// The cached settings.cfg. Tests: one per thread, as their profile folder (skirmish::set_test_profile) is, so
+/// parallel tests don't read each other's options.
+fn cfg() -> std::sync::MutexGuard<'static, Option<skirmish::Settings>> {
+    type M = std::sync::Mutex<Option<skirmish::Settings>>;
+    #[cfg(test)]
+    thread_local! { static C: &'static M = Box::leak(Box::default()); }
+    #[cfg(test)]
+    return C.with(|c| *c).lock().unwrap();
+    #[cfg(not(test))]
+    { static C: M = std::sync::Mutex::new(None); C.lock().unwrap() }
+}
 /// An Options flag as saved (settings.cfg key, the game's default when missing).
-pub fn opt(key: &str, default: bool) -> bool { CFG.lock().unwrap().get_or_insert_with(skirmish::Settings::load).flag(key, default) }
+pub fn opt(key: &str, default: bool) -> bool { cfg().get_or_insert_with(skirmish::Settings::load).flag(key, default) }
 /// Sets a True / False option outside the options screen (the chat panel's mute boxes) and saves settings.cfg.
 pub fn set_opt(key: &str, on: bool) -> std::io::Result<()> {
-    let mut c = CFG.lock().unwrap();
+    let mut c = cfg();
     let cfg = c.get_or_insert_with(skirmish::Settings::load);
     cfg.set(key, if on { "True" } else { "False" });
     cfg.save()
 }
 /// An Options value as saved ("NativeWindowSize" = "1600x900", ...).
-pub fn opt_text(key: &str) -> Option<String> { CFG.lock().unwrap().get_or_insert_with(skirmish::Settings::load).get(key).map(str::to_string) }
+pub fn opt_text(key: &str) -> Option<String> { cfg().get_or_insert_with(skirmish::Settings::load).get(key).map(str::to_string) }
 /// Tests: a new test profile's settings.cfg is read afresh.
 #[cfg(test)]
-pub fn reset_cfg() { *CFG.lock().unwrap() = None; }
+pub fn reset_cfg() { *cfg() = None; }
 /// Options > Controls > Confirm Disband Troops? (ConfigSettings.Settings_Confirm_Disband_Troops, default on): the HUD's
 /// Disband asks first (MainViewModel:36733).
 #[allow(dead_code)] // for the HUD's troop panel
@@ -284,6 +294,7 @@ pub struct Menu {
     progress: skirmish::Progress, // campaign screens: unlocked / won missions
     can_restart: bool,         // pause menu: the game came from the lobby (Restart Mission replays it)
     add_ai: bool,              // Lobby: the Add-AI face grid is open
+    custom_list: bool,         // Add-AI: the custom lords' list (the book) replaces the hover panel
     teams_open: bool,          // Lobby: the round-table Teams popup is open
     team_pick: Option<usize>,  // Teams: the picked-up member (0 = you, 1.. = AI k - 1)
     brief: Option<String>,     // Lobby: the selected map's own briefing (user maps)
@@ -314,7 +325,7 @@ static SORT: std::sync::Mutex<(u8, bool)> = std::sync::Mutex::new((1, false));
 static LAST_SAVE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 impl Menu {
-    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, teams_open: false, team_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default(), mouse: ([0.0; 2], false) } }
+    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, custom_list: false, teams_open: false, team_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default(), mouse: ([0.0; 2], false) } }
     pub fn pause(can_restart: bool) -> Self { Menu { screen: Screen::Pause, in_game: true, can_restart, ..Self::main() } }
     /// Back from a sub-screen: the pause menu in game, else the main menu.
     fn home(&self) -> Self { if self.in_game { Self::pause(self.can_restart) } else { Self::main() } }
@@ -687,8 +698,10 @@ impl Menu {
                 Act::Fair(v) => { l.fairness = v; crate::audio::ui(crate::audio::ui_id::GOLD[(v.clamp(1, 5) - 1) as usize], 1.0) }
                 Act::Goods(v) => l.goods = v,
                 Act::Outposts => l.outposts = !l.outposts,
-                Act::AddAiOpen => { self.add_ai = true; crate::audio::speech(2, "Genie_03.wav") }
-                Act::AddAiClose => self.add_ai = false,
+                Act::AddAiOpen => { self.add_ai = true; self.custom_list = false; crate::custom_lords::rescan(); crate::audio::speech(2, "Genie_03.wav") }
+                Act::AddAiClose => { self.add_ai = false; self.custom_list = false; }
+                // the book: the custom lords' list (CustomLords folders), one click adds one (FRONT_Multiplayer CustomLordList)
+                Act::AddLord(98) => self.custom_list = !self.custom_list,
                 // FRONT_Multiplayer AddSkirmishPlayer: refused once the lobby holds the map's start positions (its
                 // maxPlayers, at most 8), as the Add AI button already is
                 Act::AddLord(n) if self.mp.net.as_ref().map_or(1, |n| n.lobby.humans.len()) + l.ais.len()
@@ -1401,7 +1414,7 @@ impl Menu {
     }
     fn save_cfg(&mut self) {
         if let Err(e) = self.cfg.save() { self.error = Some(format!("settings.cfg: {e}")); }
-        *CFG.lock().unwrap() = Some(self.cfg.clone());
+        *cfg() = Some(self.cfg.clone());
     }
     /// An Options slider's position from settings.cfg (volumes ×100, game speed /5).
     fn slider_value(&self, key: &str) -> i32 {
@@ -2066,6 +2079,9 @@ impl Menu {
             let k = (p[2] - p[0]) * 0.15;
             if !coa::draw_mine(out, p, c) { ui.img_fit(out, "shield_crusader", [p[0] + k, p[1] + k, p[2] - k, p[3] - k], c); }
             ui.img(out, "Face Border", p, c);
+        } else if let Some(cl) = crate::custom_lords::of_lord(l.ais[m - 1].0) {
+            if !crate::custom_lords::draw_face(out, &cl, p, c) { if let Some(&(face, _)) = FACES.iter().find(|f| f.1 == crate::custom_lords::parent(&cl)) { ui.img(out, face, p, c); } }
+            ui.img(out, "Face Border", p, c);
         } else if let Some(&(face, _)) = FACES.iter().find(|f| f.1 == l.ais[m - 1].0) {
             ui.img(out, face, p, c);
         }
@@ -2081,7 +2097,7 @@ impl Menu {
         let mut hover = None;
         for (c, &(face, n)) in FACES.iter().enumerate() {
             let p = self.r(70.0 + 80.0 * (c % 8) as f32, 400.0 + 80.0 * (c / 8) as f32, 72.0, 72.0);
-            let avail = n == 99 || n < LORDS.len();
+            let avail = n == 99 || n < LORDS.len() || n == 98 && crate::custom_lords::count() > 0 && self.mp.net.is_none();
             if face.starts_with("Face") {
                 ui.img(out, "Face Background Generic", p, [1.0; 4]);
                 ui.img(out, face, p, [1.0; 4]);
@@ -2094,6 +2110,16 @@ impl Menu {
             if avail { self.hits.push((p, Act::AddLord(n))); }
         }
         self.img_button(ui, out, ["UI-Buttons S043", "UI-Buttons S044", "UI-Buttons S043"], 711.0, 390.0, 29.0, 29.0, Some(Act::AddAiClose), cursor);
+        if self.custom_list {
+            self.label(ui, out, &ui.text_of("TEXT_CUSTOMISATION_022"), 1047.0, 402.0, 22.0, 0.5, BLACK);
+            for (k, name) in crate::custom_lords::names().iter().enumerate().take(13) {
+                let p = self.r(800.0, 436.0 + 22.0 * k as f32, 494.0, 22.0);
+                let on = Self::inside(p, cursor);
+                self.label(ui, out, name, 810.0, 440.0 + 22.0 * k as f32, 18.0, 0.0, if on { [0.45, 0.1, 0.1, 1.0] } else { BLACK });
+                self.hits.push((p, Act::AddLord(crate::custom_lords::BASE + k)));
+            }
+            return;
+        }
         match hover.filter(|&n| n < 29) {
             Some(n) => {
                 self.label(ui, out, &ui.text_of(&lord_keys(n).0), 1047.0, 402.0, 22.0, 0.5, BLACK);
@@ -2184,6 +2210,7 @@ fn computer_name_key(n: usize) -> String {
 
 /// Lord n's short name and title string keys (Translate: lookUpText is 0-based, so keys are + 1).
 fn lord_keys(n: usize) -> (String, String) {
+    if let Some(c) = crate::custom_lords::of_lord(n) { return (c.name, String::new()); }
     let (s, k) = match n { 0..=15 => ("TEXT_XPLAY_WAITING_ROOM", 240 + 9 * n), 16..=24 => ("TEXT_NEW_CTEXT", 89 + 9 * (n - 16)), _ => ("TEXT_NEW_CTEXT", 454 + 17 * (n - 25)) };
     (format!("{s}_{k:03}"), format!("{s}_{:03}", k + 1))
 }

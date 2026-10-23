@@ -286,6 +286,7 @@ dependencies = [
  "image",
  "lewton",
  "lz4_flex",
+ "miniz_oxide 0.8.9",
  "regex",
  "texture2ddecoder",
 ]

@@ -295,10 +295,11 @@ impl Ui {
         self.button(out, p.r(661.0, 10.0, 29.0, 29.0), x1, x2, false, cursor, Some(Hit::Ally(if a.view == 0 { 1 } else { 5 }, 0)));
         let face = |ui: &mut Self, out: &mut Vec<HudTri>, r: [f32; 4], q: usize, bg: bool, alpha: f32| {
             if bg { ui.img(out, face_bg(q), r, [1.0, 1.0, 1.0, alpha]); }
-            if l.ai[q] != -1 { ui.img_fit(out, ai_face(l.ai[q]), r, [1.0, 1.0, 1.0, alpha]); }
+            if let Some(c) = crate::custom_lords::by_kind(l.ai[q] as i32) { if !crate::custom_lords::draw_face(out, &c, r, [1.0, 1.0, 1.0, alpha]) { ui.img_fit(out, ai_face(crate::custom_lords::parent(&c) as i16 + 1), r, [1.0, 1.0, 1.0, alpha]); } }
+            else if l.ai[q] != -1 { ui.img_fit(out, ai_face(l.ai[q]), r, [1.0, 1.0, 1.0, alpha]); }
             else { ui.img(out, "Face Background Generic", r, [1.0, 1.0, 1.0, alpha]); ui.img(out, "Face Border", r, [1.0, 1.0, 1.0, alpha]); } // ponytail: no Steam avatars
         };
-        let name = |ui: &Self, q: usize| if l.ai[q] != -1 { ui.text_of(&crate::endgame::name(l.ai[q] as i32, l.names[q] as i32)) } else { crate::endgame::name(0, 0) };
+        let name = |ui: &Self, q: usize| if let Some(c) = crate::custom_lords::by_kind(l.ai[q] as i32) { c.name } else if l.ai[q] != -1 { ui.text_of(&crate::endgame::name(l.ai[q] as i32, l.names[q] as i32)) } else { crate::endgame::name(0, 0) };
         let mut roll = String::new();
         match a.view {
             0 if list.is_empty() => { let s = t(self, 20); self.top_text(out, &s, p.at(20.0, 45.0), 22.0, 0.0, CREAM, true); }

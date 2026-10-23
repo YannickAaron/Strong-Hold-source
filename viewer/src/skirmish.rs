@@ -412,6 +412,18 @@ pub fn setup(l: &Lobby) -> shc_sim::setup::Setup {
     let mut rotation = [0; 8];
     for (k, &(lord, team)) in l.ais.iter().enumerate().take(7) {
         let p = k as i32 + 2;
+        // a custom lord (FRONT_Multiplayer.StartSkirmishGame): lord type 29 + slot, its .aivjson castles as custom
+        // AIVs (none: the parent lord's defaults), then its config (DLL_SetExtendedLordConfig)
+        if let Some(c) = crate::custom_lords::of_lord(lord) {
+            s.ais.push((p, p + 28, 0, team));
+            let layouts = if c.aivs.is_empty() { shc_sim::trail::aiv_layouts(cs, AIV_ARRAYS[crate::custom_lords::parent(&c)]) } else { c.aivs.clone() };
+            for (id, a) in layouts.into_iter().enumerate() { s.aivs.push((p - 1, id as i32, (!c.aivs.is_empty()) as i32, a.iter().flat_map(|v| v.to_le_bytes()).collect())); }
+            s.lord_configs.push((p, c.config.clone()));
+            crate::custom_lords::set_in_game(p as usize, Some(c));
+            continue;
+        }
+        crate::custom_lords::set_in_game(p as usize, None);
+        if lord >= LORDS.len() { eprintln!("skirmish: no custom lord {lord} any more, slot {p} left empty"); continue; }
         s.ais.push((p, lord as i32, 0, team));
         let code = l.aivs[p as usize - 1];
         match picked_aiv(cs, lord, code) {

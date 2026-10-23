@@ -15,6 +15,7 @@ mod live;
 mod macos;
 mod map;
 mod menu;
+mod custom_lords; // DE's CustomLords / CustomMedia folders: custom AI lords (custom_lords.rs)
 mod paths; // per-OS game / cache / data folders
 mod setup; // first run: the user's own copy of the game (Steam download), exported once (setup/)
 #[cfg(feature = "live")]
@@ -562,6 +563,7 @@ impl App {
             }
             return;
         }
+        if self.ui.as_mut().is_some_and(|u| u.rclick(self.cam.cursor)) { return; } // a troop type off the selection
         let tool = self.ui.as_ref().and_then(|u| u.selected_mapper()).is_some();
         if let Some(u) = &mut self.ui { u.selected = None; } // drop the build tool (StopAllPlacement)
         self.drag_from = None;

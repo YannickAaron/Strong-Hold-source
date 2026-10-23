@@ -219,6 +219,14 @@ impl Audio {
         let sink = &self.speech_sinks[ch];
         sink.stop(); sink.set_volume(self.speech_gain(ch)); sink.append(src); sink.play();
     }
+    /// A speech file by path (a custom lord's CustomMedia wav: MyAudioManager.PlaySpeech(ch, "*", path)).
+    pub fn play_speech_file(&mut self, channel: i32, path: &Path, volume: f32) {
+        let Some(src) = self.decode(path) else { return };
+        let ch = channel.clamp(1, 3) as usize - 1;
+        self.speech_vol[ch] = (volume, false);
+        let sink = &self.speech_sinks[ch];
+        sink.stop(); sink.set_volume(self.speech_gain(ch)); sink.append(src); sink.play();
+    }
     /// MyAudioManager.StopSpeech.
     pub fn stop_speech(&mut self, channel: i32) { self.speech_sinks[channel.clamp(1, 3) as usize - 1].stop(); }
     /// MyAudioManager.isSpeechPlaying.

@@ -76,6 +76,45 @@ pub fn parse(d: &[i16]) -> Result<Aiv, String> {
     Ok(Aiv { pause_delay, pause_steps, steps, troops })
 }
 
+/// AIVLoader.SaveData.GetRawData: a `.aivjson` castle (DE's Castle editor) as the blob `DLL_ImportAIV` takes.
+/// `frames` = (itemType, tilePositionOfsets, shouldPause) in order, `misc` = (itemType, positionOfset, number) (an
+/// itemType over 9000 is stored minus 9000). The pause list is step 0 plus `frame index + 2` of each pausing frame,
+/// at most 50 entries.
+pub fn encode_save(pause_delay: i16, frames: &[(i16, Vec<i16>, bool)], misc: &[(i16, i16, i16)]) -> Vec<i16> {
+    let mut out = vec![pause_delay];
+    let mut pauses = vec![0i16];
+    for (k, f) in frames.iter().enumerate() {
+        if f.2 { pauses.push(k as i16 + 2); }
+        if pauses.len() >= 50 { break; }
+    }
+    out.push(pauses.len() as i16);
+    out.extend(pauses);
+    out.push(frames.len() as i16);
+    for (kind, tiles, _) in frames {
+        if tiles.len() == 1 {
+            out.extend([*kind, tiles[0]]);
+        } else {
+            out.extend([-kind, tiles.len() as i16]);
+            out.extend(tiles);
+        }
+    }
+    out.push(misc.len() as i16);
+    for &(kind, pos, n) in misc {
+        out.extend([if kind > 9000 { kind - 9000 } else { kind }, pos, n]);
+    }
+    out
+}
+
+#[test]
+fn encode_save_round_trip() {
+    let frames = vec![(61, vec![5643], false), (25, vec![5741, 5742, 5743], true), (54, vec![3652], false)];
+    let d = encode_save(100, &frames, &[(9006, 4000, 0), (8, 4001, 1)]);
+    assert_eq!(&d[..8], &[100, 2, 0, 3, 3, 61, 5643, -25]);
+    let a = parse(&d).unwrap();
+    assert_eq!((a.pause_delay, a.pause_steps.clone(), a.steps.len(), a.troops.len()), (100, vec![0, 3], 3, 2));
+    assert_eq!((a.steps[1].kind, a.steps[1].tiles.len(), a.troops[0].slot, a.troops[1].index), (25, 3, 6, 1));
+}
+
 /// Little-endian i16 blob (what the recorder stores for the `data` arg) → shorts.
 pub fn from_le_bytes(b: &[u8]) -> Vec<i16> {
     b.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect()

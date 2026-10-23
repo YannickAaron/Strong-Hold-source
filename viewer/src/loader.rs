@@ -22,18 +22,22 @@ impl Atlases {
         // masks.tsv: atlas index, w, h, unity format (10 = DXT1, 12 = DXT5). Missing file = old export, no masks.
         let masks: Vec<(usize, u32, u32, u32)> = std::fs::read_to_string(crate::cache_dir().join("masks.tsv")).unwrap_or_default().lines()
             .map(|l| { let c: Vec<u32> = l.split('\t').map(|v| v.parse().unwrap()).collect(); (c[0] as usize, c[1], c[2], c[3]) }).collect();
-        let jobs: Vec<(String, u32, u32)> = atlases.iter().map(|a| (a.name.clone(), a.w, a.h)).collect();
+        // atlases.tsv column 4, unity format: 25 = BC7 (DE's), 12 = DXT5 / BC3 (extract::sc2's renders)
+        let formats: Vec<u32> = std::fs::read_to_string(crate::cache_dir().join("atlases.tsv")).unwrap_or_default().lines()
+            .map(|l| l.split('\t').nth(4).and_then(|v| v.parse().ok()).unwrap_or(25)).collect();
+        let jobs: Vec<(String, u32, u32, u32)> = atlases.iter().enumerate().map(|(i, a)| (a.name.clone(), a.w, a.h, formats.get(i).copied().unwrap_or(25))).collect();
         let (tx, rx) = channel();
         let dev = (device.clone(), queue.clone());
         let (bgl, screen, sampler, black, total) = (bgl.clone(), screen.clone(), sampler.clone(), black.clone(), jobs.len());
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
-            for (i, (name, w, h)) in jobs.into_iter().enumerate() {
+            for (i, (name, w, h, format)) in jobs.into_iter().enumerate() {
                 let mask = masks.iter().find(|m| m.0 == i).map(|&(_, mw, mh, f)| {
                     let (f, b) = if f == 12 { (wgpu::TextureFormat::Bc3RgbaUnorm, 16) } else { (wgpu::TextureFormat::Bc1RgbaUnorm, 8) };
                     upload(&dev, &format!("{name}_m"), mw, mh, f, b)
                 });
-                let tex = upload(&dev, &name, w, h, wgpu::TextureFormat::Bc7RgbaUnormSrgb, 16);
+                let f = if format == 12 { wgpu::TextureFormat::Bc3RgbaUnormSrgb } else { wgpu::TextureFormat::Bc7RgbaUnormSrgb };
+                let tex = upload(&dev, &name, w, h, f, 16);
                 if tx.send((i, group(&dev.0, &bgl, &screen, &sampler, &tex, mask.as_ref().unwrap_or(&black)))).is_err() { return; }
             }
             println!("uploaded {total} atlases + {} masks in {:.2}s (worker thread)", masks.len(), t0.elapsed().as_secs_f32());

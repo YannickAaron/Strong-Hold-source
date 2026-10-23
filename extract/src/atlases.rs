@@ -54,5 +54,6 @@ pub fn export(data: &Path, out: &Path) -> Result<()> {
         writeln!(rows, "{}\t{a}\t{x}\t{y}\t{w}\t{h}\t{:.6}\t{:.6}\t{}", s.name, s.pivot[0] as f64, s.pivot[1] as f64, mesh.join(";"))?;
     }
     fs::write(out.join("sprites.tsv"), rows)?;
+    crate::sc2::invalidate(out); // the .tsv files no longer hold the SC2 rows
     Ok(())
 }

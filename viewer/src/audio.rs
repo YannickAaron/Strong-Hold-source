@@ -48,7 +48,7 @@ mod imp {
 
     /// A queued front-end request, played at the next `menu` / `tick`.
     #[derive(Debug, PartialEq)]
-    pub enum Req { Sound(i32, f32), Speech(i32, String) }
+    pub enum Req { Sound(i32, f32), Speech(i32, String), File(i32, std::path::PathBuf) }
 
     thread_local! {
         static S: RefCell<Option<Option<St>>> = const { RefCell::new(None) };
@@ -128,9 +128,15 @@ mod imp {
         Some(if lord < 4 { format!("{t}_{what}_player.wav") } else { format!("{t}_{what}_player_01.wav") })
     }
     /// Lobby: AI `lord` added (FRONT_Multiplayer:8150), unless channel 3 is talking.
-    pub fn genie_add(lord: usize) { if let Some(l) = lord_line(lord, "add").filter(|_| !talking(3)) { speech(3, &l) } }
+    pub fn genie_add(lord: usize) {
+        if let Some(c) = crate::custom_lords::of_lord(lord) { if let Some(p) = crate::custom_lords::lobby_wav(&c, "ADD_PLAYER").filter(|_| !talking(3)) { UI.with(|q| q.borrow_mut().push(Req::File(3, p))) } return; }
+        if let Some(l) = lord_line(lord, "add").filter(|_| !talking(3)) { speech(3, &l) }
+    }
     /// Lobby: AI `lord` removed (FRONT_Multiplayer:3467), unless channel 3 is talking.
-    pub fn genie_kick(lord: usize) { if let Some(l) = lord_line(lord, "kick").filter(|_| !talking(3)) { speech(3, &l) } }
+    pub fn genie_kick(lord: usize) {
+        if let Some(c) = crate::custom_lords::of_lord(lord) { if let Some(p) = crate::custom_lords::lobby_wav(&c, "KICK_PLAYER").filter(|_| !talking(3)) { UI.with(|q| q.borrow_mut().push(Req::File(3, p))) } return; }
+        if let Some(l) = lord_line(lord, "kick").filter(|_| !talking(3)) { speech(3, &l) }
+    }
     /// Lobby Teams: AI `lord` joined a team, `with_you` = yours (FRONT_Multiplayer:3655-3715). Rat / Sultan joining you
     /// say their line once; otherwise one of seven lines, at most every 5 s and not over channel 3.
     pub fn genie_team(lord: usize, with_you: bool) {
@@ -172,6 +178,7 @@ mod imp {
             match r {
                 Req::Sound(id, v) => st.a.play_sound(id, v, 0.0),
                 Req::Speech(ch, n) => st.a.play_speech(ch, &n, 1.0),
+                Req::File(ch, p) => st.a.play_speech_file(ch, &p, 1.0),
             }
         }
     }
@@ -309,6 +316,11 @@ mod imp {
                     Sound::At { x, y, id } => if let Some((v, pan)) = place(to_screen(x, y), w, h) { st.a.play_sound(id, v.min(1.0), pan) }, // ponytail: clamp, Unity's formula reaches 1.85 (rodio would clip)
                     Sound::Id(id) => st.a.play_sound(id, 1.0, 0.0),
                     Sound::Named(n) => {
+                        // a custom lord's line "*<player>*SK_<KEY>": its CustomMedia wav (none: the greeting already played)
+                        if let Some((p, key)) = crate::custom_lords::split(&n) {
+                            if let Some(path) = crate::custom_lords::wav(p, &key) { st.speech_ch = 3 - st.speech_ch; st.a.play_speech_file(st.speech_ch, &path, 1.0); }
+                            continue;
+                        }
                         let Some(n) = speech_file(&n) else { continue };
                         // tutorial lines: FUN_18000f070 = engine channel 4 = C# channel 2, cutting the line before
                         // (PlaySpeech force); the rest: FUN_18000edf0 alternates channels 1 / 2 (DAT_1802c5728 3, 4)

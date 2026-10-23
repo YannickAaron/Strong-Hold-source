@@ -247,6 +247,9 @@ mod sim {
             }
             self.sel = out.selected.iter().flat_map(|p| p.iter().flat_map(|v| v.to_le_bytes())).collect();
             self.troop.track(&out.draw);
+            // completeSelectionBox; not in a replay, which plays the recorded selection writes
+            let play = matches!(self.tap, Some(crate::game_replay::Tap::Play(_)));
+            if !play && i32::from_le_bytes(self.ret[0x3b8..0x3bc].try_into().unwrap()) > 0 { self.troop.complete_box(&self.m, rot); }
             self.ev.scan(&out.draw);
             self.ev.video.scan(&out.draw, &self.ret); // the engine's video channel (video.rs)
             // FatControler: skirmishInsultFrom (+0xafe) / skirmishInsult (+0xaff, 1..20), an AI lord's answer to an
@@ -322,7 +325,7 @@ mod sim {
 
         /// SHC_SAY=id (scripted screenshots): the first AI lord's speech `id` 1..33 (FUN_180102bc0), as the AI posts it.
         pub fn say(&mut self, id: i32) {
-            let lord = (0..8u64).find(|&k| self.m.i32(0x18404a8e4 + k * 0x5e4) > 0).unwrap_or(0);
+            let lord = (0..0x26u64).find(|&k| self.m.i32(0x18404a8e4 + k * 0x5e4) > 0).unwrap_or(0); // 0x1e..: custom lords
             shc_sim::hudmsg::f102bc0(&mut self.m, 0x181b60e70, 2, lord as i32, id);
         }
 

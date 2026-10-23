@@ -1,5 +1,5 @@
 //! Where the game and our own files live, per OS. The SHC_* env vars still win at the call sites (SHC_MAPS, SHC_SAVES,
-//! SHC_CACHE, SHC_AUDIO, SHC_PROFILE), plus SHC_GAME for the game's install folder.
+//! SHC_CACHE, SHC_AUDIO, SHC_PROFILE), plus SHC_GAME for the game's install folder (SHC_SC2_GAME: Crusader 2's).
 //! - Every OS: the game the first-run setup downloaded (app_data()/game) wins; the exports (shc-viewer, shc-audio) live
 //!   in app_data() too, so the OS never purges them.
 //! - macOS: else the game in CrossOver's "Steam" bottle; our files in ~/Library/Application Support.
@@ -20,13 +20,23 @@ pub fn home() -> PathBuf { env_dir("HOME").or_else(|| env_dir("USERPROFILE")).un
 
 /// Steam's folder: the first candidate that has the game, else the first.
 fn steam() -> PathBuf {
+    let roots = steam_roots();
+    roots.iter().find(|r| r.join("steamapps/common").join(GAME).is_dir()).unwrap_or(&roots[0]).clone()
+}
+fn steam_roots() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     let roots = vec![home().join("Library/Application Support/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam")];
     #[cfg(windows)]
     let roots = vec![PathBuf::from(r"C:\Program Files (x86)\Steam"), PathBuf::from(r"C:\Program Files\Steam")];
     #[cfg(not(any(target_os = "macos", windows)))]
     let roots = { let h = home(); vec![h.join(".steam/steam"), h.join(".local/share/Steam"), h.join(".var/app/com.valvesoftware.Steam/.local/share/Steam")] };
-    roots.iter().find(|r| r.join("steamapps/common").join(GAME).is_dir()).unwrap_or(&roots[0]).clone()
+    roots
+}
+
+/// Stronghold Crusader 2's install, if any (optional Crusader 2 units): SHC_SC2_GAME, else Steam's (CrossOver's).
+pub fn sc2_game() -> Option<PathBuf> {
+    let steam = steam_roots().into_iter().map(|r| r.join("steamapps/common").join(shc_extract::sc2::GAME));
+    env_dir("SHC_SC2_GAME").into_iter().chain(steam).find(|g| shc_extract::sc2::is_game(g))
 }
 
 /// The game's install folder: SHC_GAME, else the setup's download, else Steam's (CrossOver's on macOS).

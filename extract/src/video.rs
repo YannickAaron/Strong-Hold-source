@@ -240,6 +240,16 @@ pub fn export_more(data: &Path, out: &Path, progress: &mut dyn FnMut(usize, usiz
     Ok(())
 }
 
+/// A custom lord's reaction video (CustomMedia/<lord>/angry.webm, 348x348 VP8 + Vorbis) as `<out>/<name>.vid` +
+/// `<name>.wav`, the minimap clip format of `export_more`. Existing files are kept.
+pub fn export_custom(webm: &Path, out: &Path, name: &str) -> Result<()> {
+    if out.join(format!("{name}.vid")).exists() { return Ok(()); }
+    fs::create_dir_all(out)?;
+    let (fr, audio) = frames(webm)?;
+    write_vid(out, &format!("{name}.vid"), fit(fr, 176, 176, 176), &[0], 0, (176, 176), FPS, true)?;
+    bink_wav(out, name, audio)
+}
+
 /// `export_more`'s missing files: (source webm, output stem, full screen), the minimap clips first.
 pub fn more_todo(data: &Path, out: &Path) -> Vec<(std::path::PathBuf, String, bool)> {
     let vids = data.join("Assets/GUI/Video");

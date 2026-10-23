@@ -236,6 +236,11 @@ impl Gm {
                 }).collect());
             }
         }
+        // SHC_SC2_KNIGHT=1 (dev, until the lobby's Extended rules): knights draw with Crusader 2's sheet (gm 1044,
+        // extract::sc2) when the export has it
+        if std::env::var_os("SHC_SC2_KNIGHT").is_some() && names.iter().any(|n| n == "sc2_sassanid_knight-0") {
+            if let Some(e) = files.get(&1044).cloned() { files.insert(44, e); }
+        }
         Self { files, names: names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect(), palettes }
     }
 

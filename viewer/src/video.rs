@@ -280,7 +280,8 @@ pub fn sketch(out: &mut Vec<HudTri>, file: &str, p: [f32; 4]) -> bool {
     })
 }
 
-/// SFXManager.customLordDefaultBinks: an AI's line video "*<player>*<SK_ key>" (custom lords' own media folders aren't read).
+/// SFXManager.customLordDefaultBinks: an AI's line video "*<player>*<SK_ key>" when the lord's CustomMedia folder has
+/// no (exported) reaction video.
 fn custom_lord_video(key: &str) -> &'static str {
     match key {
         "sk_nerv_weak" | "sk_die_ally" | "sk_ally_need_help" | "sk_cant_attack" | "sk_team_losing" => "bad_soldier_nevous",
@@ -305,7 +306,7 @@ impl Engine {
             let name = ret.get(1796..1924).map(|b| b.split(|&c| c == 0).next().unwrap_or(&[])).unwrap_or(&[]);
             let name = String::from_utf8_lossy(name).to_lowercase();
             let mut stem = name.rsplit(['/', '\\']).next().unwrap_or("").trim_end_matches(".bik").trim_end_matches(".webm").to_string();
-            if let [_, _, key] = stem.split('*').collect::<Vec<_>>()[..] { stem = custom_lord_video(key).into() }
+            if let Some((p, key)) = crate::custom_lords::split(&stem) { stem = crate::custom_lords::video_stem(p, &key).unwrap_or_else(|| custom_lord_video(&format!("sk_{}", key.to_lowercase())).into()) }
             self.now = (r[3] >= 0 && !stem.is_empty()).then_some((stem, r[3] > 0, self.serial));
             self.wait = r[11] != 0 && crate::audio::speech_state().0;
         }

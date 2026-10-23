@@ -12,7 +12,7 @@ use super::*;
 pub enum J { Num(i64), Str(String), Arr(Vec<J>), Obj(Vec<(String, J)>) }
 
 impl J {
-    fn get(&self, k: &str) -> Option<&J> { if let J::Obj(v) = self { v.iter().find(|e| e.0 == k).map(|e| &e.1) } else { None } }
+    pub(crate) fn get(&self, k: &str) -> Option<&J> { if let J::Obj(v) = self { v.iter().find(|e| e.0 == k).map(|e| &e.1) } else { None } }
     pub fn int(&self, k: &str) -> i64 { if let Some(J::Num(n)) = self.get(k) { *n } else { 0 } }
     fn str(&self, k: &str) -> String { if let Some(J::Str(s)) = self.get(k) { s.clone() } else { String::new() } }
     pub fn ints(&self, k: &str) -> Vec<i64> { if let Some(J::Arr(a)) = self.get(k) { a.iter().map(|v| if let J::Num(n) = v { *n } else { 0 }).collect() } else { vec![] } }
@@ -87,7 +87,7 @@ impl J {
                 _ => {
                     let st = *i;
                     while *i < b.len() && !matches!(b[*i], b',' | b']' | b'}') && !b[*i].is_ascii_whitespace() { *i += 1; }
-                    Some(J::Num(s[st..*i].parse::<f64>().map_or(0, |f| f as i64)))
+                    Some(J::Num(match &s[st..*i] { "true" => 1, "false" => 0, t => t.parse::<f64>().map_or(0, |f| f as i64) }))
                 }
             }
         }
@@ -225,7 +225,7 @@ pub fn record(kind: Kind) {
 /// MPScoreData.playerName: you (slot 1, or a human) by the profile's name, an AI lord by its name.
 fn names() -> impl Fn(usize, i64) -> String {
     let me = player_name();
-    move |l, cr| if cr == 0 || l == 1 { me.clone() } else { skirmish::LORDS.get((cr - 1).max(0) as usize).copied().unwrap_or("").to_string() }
+    move |l, cr| if cr == 0 || l == 1 { me.clone() } else if let Some(c) = crate::custom_lords::by_kind(cr as i32) { c.name } else { skirmish::LORDS.get((cr - 1).max(0) as usize).copied().unwrap_or("").to_string() }
 }
 
 /// The game that just ended as the score screen shows it (the captured statistics, left for `record`).
@@ -522,6 +522,7 @@ impl Menu {
                     if !crate::menu::coa::draw_mine(out, face, c) { ui.img_fit(out, "shield_crusader", face, c); }
                     ui.img(out, "Face Border", face, c);
                 }
+                else if let Some(cl) = crate::custom_lords::by_kind(cr[l] as i32) { if !crate::custom_lords::draw_face(out, &cl, face, c) { if let Some(&(f, _)) = FACES.iter().find(|f| f.1 == crate::custom_lords::parent(&cl)) { ui.img(out, f, face, c); } } }
                 else if let Some(&(f, _)) = FACES.iter().find(|f| f.1 as i64 == cr[l] - 1) { ui.img(out, f, face, c); }
                 fx += 41.0;
             }

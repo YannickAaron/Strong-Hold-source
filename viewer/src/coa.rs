@@ -253,12 +253,16 @@ fn preview(d: &Design) -> Option<[f32; 4]> {
 
 /// Face slot of coat of arms `code` (feathered, 130²), composed the first time it's asked for.
 fn face(code: &str) -> Option<[f32; 4]> {
+    face_with(code, || Design::parse(code).and_then(|d| compose(&d, true)).map(|px| shrink(&px, N, 2)))
+}
+/// Face slot of `code`, its 130² RGBA from `make` the first time (a coat of arms, or a custom lord's avatar.png).
+fn face_with(code: &str, make: impl FnOnce() -> Option<Vec<u8>>) -> Option<[f32; 4]> {
     let slot = |i: usize| (N + 130 * (i % 8), 130 * (i / 8));
     if let Some(i) = sheet(|s| s.faces.iter().position(|f| f.0 == code)) {
         let (x, y) = slot(i);
         return sheet(|s| s.faces[i].1).then(|| uv(x, y, 130));
     }
-    let px = Design::parse(code).and_then(|d| compose(&d, true)).map(|px| shrink(&px, N, 2));
+    let px = make();
     sheet(|s| {
         let i = if s.faces.len() < FACES { s.faces.push((String::new(), false)); s.faces.len() - 1 } else { s.next = (s.next + 1) % FACES; s.next };
         s.faces[i] = (code.to_string(), px.is_some());
@@ -293,6 +297,10 @@ fn icon(i: usize) -> Option<[f32; 4]> {
 /// code): the caller draws its stand-in.
 pub fn draw_face(out: &mut Vec<HudTri>, code: &str, p: [f32; 4], color: [f32; 4]) -> bool {
     face(code).map(|uv| quad(out, TEX, p, uv, color)).is_some()
+}
+/// A picture face (`px` = 130² RGBA, e.g. a custom lord's avatar.png) under the sheet name `code`; false = no picture.
+pub fn draw_picture(out: &mut Vec<HudTri>, code: &str, px: impl FnOnce() -> Option<Vec<u8>>, p: [f32; 4], color: [f32; 4]) -> bool {
+    face_with(code, px).map(|uv| quad(out, TEX, p, uv, color)).is_some()
 }
 /// The player's own face (`mine`).
 pub fn draw_mine(out: &mut Vec<HudTri>, p: [f32; 4], color: [f32; 4]) -> bool { draw_face(out, &mine().code(), p, color) }

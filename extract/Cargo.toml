@@ -12,3 +12,5 @@ fontdue = "0.9"
 lz4_flex = "0.11"
 crc32fast = "1.5"
 image = { version = "0.25", default-features = false, features = ["png"] }
+# sc2/read.rs: assets.v entries are Deflate. Already in the lock (through png): nothing new to download.
+miniz_oxide = "0.8"

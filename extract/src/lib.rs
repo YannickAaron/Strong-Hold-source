@@ -10,6 +10,7 @@ pub mod webm;
 pub mod classes;
 pub mod dll;
 pub mod frontend;
+pub mod sc2;
 pub mod tex;
 pub mod ui;
 pub mod unity;

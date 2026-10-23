@@ -625,6 +625,14 @@ impl Ui {
 
     fn inside(p: [f32; 4], c: [f32; 2]) -> bool { c[0] >= p[0] && c[0] < p[2] && c[1] >= p[1] && c[1] < p[3] }
 
+    /// Right press at `c`: a troop type in the troops panel leaves the selection (RightClickSelectedTroopCommand:
+    /// Troops_DeSelectType 1021). True if the HUD took it.
+    pub fn rclick(&mut self, c: [f32; 2]) -> bool {
+        let Some(&(_, Hit::Act(1022, _, t))) = self.hits.iter().rev().find(|(p, _)| Self::inside(*p, c)) else { return false };
+        self.actions.push([1021, 0, t]);
+        true
+    }
+
     /// Left click at `c` (logical px): true if the HUD took it (tabs switch category, build buttons highlight).
     pub fn click(&mut self, c: [f32; 2]) -> bool {
         self.message = None;
@@ -814,8 +822,10 @@ impl Ui {
             let x = 52.0 * slot as f32;
             if let Some((s1, s2)) = self.troops.get(&t).cloned() {
                 // TroopSelectionControls 408×120 at (142, bottom 2): 45×86 button centred, + slot transform
+                // LeftClickSelectedTroopCommand: Troops_DeSelectExceptType (1022) keeps only this type; a right click
+                // drops it (`rclick`)
                 let p = self.pr(o, 142.0 + (408.0 - 45.0) / 2.0 - 181.0 + x, 33.0 + 17.0 - 13.0, 45.0, 86.0);
-                self.button(out, p, &s1, &s2, false, cursor, Some(Hit::Panel));
+                self.button(out, p, &s1, &s2, false, cursor, Some(Hit::Act(1022, 0, t)));
             }
             // TroopSelectionNumbers 820×30 at (132, bottom 8): 64 px centred TextBlocks, 22 px #DDDDDD, drop shadow
             let asc = self.font.horizontal_line_metrics(22.0).map_or(17.6, |m| m.ascent);
@@ -1626,7 +1636,8 @@ impl Ui {
             221 => ("TEXT_SKIRMISH_SPEECH", id),
             226 => ("TEXT_NEW_PRE_ATTACK", id),
             228 => ("TEXT_NEW_CTEXT", id),
-            ..=-1 => ("TEXT_SKIRMISH_SPEECH", id + 986),
+            // a custom lord (hudmsg::f102bc0 posts kind −player): its text.txt line, else the shipped skirmish line
+            ..=-1 => match crate::custom_lords::key(id).and_then(|k| crate::custom_lords::text(-kind as usize, k)) { Some(t) => return t, None => ("TEXT_SKIRMISH_SPEECH", id + 986) },
             k => return format!("text section {k}, {id}"), // ponytail: only the sections the sim posts are named
         };
         self.text_of(&format!("{sec}_{:03}", id + 1))
@@ -2266,6 +2277,22 @@ fn panel_buttons_via_hud() {
     assert_eq!(h.app_mode, 16, "stockpile panel not open");
     press(&mut u, &mut l, &h, Hit::Delete(pile));
     assert_ne!(b::state(l.mem(), pile), 2, "stockpile still standing");
+}
+
+/// The troops panel's type buttons: a left click keeps only that type (1022), a right click drops it (1021).
+#[test]
+fn troop_type_filter() {
+    let Some(mut u) = Ui::load(&crate::cache_dir().join("ui")) else { return };
+    let st = HudState { app_mode: 14, app_sub_mode: 61, troops: vec![(22, 5), (24, 7)], ..Default::default() };
+    u.draw(&st, 1920.0, 1080.0, [0.0; 2], 0, None);
+    let p = u.hits.iter().rev().find(|(_, h)| *h == Hit::Act(1022, 0, 24)).map(|e| e.0).expect("spearman button not drawn");
+    let c = [(p[0] + p[2]) / 2.0, (p[1] + p[3]) / 2.0];
+    u.actions.clear();
+    assert!(u.click(c));
+    assert_eq!(std::mem::take(&mut u.actions), vec![[1022, 0, 24]]);
+    assert!(u.rclick(c));
+    assert_eq!(std::mem::take(&mut u.actions), vec![[1021, 0, 24]]);
+    assert!(!u.rclick([1.0, 1.0]), "a right press off the buttons is not the HUD's");
 }
 
 /// HUD_Troops.SetuptroopActionsUI's order buttons by the engine's flags, and the recruit amounts (FatControler:
