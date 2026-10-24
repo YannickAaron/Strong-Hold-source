@@ -1027,6 +1027,15 @@ impl App {
         let mut drawn = vec![];
         let dt = p.tick_s.max(1.0 / p.rate.max(1.0));
         for s in p.world.next.values_mut() { s.dt.get_or_insert(dt); }
+        p.world.tick_s = dt;
+        // interpChimp's lerpSiegeTower / lerpCatapult / ..: a turning siege engine's frame now (replay::Turn), body k4 units
+        let turning = |p: &Play, id: i32, r: &replay::Rec| -> Option<i16> {
+            let t = p.world.turns.get(&id).filter(|t| t.secs > 0.0)?;
+            let e = p.now.saturating_duration_since(t.at).as_secs_f32();
+            if e >= t.secs { return None; }
+            let a = replay::turn_frames(t.last, t.target);
+            Some(a[((e / t.secs * (a.len() - 1) as f32) as usize).min(a.len() - 1)] + replay::turn_base(r[20] & 0xff)?)
+        };
         for (&(_, id), r) in &p.world.objs {
             let (base, next) = if r[0] == 2 { chimp_base(&p, id, r) } else { ([0.0; 2], None) };
             if r[0] == 2 { drawn.push((id, base)); }
@@ -1073,10 +1082,11 @@ impl App {
                 key.0 = behind_tall(|x, y| tall(&p, x, y), x, y, key.0);
             }
             let file = match r[0] { 6 => 173, 7 => 54, _ => r[3] };
+            let turn = if r[0] == 2 { turning(&p, id, r) } else { None };
             let own = if r[0] == 2 { p.gm.lord(file, r[4], r[7]) } else { None }; // a custom lord's own sprite
-            // past half its step (`next`), interpChimp shows the body's in-between frame (altFrame1Set). ponytail: the
-            // siege engines' turning lerp, which skips it, isn't ported
-            match own.or_else(|| p.gm.body_x(file, r[4], next.is_some())) { Some(s) => objs.push((key, s, pos, color, team, 1.0)), None => *p.misses.entry(file).or_default() += 1 }
+            // past half its step (`next`), interpChimp shows the body's in-between frame (altFrame1Set), not while a
+            // siege engine turns (then the turn's frame)
+            match own.or_else(|| p.gm.body_x(file, turn.unwrap_or(r[4]), next.is_some() && turn.is_none())) { Some(s) => objs.push((key, s, pos, color, team, 1.0)), None => *p.misses.entry(file).or_default() += 1 }
             // addUpdateFly, gameObjectType 40..47 (the floating numbers over buildings: keep gold, popularity, market):
             // children of the scroll, in Unity units of 64 px: the icon GM 202 frame k17 at x -0.75 (scale 1 for the
             // faces 128..130, 0.5 for the gold 171, else 0.4; sortingOrder +1) and the number k18 + k19·10⁴ in black
@@ -1102,11 +1112,12 @@ impl App {
                     _ => {}
                 };
                 let (f2, rope) = (r[13] & 0x7ff, p.world.tele.get(&id).map_or(0, |t| t[19]));
+                let (go2, go3) = if turn.is_some() && r[20] & 0xff == 58 { (0, 0) } else { (r[14], r[16]) }; // a turning tower: its body only
                 // the assassin's rope (file 198) fades on its own: 0x35 k16 (addUpdateChimp: transparency = assassin_rope_fade)
                 let fade = p.world.tele.get(&id).map_or(0, |t| t[16]).max(0);
                 let a2 = if f2 != 198 { alpha } else if fade < 32 { (32 - fade) as f32 / 32.0 } else { 0.0 };
-                if a2 > 0.0 { add(1, f2, r[14], [b[0] + v[0], b[1] + v[1] + (r[18] - rope) as f32 * 2.0], a2, p.gm.team(f2, r[13] >> 11, &p.world.colours)); }
-                add(2, f2, r[16], [b[0] + v[0], b[1] + v[1] + r[19] as f32 * 2.0], alpha, [0.0; 4]);
+                if a2 > 0.0 { add(1, f2, go2, [b[0] + v[0], b[1] + v[1] + (r[18] - rope) as f32 * 2.0], a2, p.gm.team(f2, r[13] >> 11, &p.world.colours)); }
+                add(2, f2, go3, [b[0] + v[0], b[1] + v[1] + r[19] as f32 * 2.0], alpha, [0.0; 4]);
                 if let Some(m) = p.world.marks.get(&id).copied() {
                     let at = |x: i16, y: i16| [b[0] + x as f32 * 2.0, b[1] + y as f32 * 2.0];
                     add(3, 189, m[4], at(m[1], m[2]), alpha, p.gm.team(189, m[7], &p.world.colours));
@@ -1853,7 +1864,8 @@ impl App {
                 if let Some(p) = &mut self.play { p.now = frame_clock(p.now, &mut p.frame_s, now); }
                 if self.play.is_some() && self.frames > 0 { self.tick_replay(self.frame_times.last().copied().unwrap_or(0.0) / 1000.0, 0); }
                 // units sliding between tiles (record 0x34) move every frame, not just every tick (unless a tick just did)
-                if self.play.as_ref().is_some_and(|p| !p.world.next.is_empty() && p.world.drawn_at != Some(p.now)) { self.rebuild_objs(); }
+                let moving = |p: &Play| !p.world.next.is_empty() || p.world.turns.values().any(|t| t.secs > 0.0 && p.now.saturating_duration_since(t.at).as_secs_f32() < t.secs);
+                if self.play.as_ref().is_some_and(|p| moving(p) && p.world.drawn_at != Some(p.now)) { self.rebuild_objs(); }
                 self.scripted_input(el);
                 self.loading_tick(el); // loader.rs: finished map atlases in, a background game start that is ready
                 #[cfg(feature = "live")]

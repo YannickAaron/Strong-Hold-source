@@ -134,6 +134,39 @@ pub struct Slide {
     pub dt: Option<f32>, // main.rs: the tick length it slides by, fixed when first drawn (GameMap: nextTimeEnd)
 }
 
+/// A siege engine turning to a new facing (GameMap `rotating`): through the in-between frames of `turn_frames(last,
+/// target)` over `secs` from `at`; `secs` 0 = not turning.
+#[derive(Clone, Copy)]
+pub struct Turn { pub last: i32, pub target: i32, pub at: std::time::Instant, pub secs: f32 }
+
+/// gameObjectType (chimp k20 low byte) of the siege engines GameMap turns -> their first rotation frame - 1: siege tower,
+/// catapult, battering ram, fire ballista
+pub fn turn_base(g: i16) -> Option<i16> { match g { 58 => Some(89), 39 => Some(712), 59 => Some(273), 77 => Some(312), _ => None } }
+
+/// GameMap.getSiegeTowerFacing / getCatapultFacing / getBatteringRamFacing / getFireBallistaFacing: facing 1..8 of
+/// chimp record `r` (body k4, GO2 k14, GO3 k16), -1 = none (a pose that doesn't turn)
+fn siege_facing(r: &Rec) -> i32 {
+    let (i, i2, i3) = (r[4] as i32, r[14] as i32, r[16] as i32);
+    match r[20] & 0xff {
+        58 if i == 85 || i2 == 85 || i3 == 85 => -1,
+        58 => [i, i2, i3].into_iter().find(|f| (1..9).contains(f)).unwrap_or(1),
+        39 => match i { 1..=224 => (i - 1) % 8 + 1, 449..=577 => (i - 449) % 8 + 1, 705..=712 => -1, _ => 1 },
+        59 => match i { 1..=8 => i, 17..=272 => (i - 17) % 8 + 1, 273 => -1, _ => 1 },
+        _ => if (1..305).contains(&i) { (i - 1) % 8 + 1 } else { -1 },
+    }
+}
+
+/// GameMap.getSiegeTowerRotationArray: the rotation frames (1..32, facing f at 4f - 3) from facing `c` to `t`, the
+/// short way round (a half turn clockwise); out-of-range facings as there
+pub fn turn_frames(c: i32, t: i32) -> Vec<i16> {
+    let ok = |f: i32| (1..=8).contains(&f);
+    let (c, t) = match (ok(c), ok(t)) { (true, true) => (c, t), (true, false) => (c, c), (false, true) => (t, t), _ => (1, 1) };
+    let (s, d) = (4 * (c - 1), (t - c).rem_euclid(8));
+    if d == 0 { return vec![(s + 1) as i16]; }
+    let (n, dir) = if d <= 4 { (4 * d, 1) } else { (4 * (8 - d), -1) };
+    (1..=n).map(|k| ((s + dir * k).rem_euclid(32) + 1) as i16).collect()
+}
+
 pub struct World {
     pub tiles: Vec<Rec>, // per game tile (y*800+x, West frame): last type-0 record; file (k3) 0 = nothing drawn
     pub objs: BTreeMap<(i16, i32), Rec>, // (type, id) -> last record, k1/k2 in West frame
@@ -148,6 +181,9 @@ pub struct World {
     /// chimp id -> its continuation 0x35 (k17 tele_x_adjust half pixels, k18 / k19 assassin rope x / y, k16 fade)
     pub tele: BTreeMap<i32, Rec>,
     pub applies: u64, // `apply` calls so far (one per tick / frame of records)
+    /// chimp id -> its siege-engine turn (`Turn`), for the four kinds GameMap turns
+    pub turns: HashMap<i32, Turn>,
+    pub tick_s: f32, // main.rs: the sim's tick length, for a turn's length (GameMap: Director.EngineFrameTime)
     /// chimp id -> its base point as last drawn (main.rs rebuild_objs, world px), and when: where and when its next
     /// slide starts
     pub drawn: HashMap<i32, [f32; 2]>,
@@ -157,7 +193,7 @@ pub struct World {
 
 impl World {
     pub fn new() -> Self {
-        Self { tiles: vec![[0; 21]; N * N], objs: BTreeMap::new(), rot: 6, marks: BTreeMap::new(), next: BTreeMap::new(), tele: BTreeMap::new(), applies: 0, drawn: HashMap::new(), drawn_at: None, colours: IDENTITY }
+        Self { tiles: vec![[0; 21]; N * N], objs: BTreeMap::new(), rot: 6, marks: BTreeMap::new(), next: BTreeMap::new(), tele: BTreeMap::new(), applies: 0, drawn: HashMap::new(), drawn_at: None, turns: HashMap::new(), tick_s: 0.025, colours: IDENTITY }
     }
 
     /// Rotation changed: move everything already stored into the new frame (all records live in West frame
@@ -176,6 +212,7 @@ impl World {
         for r in self.objs.values_mut().chain(self.next.values_mut().map(|s| &mut s.n)) { (r[1], r[2]) = remap(self.rot, r[1], r[2]); }
         self.drawn.clear(); // world px of the old frame
         for s in self.next.values_mut() { s.from = None; }
+        self.turns.clear(); // the engine re-sends every object from the new side: nothing turns
         self.rot = rot;
         dirty.extend(0..N * N);
     }
@@ -214,6 +251,18 @@ impl World {
                 let slides = tick[k + 1..].iter().take_while(|q| (0x33..=0x35).contains(&q[0])).any(|q| q[0] == 0x34);
                 let running = |s: &Slide| self.applies - s.seq <= s.n[7].max(0) as u64 + (r[7] & 0x4000 != 0) as u64;
                 if slides || !self.next.get(&id).is_some_and(running) { self.next.remove(&id); }
+                // addUpdateChimp: a siege engine whose facing changed turns through the frames in between, each
+                // (1/60) × EngineFrameTime × 100 s; a new one starts at its facing
+                if r[3] != 0 && turn_base(r[20] & 0xff).is_some() {
+                    let (f, now, tick_s) = (siege_facing(r), std::time::Instant::now(), self.tick_s);
+                    let t = self.turns.entry(id).or_insert(Turn { last: f, target: f, at: now, secs: 0.0 });
+                    if t.secs > 0.0 && now.duration_since(t.at).as_secs_f32() >= t.secs { (t.secs, t.last) = (0.0, t.target); }
+                    if t.secs == 0.0 && f != t.last && f != -1 {
+                        t.target = f;
+                        let n = turn_frames(t.last, f).len();
+                        if n > 1 { (t.at, t.secs) = (now, (n - 1) as f32 / 60.0 * tick_s * 100.0) } else { t.last = f }
+                    }
+                }
             }
             let mut r = *r;
             if (0..N as i16).contains(&r[1]) && (0..N as i16).contains(&r[2]) {
@@ -232,7 +281,7 @@ impl World {
                     let id = if r[0] == 4 { r[10] as i32 + r[19] as i32 * 10000 } else { r[10] as i32 };
                     if r[3] == 0 {
                         self.objs.remove(&(r[0], id));
-                        if r[0] == 2 { self.drawn.remove(&id); }
+                        if r[0] == 2 { self.drawn.remove(&id); self.turns.remove(&id); }
                     } else { self.objs.insert((r[0], id), *r); }
                 }
                 // whitecaps (k4 < 0 deletes) and wall fill-ins (k3 == 0 deletes): one per tile
@@ -565,4 +614,34 @@ fn slide_starts_where_last_drawn() {
     assert_eq!((s.from, s.at), (Some([10.0, 20.0]), t));
     w.drawn_at = Some(t - std::time::Duration::from_secs(1)); // drawn long ago (paused, off screen): not from there
     assert_eq!(step(&mut w).from, None);
+}
+
+/// GameMap's siegeTowerRotations table, spot checks: quarter turn, back, half turns clockwise, the wrap past 32.
+#[test]
+fn siege_turn_frames() {
+    assert_eq!(turn_frames(1, 1), [1]);
+    assert_eq!(turn_frames(1, 2), [2, 3, 4, 5]);
+    assert_eq!(turn_frames(2, 1), [4, 3, 2, 1]);
+    assert_eq!(turn_frames(1, 8), [32, 31, 30, 29]);
+    assert_eq!(turn_frames(5, 1), [18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 1]);
+    assert_eq!(turn_frames(3, 8), [8, 7, 6, 5, 4, 3, 2, 1, 32, 31, 30, 29]);
+    assert_eq!(turn_frames(7, 3), [26, 27, 28, 29, 30, 31, 32, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert_eq!(turn_frames(-1, 3), [9]);
+}
+
+/// A catapult (gameObjectType 39) whose record changes from facing 1 to 3 starts a turn; a soldier never does.
+#[test]
+fn catapult_turns_on_a_new_facing() {
+    let mut w = World::new();
+    let rec = |img: i16, g: i16| { let mut r = [0i16; 21]; (r[0], r[1], r[2], r[3], r[4], r[10], r[20]) = (2, 400, 400, 140, img, 9, g); r };
+    w.apply(&[rec(1, 39)], &mut vec![]);
+    assert_eq!(w.turns[&9].secs, 0.0);
+    w.apply(&[rec(3, 39)], &mut vec![]);
+    let t = w.turns[&9];
+    assert_eq!((t.last, t.target), (1, 3));
+    assert!((t.secs - 7.0 / 60.0 * 0.025 * 100.0).abs() < 1e-6);
+    w.apply(&[rec(3, 27)], &mut vec![]);
+    let mut w2 = World::new();
+    w2.apply(&[rec(1, 27), ], &mut vec![]);
+    assert!(w2.turns.is_empty());
 }
