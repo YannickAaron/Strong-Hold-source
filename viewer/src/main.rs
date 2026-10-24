@@ -1102,7 +1102,10 @@ impl App {
                     _ => {}
                 };
                 let (f2, rope) = (r[13] & 0x7ff, p.world.tele.get(&id).map_or(0, |t| t[19]));
-                add(1, f2, r[14], [b[0] + v[0], b[1] + v[1] + (r[18] - rope) as f32 * 2.0], alpha, p.gm.team(f2, r[13] >> 11, &p.world.colours));
+                // the assassin's rope (file 198) fades on its own: 0x35 k16 (addUpdateChimp: transparency = assassin_rope_fade)
+                let fade = p.world.tele.get(&id).map_or(0, |t| t[16]).max(0);
+                let a2 = if f2 != 198 { alpha } else if fade < 32 { (32 - fade) as f32 / 32.0 } else { 0.0 };
+                if a2 > 0.0 { add(1, f2, r[14], [b[0] + v[0], b[1] + v[1] + (r[18] - rope) as f32 * 2.0], a2, p.gm.team(f2, r[13] >> 11, &p.world.colours)); }
                 add(2, f2, r[16], [b[0] + v[0], b[1] + v[1] + r[19] as f32 * 2.0], alpha, [0.0; 4]);
                 if let Some(m) = p.world.marks.get(&id).copied() {
                     let at = |x: i16, y: i16| [b[0] + x as f32 * 2.0, b[1] + y as f32 * 2.0];
