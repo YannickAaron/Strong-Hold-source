@@ -456,7 +456,8 @@ struct Play {
     /// keeps the sim busy; and the (time, sim tick, rate) it was last measured at
     tick_s: f32,
     tick_mark: Option<(Instant, i32, f32)>,
-    now: Instant, // this frame's clock for the slides: every rebuild_objs of a frame draws them at the same instant
+    now: Instant, // this frame's clock for the slides (`frame_clock`): every rebuild_objs of a frame draws them at it
+    frame_s: f32, // the frames' average interval in s (`frame_clock`)
     misses: HashMap<i16, u32>, // GM file -> records without a sprite
     title: (bool, u32, i64), // (playing, rate bits, tick if paused) the window title last showed
     live: Option<live::Thread>, // --live: records come from the Rust sim thread, `huds` holds just the latest
@@ -918,7 +919,7 @@ impl App {
     /// Shared by --replay and --live: tick 0's tiles become the static buffer, then ticks 1..=start are applied.
     fn start_play(&mut self, ticks: Vec<Vec<replay::Rec>>, huds: Vec<hud::HudState>, start: usize, names: &[String]) {
         let mut p = Play { ticks, huds, at: 0, world: replay::World::new(), gm: replay::Gm::new(names), slot: vec![], dirty: vec![],
-            objs: vec![], obj_rows: vec![], playing: std::env::var_os("SHC_SHOT").is_none(), rate: skirmish::Settings::load().game_speed(), ff: false, acc: 0.0, tick_s: 0.0, tick_mark: None, now: Instant::now(), misses: HashMap::new(), title: (false, 0, -1), live: None };
+            objs: vec![], obj_rows: vec![], playing: std::env::var_os("SHC_SHOT").is_none(), rate: skirmish::Settings::load().game_speed(), ff: false, acc: 0.0, tick_s: 0.0, tick_mark: None, now: Instant::now(), frame_s: 1.0 / 60.0, misses: HashMap::new(), title: (false, 0, -1), live: None };
         let mut dirty = vec![];
         p.world.apply(&p.ticks[0], &mut dirty);
         // Slots only for cells tick 0 draws (it resends every tile; GM 38 = off-map ring, never drawn).
@@ -1578,6 +1579,37 @@ fn engine_view(m: &shc_sim::mem::Mem) -> Option<(i16, i16)> {
 }
 
 /// A scripted run (SHC_SHOT / SHC_INPUT): clicks and the shot go by frame number, so loading stays synchronous.
+/// Not the original's: the slides' clock for the frame drawn at `now`. The CPU gets to a frame anywhere in its vsync
+/// slot (macOS hands the next drawable over late, then at once) while the frames still show at even intervals, so
+/// positions taken at the CPU's time moved a horse two frames' worth, then nothing (live, 200 knights: 1 frame in 6).
+/// This clock steps by the frames' average interval (`frame_s`) and closes a tenth of its gap to real time per frame;
+/// more than 3 frames off (a pause, real drops) it jumps there.
+fn frame_clock(prev: Instant, frame_s: &mut f32, now: Instant) -> Instant {
+    let gap = |a: Instant, b: Instant| if a >= b { (a - b).as_secs_f32() } else { -(b - a).as_secs_f32() };
+    *frame_s += (gap(now, prev).clamp(0.0, 0.1) - *frame_s) * 0.05;
+    let ideal = prev + std::time::Duration::from_secs_f32(*frame_s);
+    let err = gap(now, ideal);
+    if err.abs() > 3.0 * *frame_s { return now; }
+    if err >= 0.0 { ideal + std::time::Duration::from_secs_f32(err * 0.1) } else { ideal - std::time::Duration::from_secs_f32(-err * 0.1) }
+}
+
+/// The CPU's frame times alternate 16 / 0.7 ms around an even 8.33 ms display: the clock steps stay within 10 % of it.
+#[test]
+fn frame_clock_evens_out_late_frames() {
+    let t0 = Instant::now();
+    let (mut c, mut f, mut real) = (t0, 1.0 / 120.0, 0.0f32);
+    let mut steps = vec![];
+    for k in 0..400 {
+        real += if k % 2 == 0 { 0.0160 } else { 0.0007 };
+        let next = frame_clock(c, &mut f, t0 + std::time::Duration::from_secs_f32(real));
+        steps.push((next - c).as_secs_f32());
+        c = next;
+    }
+    assert!(steps[200..].iter().all(|s| (s - 0.00835).abs() < 0.00085), "{:?}", &steps[200..210]);
+    let pause = frame_clock(c, &mut f, t0 + std::time::Duration::from_secs_f32(real + 1.0));
+    assert_eq!(pause, t0 + std::time::Duration::from_secs_f32(real + 1.0), "a pause: back to real time");
+}
+
 fn scripted() -> bool { std::env::var_os("SHC_SHOT").is_some() || std::env::var_os("SHC_INPUT").is_some() }
 
 /// Borderless fullscreen, or a window of Options' Resolution (menu::window_size), else 80 % of the screen.
@@ -1815,10 +1847,10 @@ impl App {
                     println!("frame {}: time avg {avg:.2} ms, max {max:.2} ms", self.frames);
                     self.frame_times.clear();
                 }
-                if let Some(p) = &mut self.play { p.now = now; }
+                if let Some(p) = &mut self.play { p.now = frame_clock(p.now, &mut p.frame_s, now); }
                 if self.play.is_some() && self.frames > 0 { self.tick_replay(self.frame_times.last().copied().unwrap_or(0.0) / 1000.0, 0); }
                 // units sliding between tiles (record 0x34) move every frame, not just every tick (unless a tick just did)
-                if self.play.as_ref().is_some_and(|p| !p.world.next.is_empty() && p.world.drawn_at != Some(now)) { self.rebuild_objs(); }
+                if self.play.as_ref().is_some_and(|p| !p.world.next.is_empty() && p.world.drawn_at != Some(p.now)) { self.rebuild_objs(); }
                 self.scripted_input(el);
                 self.loading_tick(el); // loader.rs: finished map atlases in, a background game start that is ready
                 #[cfg(feature = "live")]
