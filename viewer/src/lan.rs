@@ -1285,7 +1285,11 @@ impl Lockstep {
                 self.log(format!("player {p} did not come back: removed at tick {at}"));
             }
         }
-        if self.hold.as_ref().is_some_and(|h| tick >= h.at) {
+        // a peer that gets the host's state holds at once: its ticks up to `at` are replaced anyway, and after a host
+        // migration the two sides can each wait for the other's promise for the last ticks before it (sent to the old
+        // host), so neither ticks to `at` and the hold never ends
+        let early = |h: &Hold| !self.net.is_host() && h.state.contains(&self.me);
+        if self.hold.as_ref().is_some_and(|h| tick >= h.at || early(h)) {
             if self.net.is_host() { self.hold_host(m, tick) } else { self.hold_client(m, true) }
             self.status.lock().unwrap().holding = self.hold.as_ref().map(|h| h.why.clone());
             return false;
@@ -1362,6 +1366,9 @@ impl Lockstep {
             if mine {
                 shc_sim::mp::take_outgoing(m);
                 let hashes = page_hashes(m);
+                // nothing of ours runs before the hold (our queue is dropped): the host may run up to it without us
+                self.promised = self.promised.max(h.at + 1);
+                self.net.send(&Msg::Turn { from: me, through: self.promised, packets: vec![] }, me);
                 self.net.send(&Msg::PageHashes { from: me, hashes }, me);
             }
         }
