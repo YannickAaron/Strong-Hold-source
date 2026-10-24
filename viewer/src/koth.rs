@@ -82,7 +82,7 @@ impl Hill {
     /// Next to a save: written with it; a conquest save removes an old one (a reused name).
     pub fn write_beside(h: &Option<Hill>, path: &std::path::Path) -> std::io::Result<()> {
         match h {
-            Some(h) => std::fs::write(Self::sidecar(path), h.encode()),
+            Some(h) => crate::paths::write_atomic(&Self::sidecar(path), h.encode()),
             None => match std::fs::remove_file(Self::sidecar(path)) { Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e), _ => Ok(()) },
         }
     }

@@ -220,7 +220,7 @@ pub fn start(trail: i32, id: i32, difficulty: i32) -> Result<shc_sim::mem::Mem, 
             tr::import_times(&mut m, c, &Progress::read(&cfg, c).times);
         }
         tr::start(&mut m, trail, id, difficulty, bedouin, &aivs, &file).map(|_| { skirmish::trail_colours(&mut m, colour); m })
-    })).map_err(|e| format!("not ported yet: {}", e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()))?
+    })).map_err(crate::skirmish::panic_text)?
         .ok_or_else(|| format!("{} did not load", ms.map))
 }
 
@@ -244,7 +244,7 @@ fn start_coop_ally(trail: i32, id: i32) -> Result<shc_sim::mem::Mem, String> {
         shc_sim::setup::new_skirmish(&mut m, &s, &file, colour.clamp(0, 7) + 1, Some(seed));
         skirmish::member_colours(&mut m, colour);
         m
-    })).map_err(|e| format!("not ported yet: {}", e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()))
+    })).map_err(crate::skirmish::panic_text)
 }
 
 /// Trail mission `id` won with the HUD's date at the end: its time (classic: the game months since its start, as the
@@ -375,7 +375,7 @@ fn coop_won(partner: &str, coa: &str, trail: i32, id: i32) -> std::io::Result<()
         let t: Vec<String> = st.iter().map(|t| t.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")).collect();
         format!("{n}:{}:{coa}\n", t.join(":"))
     }).collect();
-    std::fs::write(coop_file(), text)
+    crate::paths::write_atomic(&coop_file(), text)
 }
 
 /// ConfigSettings.CalcCoopProgress: the unlocked frontier = the highest mission won with anyone + 1; the swords show
@@ -963,7 +963,7 @@ fn board_add(trail: i32, id: i32, name: &str, secs: i32) {
         false
     }).map(str::to_string).collect();
     lines.push(format!("{key}{best}:{name}"));
-    if let Err(e) = std::fs::create_dir_all(skirmish::profile_dir()).and_then(|_| std::fs::write(board_file(), lines.join("\n") + "\n")) { eprintln!("sands leaderboard: {e}"); }
+    if let Err(e) = std::fs::create_dir_all(skirmish::profile_dir()).and_then(|_| crate::paths::write_atomic(&board_file(), lines.join("\n") + "\n")) { eprintln!("sands leaderboard: {e}"); }
 }
 
 impl Menu {

@@ -1,10 +1,15 @@
-//! Sharing custom lords: importing a lord's .zip, and custom lords in LAN games.
+//! Sharing custom lords: importing a lord's .zip, downloading / updating the published lords, and custom lords in
+//! LAN games.
 //!
 //! Import: a .zip with `CustomLords/<Name>/…` (required: a .lordjson) and optionally `CustomMedia/<Name>/…`, the
 //! same layout as the player folder (any top folder above them is fine, e.g. a zipped "Lord X/" folder). Every file
 //! is checked before anything is written: no path outside the lord's folders, no links, no encrypted entries, only
 //! the file types a lord uses, size caps, the .lordjson and every .aivjson must parse. An existing lord of the same
 //! name is replaced only when asked (`import` returns `Exists`). Files land in a temp folder first, then move in.
+//!
+//! Online: the public repo's `lords` release (scripts/publish_lord.sh) holds one zip per lord, labelled with the
+//! lord's name. Every import notes its zip's SHA-256 in `CustomLords/<Name>/.zip-sha256`; a lord whose online zip
+//! has another one has an update. Downloads are checked against GitHub's SHA-256 before they're imported.
 //!
 //! LAN: a lobby's AI that is a custom lord travels as `custom_lords::BASE + i`, i into the lobby's `customs` table of
 //! (name, checksum); every machine maps that to its own list by name and checksum of the sim-relevant data (config
@@ -38,6 +43,8 @@ pub fn import(file: &Path, replace: bool) -> Result<Vec<String>, ImportErr> {
 
 fn import_into(file: &Path, root: &Path, replace: bool) -> Result<Vec<String>, ImportErr> {
     let bad = |e: String| ImportErr::Bad(e);
+    // a wrongly picked huge file: refused before it is read into memory
+    if std::fs::metadata(file).is_ok_and(|m| m.len() > MAX_TOTAL) { return Err(bad(format!("{}: too big for a lord", file.display()))); }
     let data = std::fs::read(file).map_err(|e| bad(format!("{}: {e}", file.display())))?;
     let entries = read_zip(&data).map_err(bad)?;
     let mut names: Vec<String> = entries.iter().filter(|e| e.0 == "CustomLords").map(|e| e.1.clone()).collect();
@@ -72,9 +79,15 @@ fn import_into(file: &Path, root: &Path, replace: bool) -> Result<Vec<String>, I
         }
     }
     let _ = std::fs::remove_dir_all(&tmp);
+    if let Some(h) = crate::update::sha256(file) {
+        for n in &names { let _ = std::fs::write(root.join("CustomLords").join(n).join(SHA_FILE), &h); }
+    }
     custom_lords::rescan();
     Ok(names)
 }
+
+/// In a lord's CustomLords folder: the SHA-256 of the zip it came from (pack_zip.py skips dot files).
+const SHA_FILE: &str = ".zip-sha256";
 
 fn ext(p: &Path) -> String { p.extension().map_or(String::new(), |e| e.to_string_lossy().to_ascii_lowercase()) }
 
@@ -97,7 +110,8 @@ fn read_zip(d: &[u8]) -> Result<Vec<Entry>, String> {
         if raw.starts_with('/') || parts.iter().any(|c| *c == ".." || c.contains(':')) { return Err(format!("{raw}: path outside the lord's folders")); }
         if parts.first() == Some(&"__MACOSX") || parts.last().is_some_and(|f| f.starts_with("._") || *f == ".DS_Store") { continue; }
         let Some(k) = parts.iter().position(|c| c.eq_ignore_ascii_case("CustomLords") || c.eq_ignore_ascii_case("CustomMedia")) else { continue }; // a readme next to them
-        if parts.len() < k + 3 || parts[k + 1].is_empty() || parts[k + 2..].iter().any(|c| c.is_empty() || c.starts_with('.')) { return Err(format!("{raw}: not inside a lord's folder")); }
+        // the lord's name too: a "." lord would make Replace delete the whole CustomLords folder
+        if parts.len() < k + 3 || parts[k + 1..].iter().any(|c| c.is_empty() || c.starts_with('.')) { return Err(format!("{raw}: not inside a lord's folder")); }
         if (attrs >> 16) & 0o170000 == 0o120000 { return Err(format!("{raw}: links are not allowed")); }
         if flags & 1 != 0 { return Err(format!("{raw}: encrypted")); }
         let rel = PathBuf::from_iter(&parts[k + 2..]);
@@ -164,6 +178,71 @@ pub fn pick_zip() -> Option<PathBuf> {
 }
 #[cfg(not(target_os = "macos"))]
 pub fn pick_zip() -> Option<PathBuf> { None }
+
+// ---- online lords
+
+const LORDS: &str = "https://api.github.com/repos/YannickAaron/Strong-Hold/releases/tags/lords";
+
+/// A published lord: its name (the asset's label) and its zip.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Online { pub name: String, pub zip: crate::update::Asset }
+
+/// The published lords, once fetched (empty offline / none published); the lord downloading now and how far.
+static ONLINE: Mutex<Vec<Online>> = Mutex::new(Vec::new());
+pub static GETTING: Mutex<Option<(String, f32)>> = Mutex::new(None);
+
+/// What a lord's row offers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum State { Get, Update, Current }
+
+/// Fetches the published lords in the background (start, Extras opening).
+pub fn fetch_online() {
+    std::thread::spawn(|| {
+        let url = std::env::var("SHC_LORDS_API").unwrap_or_else(|_| LORDS.into()); // tests: another release's lords
+        if let Some(v) = crate::update::get_json(&url).map(|j| online_of(&j)) { *ONLINE.lock().unwrap() = v; }
+        custom_lords::rescan(); // the main menu's notice compares the installed ones
+    });
+}
+
+/// The lords: zips with a label (publish_lord.sh sets the lord's name); any other file of the release is not one.
+fn online_of(json: &str) -> Vec<Online> {
+    crate::update::assets(json).into_iter().filter(|a| a.file.to_ascii_lowercase().ends_with(".zip") && !a.label.trim().is_empty())
+        .map(|zip| Online { name: zip.label.trim().to_string(), zip }).collect()
+}
+
+pub fn online() -> Vec<Online> { ONLINE.lock().unwrap().clone() }
+
+/// Lord `name`'s row: None when it isn't published.
+pub fn state(name: &str) -> Option<State> { state_in(name, &crate::skirmish::profile_dir()) }
+
+fn state_in(name: &str, root: &Path) -> Option<State> {
+    let o = online().into_iter().find(|o| o.name == name)?;
+    let dir = root.join("CustomLords").join(name);
+    Some(if !dir.is_dir() { State::Get } else if std::fs::read_to_string(dir.join(SHA_FILE)).is_ok_and(|h| h.trim() == o.zip.sha) { State::Current } else { State::Update })
+}
+
+/// Installed lords with a newer zip online (the main menu's notice).
+pub fn updates() -> usize { custom_lords::names().iter().filter(|n| state(n) == Some(State::Update)).count() }
+
+/// Downloads lord `name`'s zip in the background and imports it (replacing the installed one); the result as MESSAGE.
+pub fn get(name: &str) {
+    let Some(o) = online().into_iter().find(|o| o.name == name) else { return };
+    {
+        let mut g = GETTING.lock().unwrap();
+        if g.is_some() { return; }
+        *g = Some((o.name.clone(), 0.0));
+    }
+    std::thread::spawn(move || {
+        let file = crate::paths::app_data().join("downloads").join(&o.zip.file);
+        let got = crate::update::download(&o.zip, &file, &|p| *GETTING.lock().unwrap() = Some((o.name.clone(), p)));
+        match got {
+            Ok(()) => import_ui(&file, true),
+            Err(e) => { *MESSAGE.lock().unwrap() = Some((format!("{}: {e}", o.name), false)); }
+        }
+        let _ = std::fs::remove_file(&file);
+        *GETTING.lock().unwrap() = None;
+    });
+}
 
 // ---- LAN
 
@@ -285,6 +364,17 @@ mod tests {
         let root = d.join("profile");
         assert_eq!(import_into(&f, &root, false), Ok(vec!["Lord T".into()]));
         assert!(root.join("CustomLords/Lord T/c1.aivjson").exists() && root.join("CustomMedia/Lord T/TAUNT1.wav").exists());
+        let sha = crate::update::sha256(&f).unwrap();
+        assert_eq!(std::fs::read_to_string(root.join("CustomLords/Lord T").join(SHA_FILE)).unwrap(), sha, "notes the zip it came from");
+        // published: the same zip = up to date, another one = update, not installed = get
+        let pub_ = |sha: &str| Online { name: "Lord T".into(), zip: crate::update::Asset { sha: sha.into(), ..Default::default() } };
+        *ONLINE.lock().unwrap() = vec![pub_(&sha)];
+        assert_eq!(state_in("Lord T", &root), Some(State::Current));
+        assert_eq!(state_in("Lord T", &d.join("elsewhere")), Some(State::Get));
+        assert_eq!(state_in("Lord U", &root), None);
+        *ONLINE.lock().unwrap() = vec![pub_("00")];
+        assert_eq!(state_in("Lord T", &root), Some(State::Update));
+        *ONLINE.lock().unwrap() = vec![];
         assert_eq!(import_into(&f, &root, false), Err(ImportErr::Exists(vec!["Lord T".into()])));
         std::fs::write(root.join("CustomMedia/Lord T/old.wav"), b"x").unwrap();
         assert_eq!(import_into(&f, &root, true), Ok(vec!["Lord T".into()]));
@@ -313,6 +403,37 @@ mod tests {
         assert_eq!(c.aivs.len(), 8);
     }
 
+    /// The `lords` release's lords: labelled zips, named by the label; unlabelled files (a source zip) are not lords.
+    #[test]
+    fn online_names() {
+        let json = r#"{"tag_name":"lords","assets":[{"name":"Lord-David-von-Lindschied.zip","label":"","size":5,"digest":"sha256:aa","browser_download_url":"https://e/a.zip"},
+            {"name":"x.zip","label":"Lady Anne-Marie","size":5,"digest":"sha256:bb","browser_download_url":"https://e/x.zip"},
+            {"name":"notes.txt","label":"","size":5,"digest":"sha256:cc","browser_download_url":"https://e/n.txt"}]}"#;
+        let v: Vec<String> = online_of(json).into_iter().map(|o| o.name).collect();
+        assert_eq!(v, ["Lady Anne-Marie"]);
+    }
+
+    /// Lord David's published zip (network, 34 MB): downloaded, checked and imported, then up to date.
+    /// `cargo test --release lord_from_github -- --ignored`
+    #[test]
+    #[ignore]
+    fn lord_from_github() {
+        let json = crate::update::get_json("https://api.github.com/repos/YannickAaron/Strong-Hold/releases/tags/v0.12.1").unwrap();
+        let zip = crate::update::assets(&json).into_iter().find(|a| a.file == "Lord-David-von-Lindschied.zip").expect("published");
+        let o = Online { name: "Lord David von Lindschied".into(), zip }; // v0.12.1's zip has no label (publish_lord.sh sets it)
+        let d = dir("online");
+        let f = d.join(&o.zip.file);
+        crate::update::download(&o.zip, &f, &|_| {}).unwrap();
+        let root = d.join("profile");
+        assert_eq!(import_into(&f, &root, false), Ok(vec![o.name.clone()]));
+        *ONLINE.lock().unwrap() = vec![o.clone()];
+        assert_eq!(state_in(&o.name, &root), Some(State::Current));
+        let bad = crate::update::Asset { sha: "0".repeat(64), ..o.zip.clone() };
+        assert!(crate::update::download(&bad, &f, &|_| {}).is_err() && !f.exists(), "a wrong checksum leaves nothing");
+        *ONLINE.lock().unwrap() = vec![];
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn refuses_bad_zips() {
         let d = dir("bad");
@@ -326,6 +447,7 @@ mod tests {
             (vec![("CustomLords/X/X.lordjson", &lj), ("CustomLords/X/c.aivjson", b"{\"frames\":[]}")], "castle"),
             (vec![("CustomMedia/X/TAUNT1.wav", b"RIFF")], "no CustomLords"),
             (vec![("CustomLords/X.lordjson", &lj)], "not inside"),
+            (vec![("CustomLords/X/X.lordjson", &lj), ("CustomLords/./X.lordjson", &lj)], "not inside"), // Replace would wipe CustomLords
         ];
         for (k, (files, want)) in cases.iter().enumerate() {
             let f = d.join(format!("{k}.zip"));

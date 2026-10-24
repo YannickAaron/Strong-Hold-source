@@ -228,7 +228,9 @@ impl crate::App {
         };
         let (tx, rx) = channel();
         std::thread::spawn(move || {
-            let r = job();
+            // a sim panic (corrupt save, unported path) comes back as an error: a dropped channel would leave
+            // "Loading..." up for good and refuse every later start
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).unwrap_or_else(|e| Err(crate::skirmish::panic_text(e)));
             crate::audio::forward(shc_sim::sound::drain()); // anything the setup queued plays on the UI thread
             let _ = tx.send(r);
         });

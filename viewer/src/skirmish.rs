@@ -191,7 +191,7 @@ impl Settings {
     pub fn save(&self) -> std::io::Result<()> {
         let dir = profile_dir();
         std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("settings.cfg"), self.text())
+        crate::paths::write_atomic(&dir.join("settings.cfg"), self.text())
     }
     /// ConfigSettings.Settings_GameSpeed: ticks per second, `/5*5` clamped to 10..90, default 40.
     pub fn game_speed(&self) -> f32 { ((self.num("GameSpeed", 40.0) as i32 / 5 * 5).clamp(10, 90)) as f32 }
@@ -225,7 +225,7 @@ impl Progress {
         let mut cfg = Settings::load();
         for (c, v) in self.unlocked.iter().enumerate() { cfg.set(&format!("Campaign{}", c + 1), v); }
         cfg.save()?;
-        std::fs::write(profile_dir().join("missions.cfg"), self.done.iter().map(|(id, d)| format!("mission{id}:{d}\n")).collect::<String>())
+        crate::paths::write_atomic(&profile_dir().join("missions.cfg"), self.done.iter().map(|(id, d)| format!("mission{id}:{d}\n")).collect::<String>())
     }
     /// GameData's victory rule: winning the highest unlocked mission of a campaign unlocks the next (1..4); the best
     /// difficulty per mission is kept.
@@ -258,6 +258,12 @@ pub fn start_mission(id: i32, difficulty: i32) -> Result<shc_sim::mem::Mem, Stri
     Ok(m)
 }
 
+/// A caught sim panic as the error a game start shows.
+#[cfg(feature = "live")]
+pub fn panic_text(e: Box<dyn std::any::Any + Send>) -> String {
+    format!("not ported yet: {}", e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default())
+}
+
 /// Sandbox Play (FRONT_StandaloneMission.StartMap): Free Build with `fb` (`campaign::start_free_build` =
 /// DLL_PreInitMap_JustBuild + DLL_LoadMapToPlay(-1, path)) or, with `scenario` = Some(difficulty 0..3), a Custom
 /// Scenario (loadInvasionMap). A sim panic in an unported path comes back as an error instead of taking the app down.
@@ -275,7 +281,7 @@ pub fn start_solo(map: &Path, fb: &FreeBuild, scenario: Option<i32>) -> Result<s
         shc_sim::terrain::init_static(&mut m);
         let ok = match scenario { Some(d) => c::start_scenario(&mut m, d, &path, &file), None => c::start_free_build(&mut m, &o, &path, &file) };
         ok.then(|| { your_colour(&mut m); m })
-    })).map_err(|e| format!("not ported yet: {}", e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()))?
+    })).map_err(panic_text)?
         .ok_or_else(|| format!("{} did not load", map.display()))
 }
 

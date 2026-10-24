@@ -2333,6 +2333,7 @@ fn main() {
     paths::app_bundle_start();
     setup::ensure();
     update::start();
+    lord_share::fetch_online();
     let mut app = App::new();
     let el = EventLoop::new().unwrap();
     el.run_app(&mut app).unwrap();

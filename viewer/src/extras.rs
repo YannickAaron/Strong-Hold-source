@@ -1,12 +1,12 @@
 //! Extras (ours, the main menu's sixth shield): this build (version, platform, folders), the update check on request
-//! (update.rs) and the custom lords: the ones installed, and importing a lord's .zip (lord_share.rs; a .zip dropped
-//! on the window lands here too). Imported lords simply join the skirmish's Add-AI faces. Load Game's dark panel and
+//! (update.rs, which also installs the new version) and the custom lords: the ones installed and the published ones
+//! (Get / Update), and importing a lord's .zip (lord_share.rs; a .zip dropped on the window lands here too). Imported lords simply join the skirmish's Add-AI faces. Load Game's dark panel and
 //! text buttons. A child module of menu.rs.
 use super::*;
 
 /// The screen's own clicks.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum A { Open, Folder, Check, Notes, Import, Replace(bool) }
+pub enum A { Open, Folder, Check, Notes, Import, Replace(bool), Lord(u8) }
 
 /// Lords listed (more: "+n more").
 const SHOWN: usize = 6;
@@ -20,11 +20,19 @@ fn short(p: &std::path::Path) -> String {
     match std::env::var("HOME") { Ok(h) if !h.is_empty() && s.starts_with(&h) => format!("~{}", &s[h.len()..]), _ => s }
 }
 
+/// The lords column: the installed lords, then the published ones not installed here.
+fn lord_rows() -> Vec<(String, Option<crate::custom_lords::Custom>)> {
+    let mut v: Vec<_> = (0..crate::custom_lords::count()).filter_map(crate::custom_lords::get).map(|c| (c.name.clone(), Some(c))).collect();
+    for o in crate::lord_share::online() { if !v.iter().any(|r| r.0 == o.name) { v.push((o.name, None)); } }
+    v
+}
+
 impl Menu {
     pub(super) fn extras_click(&mut self, a: A) -> Option<Go> {
         match a {
             A::Open => {
                 crate::custom_lords::rescan();
+                crate::lord_share::fetch_online();
                 *crate::lord_share::MESSAGE.lock().unwrap() = None;
                 *self = Menu { screen: Screen::Extras, ..Self::main() };
             }
@@ -36,6 +44,7 @@ impl Menu {
             A::Check => crate::update::check_now(),
             A::Notes => { self.open_options(); if let Screen::Options(op) = &mut self.screen { op.page = 5; } }
             A::Import => if let Some(f) = crate::lord_share::pick_zip() { crate::lord_share::import_ui(&f, false) },
+            A::Lord(k) => if let Some((name, _)) = lord_rows().get(k as usize) { crate::lord_share::get(name) },
             A::Replace(yes) => {
                 let p = crate::lord_share::PENDING.lock().unwrap().take();
                 if let (true, Some((f, _))) = (yes, p) { crate::lord_share::import_ui(&f, true); }
@@ -72,23 +81,39 @@ impl Menu {
         self.para(ui, out, &line, x, 632.0, 540.0, 22.0, color);
         self.button(ui, out, "Check for updates", x, 680.0, 260.0, 48.0, Act::Extras(A::Check), cursor);
         self.button(ui, out, "Patch notes", x + 280.0, 680.0, 260.0, 48.0, Act::Extras(A::Notes), cursor);
-        if crate::update::available().is_some() { self.button(ui, out, "Download", x, 740.0, 540.0, 48.0, Act::Update, cursor); }
+        if let Some(tag) = crate::update::available() {
+            self.button(ui, out, &crate::update::button(&tag), x, 740.0, 540.0, 48.0, Act::Update, cursor);
+            if let crate::update::Install::Failed(e) = crate::update::install_state() { self.para(ui, out, &e, x, 800.0, 540.0, 18.0, BAD); }
+        }
 
         // ---- custom lords
         let x = 1000.0;
         self.text(ui, out, "Custom lords", x, 270.0, 34.0, 0.0, GOLD);
-        let names = crate::custom_lords::names();
-        if names.is_empty() { self.para(ui, out, "None installed yet.", x, 296.0, 540.0, 20.0, DIM); }
-        for k in 0..names.len().min(SHOWN) {
-            let Some(c) = crate::custom_lords::get(k) else { continue };
+        let rows = lord_rows();
+        if rows.is_empty() { self.para(ui, out, "None installed yet.", x, 296.0, 540.0, 20.0, DIM); }
+        let getting = crate::lord_share::GETTING.lock().unwrap().clone();
+        for (k, (name, c)) in rows.iter().enumerate().take(SHOWN) {
             let (ry, p) = (296.0 + 66.0 * k as f32, self.r(x, 296.0 + 66.0 * k as f32, 60.0, 60.0));
             ui.img(out, "Face Background Generic", p, [1.0; 4]);
-            if !crate::custom_lords::draw_face(out, &c, p, [1.0; 4]) { ui.img(out, FACES.iter().find(|f| f.1 == crate::custom_lords::parent(&c)).map_or("", |f| f.0), p, [1.0; 4]); }
+            if let Some(c) = c {
+                if !crate::custom_lords::draw_face(out, c, p, [1.0; 4]) { ui.img(out, FACES.iter().find(|f| f.1 == crate::custom_lords::parent(c)).map_or("", |f| f.0), p, [1.0; 4]); }
+            }
             ui.img(out, "Face Border", p, [1.0; 4]);
-            self.label(ui, out, &c.name, x + 76.0, ry + 20.0, 22.0, 0.0, CREAM);
-            if let Some(t) = crate::custom_lords::help_text(&c, "TITLE") { self.label(ui, out, &t, x + 76.0, ry + 44.0, 17.0, 0.0, DIM); }
+            self.label(ui, out, name, x + 76.0, ry + 20.0, 22.0, 0.0, CREAM);
+            let title = c.as_ref().and_then(|c| crate::custom_lords::help_text(c, "TITLE"));
+            let sub = title.or_else(|| c.is_none().then(|| "Not installed".into()));
+            if let Some(t) = sub { self.label(ui, out, &t, x + 76.0, ry + 44.0, 17.0, 0.0, DIM); }
+            // published (lord_share.rs): download / update, or how far the download is
+            let (bx, by) = (x + 410.0, ry + 10.0);
+            match (getting.as_ref().filter(|g| &g.0 == name), crate::lord_share::state(name)) {
+                (Some((_, f)), _) => { self.label(ui, out, &format!("{:.0} %", f * 100.0), bx + 65.0, by + 20.0, 20.0, 0.5, GOLD); }
+                (None, Some(crate::lord_share::State::Get)) => self.button(ui, out, "Get", bx, by, 130.0, 40.0, Act::Extras(A::Lord(k as u8)), cursor),
+                (None, Some(crate::lord_share::State::Update)) => self.button(ui, out, "Update", bx, by, 130.0, 40.0, Act::Extras(A::Lord(k as u8)), cursor),
+                (None, Some(crate::lord_share::State::Current)) => { self.label(ui, out, "Up to date", bx + 65.0, by + 20.0, 17.0, 0.5, OK); }
+                (None, None) => {}
+            }
         }
-        if names.len() > SHOWN { self.label(ui, out, &format!("+{} more", names.len() - SHOWN), x, 296.0 + 66.0 * SHOWN as f32 + 10.0, 18.0, 0.0, DIM); }
+        if rows.len() > SHOWN { self.label(ui, out, &format!("+{} more", rows.len() - SHOWN), x, 296.0 + 66.0 * SHOWN as f32 + 10.0, 18.0, 0.0, DIM); }
         let y = 720.0;
         let pending = crate::lord_share::PENDING.lock().unwrap().clone();
         if let Some((_, names)) = pending {

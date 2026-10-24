@@ -22,9 +22,11 @@ fn clean(s: &str) -> String { s.chars().map(|c| if c.is_alphanumeric() || " -_".
 pub fn autosave_path() -> PathBuf { rotate(&saves_dir(), secs()) }
 
 fn rotate(dir: &Path, now: u64) -> PathBuf {
-    let mut old: Vec<PathBuf> = list(dir, "sav").into_iter().filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("Autosave-"))).collect();
-    old.sort_by_key(|p| p.file_stem().and_then(|s| s.to_string_lossy()[9..].parse::<u64>().ok())); // the name carries the time
-    for p in old.iter().rev().skip(AUTOSAVES - 1) { let _ = std::fs::remove_file(p); let _ = std::fs::remove_file(crate::koth::Hill::sidecar(p)); }
+    // only ours (`Autosave-<unix secs>`): a player's own "Autosave-mine" save is never rotated away
+    let time = |p: &PathBuf| p.file_stem().and_then(|s| s.to_str()?.strip_prefix("Autosave-")?.parse::<u64>().ok());
+    let mut old: Vec<(u64, PathBuf)> = list(dir, "sav").into_iter().filter_map(|p| Some((time(&p)?, p))).collect();
+    old.sort(); // the name carries the time
+    for (_, p) in old.iter().rev().skip(AUTOSAVES - 1) { let _ = std::fs::remove_file(p); let _ = std::fs::remove_file(crate::koth::Hill::sidecar(p)); }
     dir.join(format!("Autosave-{now}.sav"))
 }
 
@@ -39,7 +41,7 @@ pub fn save_async(m: &shc_sim::mem::Mem, path: PathBuf, elapsed_ms: u32, done: i
     let mut c = m.clone();
     PENDING.lock().unwrap().push(path.clone());
     std::thread::spawn(move || {
-        let r = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, shc_sim::save::save_game(&mut c, elapsed_ms)));
+        let r = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| crate::paths::write_atomic(&path, shc_sim::save::save_game(&mut c, elapsed_ms)));
         PENDING.lock().unwrap().retain(|p| *p != path);
         match &r { Ok(()) => println!("saved {}", path.display()), Err(e) => eprintln!("save {}: {e}", path.display()) }
         done(r);
@@ -213,7 +215,7 @@ fn sav_entry(p: &Path) -> Option<Entry> {
     // directory: [i32 dir_size][7 i32][5 arrays of n i32: size, packed size, type, packed?, offset], then the data
     let dir_size = le(&head, pos)? as usize;
     let dir = head.get(pos + 4..pos + dir_size)?;
-    let k = (dir_size - 4 - 28) / 20;
+    let k = dir_size.checked_sub(4 + 28)? / 20; // a corrupt size: no play time, not a panic
     let field = |arr: usize, i: usize| le(dir, 28 + (arr * k + i) * 4);
     let count = (le(dir, 4)? as usize).min(k);
     if let Some(i) = (0..count).find(|&i| field(2, i) == Some(1126)) {
@@ -233,13 +235,14 @@ fn autosave_rotation() {
     let dir = std::env::temp_dir().join(format!("shc-autosave-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("Mine.sav"), b"x").unwrap();
+    std::fs::write(dir.join("Autosave-mine.sav"), b"x").unwrap(); // a player's own name: never rotated
     for t in [900, 1000, 99, 5000, 7, 60000] {
         let p = rotate(&dir, t);
         std::fs::write(&p, b"x").unwrap();
     }
     let mut left: Vec<String> = list(&dir, "sav").iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
     left.sort();
-    assert_eq!(left, ["Autosave-1000.sav", "Autosave-5000.sav", "Autosave-60000.sav", "Autosave-900.sav", "Autosave-99.sav", "Mine.sav"]);
+    assert_eq!(left, ["Autosave-1000.sav", "Autosave-5000.sav", "Autosave-60000.sav", "Autosave-900.sav", "Autosave-99.sav", "Autosave-mine.sav", "Mine.sav"]);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

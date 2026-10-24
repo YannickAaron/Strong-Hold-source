@@ -114,7 +114,7 @@ fn save(mut v: Vec<J>) -> std::io::Result<()> {
     J::Arr(v).write(&mut out);
     out.push('}');
     std::fs::create_dir_all(skirmish::profile_dir())?;
-    std::fs::write(file(), out)
+    crate::paths::write_atomic(&file(), out)
 }
 
 /// DeleteSkirmishMastersGame: the entry with this `index`.

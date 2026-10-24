@@ -5,13 +5,13 @@ Crusader: Definitive Edition, **except the simulation** (`sim/`). It's here so y
 Mac before you trust the DMG: every line that uses the network, your Steam sign-in, your disk or other programs is in
 this repository.
 
-Snapshot v0.13.4 (one commit per release; tags match the [releases](https://github.com/YannickAaron/Strong-Hold/releases)).
+Snapshot v0.14.0 (one commit per release; tags match the [releases](https://github.com/YannickAaron/Strong-Hold/releases)).
 
 ## What's here
 
 | Folder | What |
 |---|---|
-| `viewer/` | The app: window, Metal renderer, menus, HUD, first-start setup (`src/setup/`), Steam download (`src/setup/steam.rs`), update check (`src/update.rs`), LAN multiplayer (`src/lan.rs`), file locations (`src/paths.rs`), `bundle.sh` (builds the .app and DMG) |
+| `viewer/` | The app: window, Metal renderer, menus, HUD, first-start setup (`src/setup/`), Steam download (`src/setup/steam.rs`), update check and in-app update (`src/update.rs`), custom lords' import and download (`src/lord_share.rs`), LAN multiplayer (`src/lan.rs`), file locations (`src/paths.rs`), `bundle.sh` (builds the .app and DMG) |
 | `extract/` | Reads the game's Unity files, sounds and videos from your own copy and converts them once |
 | `formats/` | Map and save file formats, PKWARE DCL decompressor |
 | `audio/` | Sound playback |
@@ -33,10 +33,14 @@ Also not here: game files of any kind. The app gets those from your own copy of 
 - **Steam sign-in:** `viewer/src/setup/steam.rs`. The app starts Valve's open-source
   [DepotDownloader](https://github.com/SteamRE/DepotDownloader) 3.4.0 (bundled, pinned by SHA-256 in `viewer/bundle.sh`).
   Your password goes to it once through its input, never as a command-line argument, never to a file or the log.
-- **Network:** `viewer/src/update.rs` (once a day: the latest release from GitHub's API), `viewer/src/setup/steam.rs`
+- **Network:** `viewer/src/update.rs` (once a day: the latest release from GitHub's API; when you click Update, the
+  release's `Strong-Hold-update.tar.gz`, installed only if its SHA-256 is the one GitHub lists, then `codesign
+  --verify`), `viewer/src/lord_share.rs` (the published custom lords, from the release tagged `lords`; a lord's zip
+  only when you click Get / Update, checked the same way), `viewer/src/setup/steam.rs`
   (Steam, only when you download), `viewer/src/lan.rs` (local network, only in LAN games: UDP 47777, TCP 47778).
 - **Files:** `viewer/src/paths.rs`. The app writes to `~/Library/Application Support/Strong Hold` and
-  `~/Library/Logs/Strong Hold.log`.
+  `~/Library/Logs/Strong Hold.log`, and, when you click Update, replaces its own .app (`viewer/src/update.rs`: the
+  new one goes next to it, Restart to update swaps them).
 
 ## Build it
 
@@ -47,7 +51,9 @@ brew install libvpx
 cd viewer && cargo build --release --no-default-features
 ```
 
-The DMG on the releases page is built from this code plus `sim/` with `viewer/bundle.sh --dmg`.
+The DMG on the releases page is built from this code plus `sim/` with `viewer/bundle.sh --dmg`; the in-app update
+archive is the same .app without DepotDownloader (`scripts/publish.sh` in the development repo:
+`tar --exclude "Strong Hold.app/Contents/MacOS/DepotDownloader"`).
 
 ## Legal
 

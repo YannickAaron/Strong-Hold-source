@@ -259,12 +259,15 @@ pub struct Hud {
     held: Option<([i32; 2], Instant, bool)>,
     hover_at: [i32; 2],
     hits: Vec<([f32; 4], H)>,
+    ours: Option<PathBuf>, // the map file this editing session loaded or saved: Save replaces it without asking
+    armed: Option<PathBuf>, // another map of that name: the next Save replaces it
 }
 
 impl Hud {
     pub fn new(start: &Start) -> Self {
         Hud { menu: 1, tool: 2, brush: 7, build: false, screen: 1, place: 0, name: start.name(), typing: false, scenario: false, down: false, exit: false,
-            info: Info { player: 1, ..Default::default() }, note: None, held: None, hover_at: [i32::MIN; 2], hits: vec![] }
+            info: Info { player: 1, ..Default::default() }, note: None, held: None, hover_at: [i32::MIN; 2], hits: vec![],
+            ours: match start { Start::Load(p) => Some(p.clone()), _ => None }, armed: None }
     }
 
     pub fn over(&self, c: [f32; 2]) -> bool { self.hits.iter().any(|(p, _)| Menu::inside(*p, c)) }
@@ -276,6 +279,18 @@ impl Hud {
     }
 
     pub fn note(&mut self, s: String) { self.note = Some((s, Instant::now())); }
+
+    /// Save Map's file, None = a map of that name that isn't this one is there: asked first, the next Save replaces it.
+    fn save_to(&mut self) -> Option<PathBuf> {
+        let p = self.path();
+        if p.exists() && self.ours.as_ref() != Some(&p) && self.armed.as_ref() != Some(&p) {
+            self.note(format!("{} exists: Save again to replace it", p.file_name().map_or(String::new(), |f| f.to_string_lossy().into_owned())));
+            self.armed = Some(p);
+            return None;
+        }
+        (self.ours, self.armed) = (Some(p.clone()), None);
+        Some(p)
+    }
 
     /// The tool held now (MainControls.CurrentAction != 0): the building / troop tool, else the brush.
     pub fn holding(&self) -> bool { if self.build { self.place != 0 } else { self.tool != 0 } }
@@ -295,7 +310,7 @@ impl Hud {
             H::Tool(t) => self.tool = t,
             H::Brush => self.brush = self.brush % 9 + 1, // RightClickSizeCommand: the next size, round
             H::Name => self.typing = true,
-            H::Save => return Some(Some(Out::Save(self.path()))),
+            H::Save => return Some(self.save_to().map(Out::Save)),
             H::Exit => return Some(Some(Out::Exit)),
             H::Radar => {
                 let n = crate::live::RADAR_N as f32;
@@ -607,7 +622,11 @@ impl crate::App {
                 shc_sim::editor::new_map(&mut m, *size, ty, mp);
                 Ok(())
             }
-            Start::Load(f) => std::fs::read(f).map_err(|e| e.to_string()).and_then(|b| shc_sim::editor::load(&mut m, &b).map_err(|e| format!("{e:?}"))),
+            // on the UI thread: a sim panic on a bad map must not take the app down
+            Start::Load(f) => std::fs::read(f).map_err(|e| e.to_string()).and_then(|b| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shc_sim::editor::load(&mut m, &b).map_err(|e| format!("{e:?}"))))
+                    .unwrap_or_else(|e| Err(crate::skirmish::panic_text(e)))
+            }),
         };
         if let Err(e) = r {
             if let Some(mm) = &mut self.menu { mm.error = Some(format!("Can't open the map: {e}")); }
@@ -705,4 +724,16 @@ fn stroke_states() {
     assert_eq!(sprite("G025 a", 1), "UI-Buttons G026 a");
     assert_eq!(Start::map_type(1), (3, false));
     assert_eq!(Start::map_type(4), (0, true));
+    // Save over another map of that name asks first; this session's own file is replaced at once
+    let dir = std::env::temp_dir().join(format!("shc-editor-save-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("Maps")).unwrap();
+    crate::skirmish::set_test_profile(dir.clone());
+    std::fs::write(dir.join("Maps/New Map.map"), b"x").unwrap();
+    let mut h = Hud::new(&Start::New { size: 160, mode: 4 });
+    assert_eq!(h.save_to(), None);
+    assert_eq!(h.save_to(), Some(dir.join("Maps/New Map.map")));
+    assert_eq!(h.save_to(), Some(dir.join("Maps/New Map.map")));
+    let mut h = Hud::new(&Start::Load(dir.join("Maps/New Map.map")));
+    assert_eq!(h.save_to(), Some(dir.join("Maps/New Map.map")));
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -194,9 +194,9 @@ pub fn window_size() -> Option<[u32; 2]> {
 
 /// Options checkboxes: page, settings.cfg key ("!" = stored inverted), label, default, x, y (800×600 grid, before the
 /// page's scroll). Applied: the sound ones (audio.rs, ux.rs), Lock Cursor and VSync (ux.rs apply_options), the clocks
-/// (`clock_overlay`), SH1 RTS controls (live.rs), Confirm Disband / Building Tooltips (`opt`, for the HUD). VSync is ours
-/// ("NativeVSync", on by default; the game's "VSync" key defaults off). ponytail: Compass, Radar zoomed out, Steam
-/// overlay, Extra Zoom, Sands Timer, Moat, Custom Intros are saved only.
+/// (`clock_overlay`), SH1 RTS controls (live.rs), Confirm Disband / Building Tooltips (`opt`, for the HUD), Compass
+/// (ost.rs), Sands Timer (trail_menu.rs). VSync is ours ("NativeVSync", on by default; the game's "VSync" key defaults
+/// off). ponytail: Radar zoomed out, Steam overlay, Extra Zoom, Moat, Custom Intros are saved only.
 const CHECKS: [(u8, &str, &str, bool, f32, f32); 19] = [
     (0, "LockCursor", "TEXT_NEW_TEXT_084", false, 373.5, 288.0), (0, "Compass", "TEXT_NEW_TEXT2_125", false, 373.5, 316.0),
     (0, "RadarDefaultZoomedOut", "TEXT_NEW_TEXT2_127", false, 373.5, 344.0), (0, "ShowBuildingTooltips", "TEXT_NEW_TEXT2_081", true, 373.5, 372.0),
@@ -625,7 +625,7 @@ impl Menu {
                 self.cfg.keys = if modern { crate::keys::Keys::modern() } else { crate::keys::Keys::classic() }.text();
                 self.save_cfg();
             }
-            (_, Act::Update) => crate::update::open_page(),
+            (_, Act::Update) => if crate::update::click() { return Some(Go::Quit) },
             (_, Act::Extras(a)) => return self.extras_click(a),
             (_, Act::GameFiles) => crate::setup::start_update(),
             (Screen::Options(_), Act::OptBack) => return self.close_options(),
@@ -1115,7 +1115,7 @@ impl Menu {
 
     /// HUD_Briefing at mission start (1365×768): background, the mission's name, the Objectives page's briefing
     /// text, difficulty (hidden for missions 1, 2, 31-33), Quit / Start and their rollover line.
-    /// ponytail: no objective rows (the sim has no scenario-event export yet), Hints / Help tabs drawn but inert.
+    /// ponytail: the Help tab is text only.
     fn briefing_screen(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, b: &mut Brief, w: f32, h: f32, cursor: [f32; 2]) {
         let (id, mid) = (b.id, b.mid);
         Ui::fill(out, [0.0, 0.0, w, h], [0.0, 0.0, 0.0, 1.0]);
@@ -1517,8 +1517,8 @@ impl Menu {
     }
 
     /// HUD_Options (800×600 grid): BDR_SH1DEa frame, "Game Options", the section column, Back, and the page (350, 70,
-    /// 397×510; Video / Sound / Controls scroll in 73..577, Hotkeys lists 179 rows). ponytail: no resolution list, VSync,
-    /// UI scale, cursor icons, name box, lords, Coat of Arms, Cheats, key rebinding.
+    /// 397×510; Video / Sound / Controls scroll in 73..577, Hotkeys lists 179 rows). ponytail: no resolution list, UI
+    /// scale slider, cursor icons, lords, Cheats.
     fn options_screen(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, op: &Opt, w: f32, h: f32, cursor: [f32; 2]) {
         const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
         let tx = |ui: &Ui, k: &str| ui.text_of(k);
@@ -1681,7 +1681,12 @@ impl Menu {
         self.text(ui, out, &format!("native port {}", crate::update::VERSION), 4.0, 1074.0, 14.0, 0.0, [1.0, 1.0, 1.0, 0.4]);
         // ours: a newer release on GitHub (update.rs), left of the door column, clear of the mode help panels (x 570)
         if let Some(tag) = crate::update::available() {
-            self.button(ui, out, &format!("Version {} is available \u{2014} Download", tag.trim_start_matches('v')), 40.0, 890.0, 500.0, 48.0, Act::Update, cursor);
+            self.button(ui, out, &crate::update::button(&tag), 40.0, 890.0, 500.0, 48.0, Act::Update, cursor);
+        }
+        // ours: a newer version of an installed custom lord in the `lords` release (lord_share.rs)
+        if let n @ 1.. = crate::lord_share::updates() {
+            let what = if n == 1 { "A custom lord has an update".to_string() } else { format!("{n} custom lords have updates") };
+            self.button(ui, out, &format!("{what} \u{2014} Extras"), 40.0, 778.0, 500.0, 48.0, Act::Extras(extras::A::Open), cursor);
         }
         // ours: steam_files.txt grew since the setup's Steam download (setup/mod.rs update_todo)
         if let Some(u) = crate::setup::pending() {

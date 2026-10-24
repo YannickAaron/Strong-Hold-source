@@ -61,7 +61,7 @@ pub fn save_statuses(name: &str, s: &[i32; 50]) -> std::io::Result<()> {
     let mut lines: Vec<String> = text.lines().filter(|l| !l.starts_with(&format!("{name}/")) && !l.trim().is_empty()).map(str::to_string).collect();
     lines.push(format!("{name}/{}", s.iter().map(|v| format!("{v}:")).collect::<String>()));
     std::fs::create_dir_all(skirmish::profile_dir())?;
-    std::fs::write(progress_file(), lines.join("\n") + "\n")
+    crate::paths::write_atomic(&progress_file(), lines.join("\n") + "\n")
 }
 
 /// Mission `id` (0-based) of the current custom trail: the .trail's restart info with the custom trail fields set
@@ -88,7 +88,7 @@ pub fn start(id: i32) -> Result<shc_sim::mem::Mem, String> {
         shc_sim::setup::new_skirmish(&mut m, &s, &file, colour, Some(seed));
         skirmish::member_colours(&mut m, colour - 1);
         m
-    })).map_err(|e| format!("not ported yet: {}", e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()))
+    })).map_err(crate::skirmish::panic_text)
 }
 
 impl Menu {

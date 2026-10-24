@@ -421,7 +421,7 @@ mod sim {
             let c = [self.centre[0], self.centre[1], -1, -1];
             let bytes = shc_sim::editor::save(&mut self.m, c, false, false, self.t0.elapsed().as_millis() as u32);
             if let Some(d) = path.parent() { std::fs::create_dir_all(d)?; }
-            std::fs::write(path, bytes)
+            crate::paths::write_atomic(path, bytes)
         }
 
         /// Remember which tiles carry a preview now.

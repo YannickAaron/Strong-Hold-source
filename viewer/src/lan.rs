@@ -42,6 +42,13 @@ pub const REJOIN_WAIT: Duration = Duration::from_secs(30);
 /// Host migration: how long clients try the old host, then the new one.
 const RECONNECT_OLD: Duration = Duration::from_secs(3);
 const MIGRATE_WAIT: Duration = Duration::from_secs(10);
+/// A peer that takes no data this long is dropped (one stuck peer must not freeze the host's sim thread).
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// A connection that sends no Hello this long is dropped.
+const HELLO_WAIT: Duration = Duration::from_secs(10);
+/// Host: longer chat lines (the chat line takes 100 characters) and more chores per Turn are not relayed.
+const CHAT_MAX: usize = 1024;
+const TURN_MAX: usize = 256;
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Human {
@@ -83,8 +90,10 @@ impl Lobby {
             outposts: true, speed: 40, coop: None, slots: vec![], spectators: vec![], loaded: false, hill: 0, customs: vec![] }
     }
     pub fn players(&self) -> usize { self.humans.len() + self.ais.len() }
-    /// The player number of human k (0 = the host).
-    pub fn player_of(&self, k: usize) -> i32 { self.slots.get(k).copied().unwrap_or(k as i32 + 1) }
+    /// The player number of human k (0 = the host): its slot, else the next number no slot has.
+    pub fn player_of(&self, k: usize) -> i32 {
+        self.slots.get(k).copied().unwrap_or_else(|| (1..).filter(|p| !self.slots.contains(p)).nth(k - self.slots.len()).unwrap())
+    }
     /// The human players' numbers.
     pub fn player_numbers(&self) -> Vec<i32> { (0..self.humans.len()).map(|k| self.player_of(k)).collect() }
 }
@@ -310,6 +319,7 @@ impl Conn {
     fn new(s: TcpStream) -> std::io::Result<Conn> {
         s.set_nodelay(true)?;
         s.set_nonblocking(false)?;
+        s.set_write_timeout(Some(WRITE_TIMEOUT))?;
         let mut r = s.try_clone()?;
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || loop {
@@ -324,8 +334,14 @@ impl Conn {
         });
         Ok(Conn { w: s, rx })
     }
-    /// Bytes written (0 = the connection is gone).
-    fn send(&mut self, m: &Msg) -> usize { let b = m.encode(); if self.w.write_all(&b).is_ok() { b.len() } else { 0 } }
+    /// Bytes written (0 = the connection is gone). A failed write (the peer gone, or taking nothing for WRITE_TIMEOUT)
+    /// closes it: the reader thread then reports it closed.
+    fn send(&mut self, m: &Msg) -> usize {
+        let b = m.encode();
+        if self.w.write_all(&b).is_ok() { return b.len(); }
+        let _ = self.w.shutdown(std::net::Shutdown::Both);
+        0
+    }
     /// Received messages so far; Err = the connection closed.
     fn recv(&mut self) -> Result<Vec<Msg>, Vec<Msg>> {
         let mut v = vec![];
@@ -441,13 +457,14 @@ pub struct Net {
     pub save: Option<std::path::PathBuf>,
     pub error: Option<String>,
     listener: Option<TcpListener>, // host: the game port; client: its own (for host migration)
-    pending: Vec<Conn>,            // host: connected, no Hello yet
+    pending: Vec<(Instant, Conn)>, // host: connected (since), no Hello yet
     peers: Vec<(i32, Conn)>,       // host: clients / spectators by id; client: the host
     /// Every peer's listening address (host: what the clients connected to).
     pub addrs: Vec<(i32, SocketAddr)>,
     host_addr: Option<SocketAddr>,
     pub host_id: i32,
     lost: Vec<(i32, String)>, // host, in game: players whose connection dropped (announced for rejoining)
+    removed: Vec<i32>,        // in game: players out for good (not let back in)
     name: String,
     announce: Arc<Mutex<String>>,
     stop: Arc<AtomicBool>,
@@ -478,7 +495,7 @@ impl Net {
         let (announce, stop) = (Arc::new(Mutex::new(String::new())), Arc::new(AtomicBool::new(false)));
         responder(disc, announce.clone(), stop.clone());
         let n = Net { me: 1, host: true, lobby: Lobby::new(name), chat: vec![], started: None, state: false, save: None, error: None, listener: Some(l), pending: vec![],
-            peers: vec![], addrs: vec![], host_addr: None, host_id: 1, lost: vec![], name: name.into(), announce, stop, port, sent_bytes: 0, lords_checked: None, lords_reported: None };
+            peers: vec![], addrs: vec![], host_addr: None, host_id: 1, lost: vec![], removed: vec![], name: name.into(), announce, stop, port, sent_bytes: 0, lords_checked: None, lords_reported: None };
         n.set_announce();
         Ok(n)
     }
@@ -498,7 +515,8 @@ impl Net {
         let t0 = Instant::now();
         let (mut me, mut lobby, mut started, mut addrs, mut state) = (0, None, None, vec![], false);
         while t0.elapsed() < Duration::from_secs(3) && (me == 0 || (lobby.is_none() && started.is_none() && !(matches!(join, Join::Rejoin(_)) && tick > 0))) {
-            for m in c.recv().map_err(|_| "the host closed the connection".to_string())? {
+            let (msgs, closed) = match c.recv() { Ok(v) => (v, false), Err(v) => (v, true) }; // a refusal comes with the close
+            for m in msgs {
                 match m {
                     Msg::Welcome { you } => me = you,
                     Msg::Lobby(l) => lobby = Some(l),
@@ -508,12 +526,13 @@ impl Net {
                     _ => {}
                 }
             }
+            if closed { return Err("the host closed the connection".into()); }
             std::thread::sleep(Duration::from_millis(5));
         }
         if me == 0 { return Err("no answer from the host".into()); }
         let lobby = lobby.unwrap_or_else(|| Lobby::new(""));
         Ok(Net { me, host: false, lobby, chat: vec![], started, state, save: None, error: None, listener: Some(own), pending: vec![], peers: vec![(0, c)], addrs,
-            host_addr: Some(addr), host_id: 1, lost: vec![], name: name.into(), announce: Default::default(), stop: Arc::new(AtomicBool::new(true)),
+            host_addr: Some(addr), host_id: 1, lost: vec![], removed: vec![], name: name.into(), announce: Default::default(), stop: Arc::new(AtomicBool::new(true)),
             port: listen_port, sent_bytes: 0, lords_checked: None, lords_reported: None })
     }
 
@@ -545,9 +564,32 @@ impl Net {
     pub fn set_lobby(&mut self, l: Lobby) {
         if !self.is_host() || self.started.is_some() { return; }
         self.lobby = l;
+        self.number_players();
         self.set_announce();
         let m = Msg::Lobby(self.lobby.clone());
         self.send(&m, 0);
+    }
+
+    /// Host, lobby: each player's connection (in join order, as the humans) takes its human's player number
+    /// (`Lobby.player_of`: one lower after a player before it left, a loaded game's slots); a changed one gets its
+    /// Welcome again, the addresses follow (Peers: host migration connects by them).
+    fn number_players(&mut self) {
+        let (mut k, mut moved) = (0, vec![]);
+        for (p, c) in &mut self.peers {
+            if *p >= SPECTATOR { continue; }
+            k += 1;
+            let q = self.lobby.player_of(k);
+            if *p != q {
+                moved.push((*p, q));
+                *p = q;
+                c.send(&Msg::Welcome { you: q });
+            }
+        }
+        if moved.is_empty() { return; }
+        for (p, _) in &mut self.addrs {
+            if let Some(&(_, q)) = moved.iter().find(|(o, _)| o == p) { *p = q; }
+        }
+        self.send_peers();
     }
 
     /// In game: `text` to the players in mask `to` (Msg::Say); it shows here at once (recieveIngameChat on Send).
@@ -598,23 +640,23 @@ impl Net {
         if self.host {
             if let Some(l) = &self.listener {
                 while let Ok((s, _)) = l.accept() {
-                    if let Ok(c) = Conn::new(s) { self.pending.push(c); }
+                    if let Ok(c) = Conn::new(s) { self.pending.push((Instant::now(), c)); }
                 }
             }
         }
         // host: Hello → a human slot / back as player p / a spectator
         let mut i = 0;
         while i < self.pending.len() {
-            let r = self.pending[i].recv();
+            let r = self.pending[i].1.recv();
             let hello = r.as_ref().map_or_else(|v| v, |v| v).iter().find_map(|m| match m {
                 Msg::Hello { name, version, listen, join, tick, through, coa } => Some((name.clone(), *version, *listen, *join, *tick, *through, coa.clone())),
                 _ => None,
             });
             let Some((name, v, listen_port, join, tick, through, coa)) = hello else {
-                if r.is_err() { self.pending.remove(i); } else { i += 1; }
+                if r.is_err() || self.pending[i].0.elapsed() > HELLO_WAIT { self.pending.remove(i); } else { i += 1; }
                 continue;
             };
-            let mut c = self.pending.remove(i);
+            let mut c = self.pending.remove(i).1;
             let ip = c.w.peer_addr().map(|a| a.ip()).unwrap_or([127, 0, 0, 1].into());
             let refuse = |c: &mut Conn, why: &str| { c.send(&Msg::Refused(why.into())); };
             if v != VERSION { refuse(&mut c, "Different game version."); continue; }
@@ -627,10 +669,12 @@ impl Net {
                     l.ais.truncate(8 - l.humans.len());
                     self.peers.push((me, c));
                     self.set_lobby(l);
-                    me
+                    self.peers.last().unwrap().0 // its human's number (a loaded game's slot)
                 }
                 Join::Play => { refuse(&mut c, if self.started.is_some() { "The game is running: watch it instead." } else { "The game is full." }); continue; }
-                Join::Rejoin(p) if self.started.is_some() && self.lobby.player_numbers().contains(&p) && !taken(p, &self.peers) && p != self.me => {
+                // a dropped player (not removed yet), or a spectator back after a host migration
+                Join::Rejoin(p) if self.started.is_some() && !taken(p, &self.peers) && p != self.me
+                    && (p >= SPECTATOR || self.lobby.player_numbers().contains(&p) && !self.removed.contains(&p)) => {
                     self.peers.push((p, c));
                     self.lost.retain(|q| q.0 != p);
                     out.push(Msg::Joined { who: p, tick, through });
@@ -667,6 +711,7 @@ impl Net {
             let from = self.peers[k].0;
             let (msgs, closed) = match self.peers[k].1.recv() { Ok(v) => (v, false), Err(v) => (v, true) };
             for m in msgs {
+                let Some(m) = (if self.host { check(from, m) } else { Some(m) }) else { continue };
                 match &m {
                     Msg::Lobby(l) if !self.host => self.lobby = l.clone(),
                     Msg::Welcome { you } if !self.host => self.me = *you, // renumbered: a player before us left the lobby
@@ -696,6 +741,7 @@ impl Net {
             if closed { gone.push(from); }
         }
         self.report_lords();
+        gone.sort_unstable_by(|a, b| b.cmp(a)); // the highest first: a lobby leave renumbers only those after it
         for p in gone {
             self.peers.retain(|(q, _)| *q != p);
             self.addrs.retain(|(q, _)| *q != p);
@@ -706,14 +752,15 @@ impl Net {
                 let mut l = self.lobby.clone();
                 if p < SPECTATOR {
                     if let Some(k) = l.player_numbers().iter().position(|&q| q == p) { l.humans.remove(k); }
-                    self.renumber(p);
                 }
-                self.set_lobby(l);
+                self.set_lobby(l); // the players after it move up (`number_players`)
             } else if p < SPECTATOR {
                 let name = self.lobby.player_numbers().iter().position(|&q| q == p).and_then(|k| self.lobby.humans.get(k)).map_or(String::new(), |h| h.name.clone());
                 self.lost.push((p, name));
                 self.set_announce();
                 out.push(Msg::Left { who: p, at: -1 }); // the Lockstep waits for a rejoin, then removes the player
+            } else {
+                out.push(Msg::Left { who: p, at: -1 }); // a spectator: a hold no longer waits for it
             }
         }
         out
@@ -734,14 +781,11 @@ impl Net {
         self.send(&m, me); // a client's one peer is the host (id 0)
     }
 
-    /// Host, lobby: player `gone` left; the clients after it get the next lower number (their Welcome again).
-    fn renumber(&mut self, gone: i32) {
-        for (p, c) in &mut self.peers {
-            if *p > gone && *p < SPECTATOR {
-                *p -= 1;
-                c.send(&Msg::Welcome { you: *p });
-            }
-        }
+    /// Player `p` is out of the game for good: no longer offered for rejoining, nor let back in.
+    fn remove(&mut self, p: i32) {
+        self.lost.retain(|q| q.0 != p);
+        self.removed.push(p);
+        self.set_announce();
     }
 
     /// Host migration: this client becomes the host (on its own listening socket), with no peers yet.
@@ -759,9 +803,43 @@ impl Net {
         let Ok(s) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else { return false };
         let Ok(mut c) = Conn::new(s) else { return false };
         c.send(&Msg::Hello { name: self.name.clone(), version: VERSION, listen: self.port, join: Join::Rejoin(self.me), tick, through, coa: crate::menu::coa::mine().code() });
+        // back only once welcomed (the host's first message): a refusal or no answer is another try
+        if !matches!(c.rx.recv_timeout(Duration::from_secs(1)), Ok(Some(Msg::Welcome { .. }))) { return false; }
         (self.peers, self.host_addr, self.host_id, self.error) = (vec![(0, c)], Some(addr), host_id, None);
         true
     }
+}
+
+/// Host: a client's message `m` on connection `from` as the host takes it; None = dropped: one naming another sender,
+/// game input from a spectator, what only the host sends (Left, Joined, Hold, Go, ...), chores the sim can't take
+/// (relayed, one would stop every peer's game), overlong chat. Lobby chat takes the connection's id (a renumbered
+/// client may not know its new one yet).
+fn check(from: i32, m: Msg) -> Option<Msg> {
+    let player = from < SPECTATOR;
+    match m {
+        Msg::Chat { text, .. } => (text.len() <= CHAT_MAX).then_some(Msg::Chat { from, text }),
+        Msg::Say { from: f, ref text, .. } if f == from && text.len() <= CHAT_MAX => Some(m),
+        Msg::Turn { from: f, through, packets } if f == from && player => {
+            Some(Msg::Turn { from, through, packets: packets.into_iter().filter(|p| chore_ok(p)).take(TURN_MAX).collect() })
+        }
+        Msg::Hash { from: f, .. } | Msg::Pause { from: f, .. } if f == from && player => Some(m),
+        Msg::Speed { .. } if player => Some(m),
+        Msg::Ping { from: f, .. } | Msg::Pong { from: f, .. } | Msg::PageHashes { from: f, .. } | Msg::Synced { from: f } if f == from => Some(m),
+        Msg::Hello { .. } | Msg::Have { .. } => Some(m), // Have: the host uses the connection's id
+        _ => None,
+    }
+}
+
+/// The chore types the sim can size (`shc_sim::commands::size` panics on any other; test `chore_types_match_the_sim`).
+fn chore_type(ty: u8) -> bool { matches!(ty, 0x0f..=0x26 | 0x29..=0x2d | 0x44..=0x4c | 0x4e | 0x56 | 0x61 | 0x66 | 0x6c | 0x6d | 0x71 | 0x77) }
+
+/// A chore packet (`mp::f237d0`: type, exec u24, id i32, payload) the sim takes: a known type (not '}', the original's
+/// relay packet, nor a heartbeat / ping), exec ≥ 1 (`mp::f23ee0` asserts it), the type's payload size.
+fn chore_ok(p: &[u8]) -> bool {
+    if p.len() < 8 || !chore_type(p[0]) || u32::from_le_bytes([p[1], p[2], p[3], 0]) < 1 { return false; }
+    #[cfg(feature = "live")]
+    if p.len() != 8 + shc_sim::commands::size(p[0]) as usize { return false; }
+    true
 }
 
 // ---- the game start
@@ -1118,6 +1196,7 @@ impl Lockstep {
                 Msg::Left { who, at } => {
                     self.active.retain(|&p| p != who);
                     self.through.remove(&who);
+                    self.net.remove(who);
                     if !self.kicks.contains(&(who, at)) { self.kicks.push((who, at)); }
                     self.log(format!("player {who} leaves at tick {at}"));
                 }
@@ -1229,8 +1308,9 @@ impl Lockstep {
     }
 
     /// Host: player `who`'s connection dropped: everyone stops at its promise − 1 (the last tick the gate lets anyone
-    /// reach without it) and waits up to `rejoin_wait`.
+    /// reach without it) and waits up to `rejoin_wait`. A spectator's: a hold no longer waits for its Synced.
     fn lost_player(&mut self, who: i32) {
+        if who >= SPECTATOR { if let Some(h) = &mut self.hold { h.state.remove(&who); } }
         if !self.active.contains(&who) { return; }
         self.lost.insert(who, Instant::now() + self.rejoin_wait);
         let at = self.through.get(&who).copied().unwrap_or(self.promised) - 1;
@@ -1280,6 +1360,7 @@ impl Lockstep {
                 self.net.send(&Msg::Left { who: p, at }, self.me);
                 self.active.retain(|&q| q != p);
                 self.through.remove(&p);
+                self.net.remove(p);
                 self.kicks.push((p, at));
                 if let Some(h) = &mut self.hold { h.state.remove(&p); }
                 self.log(format!("player {p} did not come back: removed at tick {at}"));
@@ -1425,6 +1506,7 @@ impl Lockstep {
         let Some(new) = new else { self.error = Some("The host left the game.".into()); self.migrate = None; return true };
         if new == self.me {
             self.net.become_host();
+            self.net.remove(old);
             self.active.retain(|&p| p != old);
             self.through.remove(&old);
             self.dead_host = Some(old);
@@ -1454,6 +1536,7 @@ impl Lockstep {
             if due { self.retried = Instant::now(); }
             if due && self.net.reconnect(a, new, tick, self.promised) {
                 self.migrate = None;
+                self.net.remove(old);
                 self.active.retain(|&p| p != old);
                 self.through.remove(&old);
                 self.log(format!("joined the new host, player {new}"));
@@ -1954,6 +2037,87 @@ mod tests {
         assert_eq!(insult_wav(7), "insult7.wav");
     }
 
+    /// A player leaves the lobby: the ones after it move up, and so do their addresses (host migration connects by them).
+    #[test]
+    fn lobby_leave_renumbers_addresses() {
+        let mut h = Net::test_host();
+        let addr = SocketAddr::from(([127, 0, 0, 1], h.port()));
+        let mut cs = vec![];
+        for k in 0..3 {
+            let j = std::thread::spawn(move || Net::join(addr, &format!("Gast{k}")).expect("join"));
+            let t0 = Instant::now();
+            while h.lobby.humans.len() < k + 2 && t0.elapsed() < Duration::from_secs(10) { h.poll(); std::thread::sleep(Duration::from_millis(2)); }
+            cs.push(j.join().unwrap());
+        }
+        drop(cs.remove(0)); // player 2 leaves
+        let own = |c: &Net| (c.me, SocketAddr::from(([127, 0, 0, 1], c.port())));
+        let t0 = Instant::now();
+        while ((cs[0].me, cs[1].me) != (2, 3) || cs.iter().any(|c| !c.addrs.contains(&own(c)))) && t0.elapsed() < Duration::from_secs(10) {
+            h.poll();
+            for c in &mut cs { c.poll(); }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!((cs[0].me, cs[1].me), (2, 3));
+        for c in &cs { assert!(c.addrs.contains(&own(c)), "{:?}", c.addrs); }
+        assert_eq!(h.addrs.iter().map(|a| a.0).collect::<BTreeSet<_>>(), [2, 3].into());
+    }
+
+    /// The host takes only what the sim can take, from whom it claims: a spoofed sender, a spectator's Turn, a
+    /// host-only Left and the chores that panic the sim ('}', an unknown type, exec 0, a short payload) are dropped.
+    #[cfg(feature = "live")]
+    #[test]
+    fn untrusted_input_dropped() {
+        let mut h = Net::test_host();
+        let addr = SocketAddr::from(([127, 0, 0, 1], h.port()));
+        let j = std::thread::spawn(move || Net::join(addr, "Gast").expect("join"));
+        let t0 = Instant::now();
+        while h.lobby.humans.len() < 2 && t0.elapsed() < Duration::from_secs(10) { h.poll(); std::thread::sleep(Duration::from_millis(2)); }
+        let mut c = j.join().unwrap();
+        let j = std::thread::spawn(move || Net::join_as(addr, "Zuschauer", Join::Spectate, 0, 0).expect("spectate"));
+        while h.lobby.spectators.is_empty() && t0.elapsed() < Duration::from_secs(10) { h.poll(); std::thread::sleep(Duration::from_millis(2)); }
+        let mut s = j.join().unwrap();
+        h.start(1, DELAY);
+        let tax = |ty: u8, exec: u8| vec![ty, exec, 0, 0, 0, 0, 0, 0, 3]; // chore 0x22 (tax): 1 payload byte
+        let good = Msg::Turn { from: 2, through: 50, packets: vec![tax(0x22, 5)] };
+        c.send(&Msg::Turn { from: 2, through: 50, packets: vec![tax(0x22, 5), tax(b'}', 5), tax(0x7c, 5), tax(0x22, 0), tax(0x22, 5)[..8].to_vec()] }, 2);
+        c.send(&Msg::Turn { from: 1, through: 99, packets: vec![tax(0x22, 5)] }, 2);
+        c.send(&Msg::Left { who: 1, at: 5 }, 2);
+        c.send(&Msg::Pause { from: 1, on: true }, 2);
+        let me = s.me;
+        s.send(&Msg::Turn { from: me, through: 99, packets: vec![tax(0x22, 5)] }, me);
+        let mut got = vec![];
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_millis(500) { got.extend(h.poll()); std::thread::sleep(Duration::from_millis(5)); }
+        assert_eq!(got.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>(), [format!("{good:?}")]);
+    }
+
+    /// `chore_type` is the set `shc_sim::commands::size` takes without a panic.
+    #[cfg(feature = "live")]
+    #[test]
+    fn chore_types_match_the_sim() {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let sim: Vec<u8> = (0..=0x7f).filter(|&t| std::panic::catch_unwind(|| shc_sim::commands::size(t)).is_ok()).collect();
+        std::panic::set_hook(hook);
+        assert_eq!(sim, (0..=0x7f).filter(|&t| chore_type(t)).collect::<Vec<u8>>());
+    }
+
+    /// A client that stops reading is dropped after WRITE_TIMEOUT instead of blocking the host for good.
+    #[test]
+    fn stuck_peer_dropped() {
+        let mut h = Net::test_host();
+        let mut s = TcpStream::connect(("127.0.0.1", h.port())).unwrap();
+        s.write_all(&Msg::Hello { name: "Stuck".into(), version: VERSION, listen: 1, join: Join::Play, tick: 0, through: 0, coa: String::new() }.encode()).unwrap();
+        let t0 = Instant::now();
+        while h.lobby.humans.len() < 2 && t0.elapsed() < Duration::from_secs(10) { h.poll(); std::thread::sleep(Duration::from_millis(2)); }
+        assert_eq!(h.lobby.humans.len(), 2);
+        let big = Msg::Pages { to: 2, last: false, idx: vec![], lz: vec![0; 1 << 20] };
+        let t0 = Instant::now();
+        while h.lobby.humans.len() > 1 && t0.elapsed() < WRITE_TIMEOUT * 4 { h.send_to(2, &big); h.poll(); }
+        assert_eq!(h.lobby.humans.len(), 1, "the stuck peer is dropped");
+        drop(s);
+    }
+
     /// Both Lives in their own threads for `ms` (stepping whenever the lockstep lets them); returns them.
     #[cfg(feature = "live")]
     fn run_for(ls: Vec<Live>, ms: u64) -> Vec<Live> {
@@ -2277,10 +2441,16 @@ mod tests {
         // now it quits for good: removed after the wait, the host plays on
         drop(c);
         host.net.as_mut().unwrap().rejoin_wait = Duration::from_secs(1);
-        let (host, e) = run(host, t0 + 450);
+        let (mut host, e) = run(host, t0 + 450);
         assert!(e.is_none(), "{e:?}");
         assert_eq!(host.net.as_ref().unwrap().players(), &[1]);
         assert_eq!(host.mem_ref().i32(0x188571bbc + 2 * 4), -1, "player 2 removed (human slot -1)");
+        // removed for good: no longer offered for rejoining, and refused when it tries
+        let n = &mut host.net.as_mut().unwrap().net;
+        assert!(n.lost.is_empty(), "{:?}", n.lost);
+        let j = std::thread::spawn(move || Net::join_as(addr, "Gast0", Join::Rejoin(2), 0, 0).err());
+        while !j.is_finished() { n.poll(); std::thread::sleep(Duration::from_millis(2)); }
+        assert_eq!(j.join().unwrap().as_deref(), Some("No such player is missing in that game."));
     }
 
     /// A spectator joins a running game (the host's state), then follows it: its sync sums equal the players'.
@@ -2312,15 +2482,24 @@ mod tests {
     /// both play on in sync.
     #[cfg(feature = "live")]
     #[test]
-    fn save_and_load_lan_game() {
+    fn save_and_load_lan_game() { save_and_load(2, vec![1, 2]); }
+
+    /// A loaded game whose humans are not 1, 2, ...: the client joined as player 2 becomes the save's player 3.
+    #[cfg(feature = "live")]
+    #[test]
+    fn load_lan_game_other_slots() { save_and_load(3, vec![1, 3]); }
+
+    /// A game of `players` humans saved, loaded by the host and one client on the save's players `slots`.
+    #[cfg(feature = "live")]
+    fn save_and_load(players: usize, slots: Vec<i32>) {
         if !maps() { return; }
-        let ls = start(1, 10);
+        let ls = start(players - 1, 10);
         let t0 = ls[0].tick();
         let mut ls = run_all(ls, t0 + 150);
         let sav = shc_sim::save::save_game(ls[0].mem(), 60_000);
         drop(ls);
         let humans = save_humans(&sav).expect("save");
-        assert_eq!(humans, vec![1, 2]);
+        assert_eq!(humans, (1..=players as i32).collect::<Vec<_>>());
         let mut host = Net::test_host();
         let addr = SocketAddr::from(([127, 0, 0, 1], host.port()));
         let j = std::thread::spawn(move || Net::join(addr, "Gast0").expect("join"));
@@ -2328,7 +2507,7 @@ mod tests {
         while host.lobby.humans.len() < 2 && t1.elapsed() < Duration::from_secs(5) { host.poll(); std::thread::sleep(Duration::from_millis(2)); }
         let mut client = j.join().unwrap();
         let mut l = host.lobby.clone();
-        (l.loaded, l.slots) = (true, humans);
+        (l.loaded, l.slots) = (true, slots.clone());
         host.set_lobby(l);
         let (lobby, _, delay) = host.start(0, DELAY);
         let m = load_game(&sav, &lobby, 1).expect("load");
@@ -2349,7 +2528,7 @@ mod tests {
         let (mut h, e) = hh.join().unwrap();
         assert!(e.is_none(), "{e:?}");
         assert_eq!(sums(&mut h), sums(&mut c));
-        assert_eq!(c.mem_ref().i32(0x1888e0d60), 2);
+        assert_eq!((c.me, c.mem_ref().i32(0x1888e0d60)), (slots[1], slots[1]));
     }
 
     /// The host leaves a 3-player game: the lowest remaining player hosts, the other reconnects to it, the old host
@@ -2375,6 +2554,33 @@ mod tests {
         let (p3, e) = run(ls.next().unwrap(), t0 + 500);
         assert!(e.is_none(), "{e:?}");
         assert!(p3.net.as_ref().unwrap().is_host());
+    }
+
+    /// The host quits while a spectator watches: the spectator comes back to the new host as a spectator, gets its
+    /// state and follows the game on.
+    #[cfg(feature = "live")]
+    #[test]
+    fn spectator_follows_host_migration() {
+        if !maps() { return; }
+        let ls = start(1, 10);
+        let t0 = ls[0].tick();
+        let ls = run_all(ls, t0 + 100);
+        let addr = SocketAddr::from(([127, 0, 0, 1], ls[0].net.as_ref().unwrap().net.port()));
+        let hs: Vec<_> = ls.into_iter().map(|l| std::thread::spawn(move || run(l, t0 + 200))).collect();
+        let net = Net::join_as(addr, "Zuschauer", Join::Spectate, 0, 0).expect("spectate");
+        let (ls3, m) = Lockstep::join(net, DELAY, Duration::from_secs(30)).expect("state");
+        let mut s = Live::from_mem(m);
+        s.me = 0;
+        s.net = Some(ls3);
+        let (s, e) = run(s, t0 + 200);
+        assert!(e.is_none(), "{e:?}");
+        let mut ls: Vec<Live> = hs.into_iter().map(|h| { let (l, e) = h.join().unwrap(); assert!(e.is_none(), "{e:?}"); l }).collect();
+        drop(ls.remove(0)); // the host quits
+        let mut ls = run_all(vec![ls.remove(0), s], t0 + 500);
+        println!("p2: {}\nspectator: {}", log(&ls[0]), log(&ls[1]));
+        assert!(ls[0].net.as_ref().unwrap().is_host(), "player 2 hosts");
+        assert!(log(&ls[1]).contains("joined the new host"));
+        assert_eq!(sums(&mut ls[0]), sums(&mut ls[1]));
     }
 
     /// One peer of `lockstep_two_peers`: builds near its keep, recruits Arab archers at its mercenary post, box-selects

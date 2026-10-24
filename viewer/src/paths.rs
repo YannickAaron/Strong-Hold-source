@@ -15,6 +15,14 @@ const APP: &str = "Strong Hold";
 #[cfg(not(any(target_os = "macos", windows)))]
 const STEAM_APP: &str = "3024040";
 
+/// `fs::write` through a temp file and a rename: a crash or a full disk mid-write leaves the old file whole, never an
+/// empty or half one (saves, settings.cfg with the campaign progress, maps).
+pub fn write_atomic(path: &std::path::Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".part");
+    std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path)).inspect_err(|_| { let _ = std::fs::remove_file(&tmp); })
+}
+
 fn env_dir(k: &str) -> Option<PathBuf> { std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from) }
 pub fn home() -> PathBuf { env_dir("HOME").or_else(|| env_dir("USERPROFILE")).unwrap_or_default() }
 
