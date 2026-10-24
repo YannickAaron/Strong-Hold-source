@@ -78,6 +78,7 @@ pub struct HudState {
     pub weapon_avail: [u8; 9], // +1047 weapon_types_available: bows, xbows, spears, pikes, maces, swords, leather, armour, horses
     pub costs: Table<[i32; 5]>, // by eMappers id: wood, stone, iron, pitch, gold (--live; empty = unknown)
     pub coords: Table<i32>,      // by eMappers id: DLL_GetMapperCoord, x << 16 | y or 0x55555555 (--live; empty = XAML)
+    pub sassanid: Option<i32>,   // ours: the open stables panel is a Sassanid Stable's; its recruit's refusal (0 = ok, shc_sim::ext::can_recruit)
     pub game_paused: u8, // +2200: the pause latch GameAction Game_Paused (1048) sets (OST_GAME_PAUSED)
     pub keep_storage: [i32; 25], // +1436: starting goods still in the keep (OST_STARTING_GOODS rows)
     pub left: [i16; 10],         // +1984: editor counts / limits: people, buildings, vegetation, rocks, tribes (OST_PEOPLE_LEFT)
@@ -105,6 +106,7 @@ pub struct HudState {
     pub cg: [[(u8, i16); 4]; 10],    // +2466 control_groups_type / +2506 _count: the first four kinds per group
     pub lords: Lords,                // the allies panel's lord table
     pub hill: Option<crate::koth::Board>, // --live: King of the Hill (koth.rs); None = conquest
+    pub action_points: i32,          // +1280 action_point_count: camera spots (ally pings, events) the HUD button jumps to
 }
 
 /// The lords' part of PlayStateReturnData (+2612.., written in skirmish / multiplayer; C# CopyPlayStateStruct moves the
@@ -125,8 +127,12 @@ pub struct Lords {
     pub me: i32,             // GameData.playerID
     pub in_game: [bool; 9],  // DLL_GetMeritData()[p, 1] >= 0
     pub colours: [u8; 9],    // player -> MP colour index (endgame::radar_colours)
+    pub colour: u8,          // the HUD's sprite colour: UIColourRemap[remapColours[local player]] (0 = unknown: default)
     pub allies_button: bool, // SkirmishModeVisAlly (HUD_Main.SetupModeDependantUI)
     pub free_build: bool,    // Show_HUD_Extras_Button_Freebuild
+    pub merit_button: bool,  // SkirmishModeVisMerit (the standings button)
+    pub merit: [[i32; 5]; 9], // DLL_GetMeritData rows (military::merit): player, rank key, gold, troops, team
+    pub who: [String; 9],    // getSkirmishName per player (endgame::player_names: a text key or a plain name)
 }
 
 impl Lords {
@@ -225,7 +231,7 @@ impl HudState {
             trading: std::array::from_fn(|k| s(1422 + k * 2)),
             peasants: s(892), horses: s(1278), troop_avail: std::array::from_fn(|k| u(2188 + k)), merc_avail: std::array::from_fn(|k| u(2600 + k)),
             bed_avail: std::array::from_fn(|k| u(2796 + k)), guild_avail: std::array::from_fn(|k| u(2817 + k)), ladderman_cost: u(2832),
-            eunuch_cost: u(2833), siege: std::array::from_fn(|k| if k < 6 { u(1025 + k) } else { u(2609) }), patrol_mode: u(1037), get_ammo: u(1031), cows: u(1032), attack_here: u(1033), rocks: u(1034), weapon_avail: std::array::from_fn(|k| u(1047 + k)), costs: Table::default(), coords: Table::default(),
+            eunuch_cost: u(2833), siege: std::array::from_fn(|k| if k < 6 { u(1025 + k) } else { u(2609) }), patrol_mode: u(1037), get_ammo: u(1031), cows: u(1032), attack_here: u(1033), rocks: u(1034), weapon_avail: std::array::from_fn(|k| u(1047 + k)), costs: Table::default(), coords: Table::default(), sassanid: None,
             keep_storage: std::array::from_fn(|k| i32::from_le_bytes(std::array::from_fn(|j| u(1436 + 4 * k + j)))),
             left: std::array::from_fn(|k| s2(1984 + 2 * k)), got_market: u(2587), lord_only_selected: u(2586),
             game_paused: b.get(2200).copied().unwrap_or(0), report: reports::Data::decode(b), mouse_selector_state: u(2812), speed: 0.0, end: None, ev: Events::default(),
@@ -236,7 +242,7 @@ impl HudState {
             trade_sell_fixed: std::array::from_fn(|k| s(1372 + k * 2)),
             autotrade: [std::array::from_fn(|k| s2(2356 + k * 2)), std::array::from_fn(|k| s2(2304 + k * 2))],
             autotrade_on: std::array::from_fn(|k| u(2408 + k)),
-            extreme: (u(2809), s2(2810)),
+            extreme: (u(2809), s2(2810)), action_points: i(1280),
             cg_total: std::array::from_fn(|k| s2(2446 + 2 * k)),
             cg: std::array::from_fn(|g| std::array::from_fn(|j| (u(2466 + 4 * g + j), s2(2506 + 2 * (4 * g + j))))),
             lords: {
@@ -271,6 +277,36 @@ fn margin(mapper: i32, st: &HudState) -> Option<(f32, f32)> {
     Some((x + dx, y + dy))
 }
 
+/// "{Binding UIBuildingsM005}" (a view-model sprite: the ballista, the editor's troops) → "UI-Buildings M005"; other keys
+/// as they are. MainViewModel.UpdateUITroopSprites binds them, always with colour 1 (the plain sprites).
+fn bound(k: &str) -> String {
+    k.strip_prefix("{Binding UIBuildings").and_then(|r| r.strip_suffix('}')).map_or(k.to_string(), |r| format!("UI-Buildings {r}"))
+}
+
+/// Our texts (Extended rules), English only: the game's strings.tsv has none of them. ponytail: one language until the
+/// app gets translations of its own.
+const EXT_TEXT: [(&str, &str); 6] = [
+    ("EXT_SASSANID_KNIGHT", "Sassanid Knight"),
+    ("EXT_SASSANID_STABLE", "Sassanid Stable"),
+    ("EXT_RULES", "Extended rules"),
+    ("EXT_NEEDS_BARRACKS", "You need a barracks to train Sassanid Knights."),
+    ("EXT_SASSANID_KNIGHT_HELP", "Sassanid Knight: a lancer, lighter than a knight. After riding 6 tiles in one order its first blow strikes twice as hard. Strong against archers and horse archers, weak against pikemen."),
+    ("EXT_SASSANID_STABLE_HELP", "Sassanid Stable: breeds horses like a stables and trains Sassanid Knights (60 gold, a pike, metal armour and a horse; needs a barracks)."),
+];
+
+/// Ours: the Military row with the Sassanid Stable has seven buttons where DE's six end at the frame (x 475 of the ~490 px
+/// the frame leaves visible): every button but the Return arrow is drawn at this scale, its x from the engineers' guild.
+const SQUEEZE: f32 = 0.87;
+fn squeeze(mx: f32, my: f32, bw: f32, bh: f32) -> (f32, f32, f32, f32) {
+    if mx < 30.0 { return (mx, my, bw, bh); } // the Return arrow
+    (34.0 + (mx - 34.0) * SQUEEZE, my + bh * (1.0 - SQUEEZE) / 2.0, bw * SQUEEZE, bh * SQUEEZE)
+}
+
+/// Our Sassanid Stable's build tool (shc_sim::ext::MAPPER_STABLE; the viewer builds without the sim too) and the warm
+/// tint that tells its button from the stables'.
+pub const SASSANID_STABLE: i32 = 0x1cc;
+const SASSANID_TINT: [f32; 4] = [1.0, 0.78, 0.5, 1.0];
+
 /// Build-tool ghost: tile diamonds (4 corners, logical px) each with its verdict, reason (text key or plain text).
 pub struct Ghost { pub tiles: Vec<([[f32; 2]; 4], bool)>, pub why: Option<String> }
 
@@ -302,14 +338,20 @@ fn tab_of(screen: usize) -> usize {
 /// Buttons sharing an XAML slot (well 330 / waterpot 342, mercenary post 86 / Bedouin stockade 79) are moved apart by
 /// `margin`; without coordinates (replays) one of each pair by lord kind (Arab = 1, 2, 6, 7) shows.
 fn variant_ok(mapper: i32, st: &HudState) -> bool {
+    if mapper == SASSANID_STABLE { return st.available.get(mapper as usize).copied().unwrap_or(false); } // Extended games only
     let arab = matches!(st.lord_type, 1 | 2 | 6 | 7);
     st.coords.0.is_empty().then(|| match mapper { 342 => arab, 330 => !arab, 86 => false, _ => true }).unwrap_or(true)
 }
 
+/// The Keeps sub-menu's tool (ButtonBuildSubKeeps, STRUCT_SUB_MENU_KEEPS): the one way to the Keeps row (screen 0).
+const KEEPS_MENU: i32 = 343;
+
 /// SetupNewBuildScreen's IsEnabled = CanPlaceMapper (`DLL_IsMapperAvailable`): a locked button stays on its screen,
-/// drawn as BTN_Building's SpriteLocked (Sprite1 at BuildingButtonDisabledOpacity 0.5), without hover or click.
+/// drawn as BTN_Building's SpriteLocked (Sprite1 at BuildingButtonDisabledOpacity 0.5), without hover or click. The
+/// Keeps sub-menu is locked although the engine allows it: SetupNewBuildScreen enables buildButtons[80] only in the
+/// map editor (IsMapEditorMode), which draws its own buttons (editor.rs); a keep placed in a game moves the keep.
 fn mapper_on(mapper: i32, st: &HudState) -> bool {
-    mapper <= 0 || st.available.get(mapper as usize).copied().unwrap_or(true)
+    mapper != KEEPS_MENU && (mapper <= 0 || st.available.get(mapper as usize).copied().unwrap_or(true))
 }
 
 /// Opaque white 4×2 texels at (0, 0) of the font atlas for solid fills: `Ui::fill` samples uv (1, 1) / FONT_PX, the
@@ -321,8 +363,26 @@ fn white_block(rgba: &mut [u8]) {
 
 /// (texture: 0 = UI atlas, 1 = font atlas, triangle) in logical window px.
 pub type HudTri = (u32, [Vert; 3]);
-pub const FONT_PX: u32 = 1024;
+pub const FONT_PX: u32 = 2048; // ~8000 glyphs at Retina HUD sizes; full = evict all (Ui::glyph)
 const ATLAS: f32 = 8192.0;
+/// MainViewModel.UpdateUITroopSprites(colour): colours 2..8 swap the sprites it sets for "<key> <name>" (1 = the default).
+const COLOUR_NAMES: [&str; 9] = ["", "", "Orange", "Yellow", "Blue", "Black", "Purple", "Light Blue", "Green"];
+/// Platform_Multiplayer.UIColourRemap: colour index (replay::colours, 1 red, 2 blue, ...) -> UpdateUITroopSprites' colour.
+pub const UI_COLOUR_REMAP: [u8; 9] = [0, 1, 4, 2, 3, 6, 5, 7, 8];
+/// The colour atlases' HUD textures (shc_extract::ui::ATLASES[1..]): 8, 9.
+pub const COLOUR_TEX: u32 = 8;
+
+/// UI-Colour1/2Atlas from the export (shc_extract::ui::atlases): (size, mips, rects); None when missing or cut short
+/// (an export from before them: the HUD keeps the default colour).
+pub fn colour_atlas(dir: &std::path::Path, name: &str) -> Option<(u32, u32, HashMap<String, [f32; 4]>)> {
+    let t = std::fs::read_to_string(dir.join(format!("{name}.tsv"))).ok()?;
+    let mut rows = t.lines().map(|l| l.split('\t').collect::<Vec<_>>());
+    let (w, mips) = match rows.next()?.as_slice() { ["#size", w, m, ..] => (w.parse::<u32>().ok()?, m.parse::<u32>().ok()?), _ => return None };
+    let len: u64 = (0..mips).map(|m| ((w >> m) as u64).div_ceil(4).pow(2) * 16).sum();
+    if std::fs::metadata(dir.join(format!("{name}.bc"))).ok()?.len() != len { return None; }
+    let rects = rows.filter_map(|c| Some((c.first()?.to_string(), [c.get(1)?.parse().ok()?, c.get(2)?.parse().ok()?, c.get(3)?.parse().ok()?, c.get(4)?.parse().ok()?]))).collect();
+    Some((w, mips, rects))
+}
 const CREAM: [f32; 4] = [0xef as f32 / 255.0, 0xf3 as f32 / 255.0, 0xc6 as f32 / 255.0, 1.0]; // #EFF3C6
 const GREEN: [f32; 4] = [0.0, 136.0 / 255.0, 0.0, 1.0]; // BookColour_Green
 const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];             // BookColour_Red
@@ -335,7 +395,7 @@ struct Glyph { uv: [f32; 4], m: fontdue::Metrics }
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Hit { Tab(usize), Build(usize), Stance(usize), Order(usize), Panel, Act(i32, i32, i32), Delete(i32), TradeType(i32), TradeGood(i32, i32), Trade(i32, i32), Radar, Engi(bool), Recruit(i32, Option<&'static str>), Goals, Options, Mode(i32), Help(i32),
     Workshop(i32, i32), Slider(u8, i32), Auto(u8, i32, i32), Confirm(u8), Briefing,
-    Ally(u8, i32), Fb(i32), Cg(u8, i32) } // overlays.rs: allies panel, Free Build menu, control groups
+    Ally(u8, i32), Fb(i32), Cg(u8, i32), Merit(u8, i32) } // overlays.rs: allies panel, Free Build menu, control groups, standings
 
 /// The trading panel's auto-trade view (HUD_Buildings TradePost_Trade_Auto): on / off, the buy and sell slider
 /// positions (indices into SliderCurve1000) and the per-good settings it was opened from.
@@ -377,7 +437,23 @@ const BEDOUIN: [Recruit; 8] = [(78, 146.0, 47.0, 108.0, 0.0, 58), (79, 429.0, 47
     (85, 288.0, 47.0, 110.0, 0.0, 79)];
 const GUILD: [Recruit; 2] = [(30, 300.0, 20.0, 94.0, 39.0, 22), (29, 362.0, 18.0, 107.0, 53.0, 25)];
 const TUNNELLER: [Recruit; 1] = [(5, 300.0, 20.0, 103.0, 47.0, 28)];
+/// Ours: the Sassanid Stable's one button (shc_sim::ext::RECRUIT_BYTE), the barracks' knight sprite.
+const SASSANID_KNIGHT: i32 = 0x5a;
+const SASSANID: [Recruit; 1] = [(SASSANID_KNIGHT, 430.0, 20.0, 125.0, 0.0, 19)];
 const MONK: [Recruit; 1] = [(37, 310.0, 20.0, 113.0, 0.0, 55)];
+
+/// HUD_Buildings.xaml TroopNameText: centred in Margin 20 .. right 150 (barracks), Arab* / Bedouin*TroopNameText
+/// in 20 .. right 300 (merc post 44, bedouin stockade 63): the strip's centre x in the 800 px panel.
+fn name_centre(sub: i32) -> f32 {
+    let right = if matches!(sub, 44 | 63) { 300.0 } else { 150.0 };
+    20.0 + (800.0 - 20.0 - right) / 2.0
+}
+
+/// The replay tick at the top right (`draw`), for checking values against a recording: only with SHC_TICK set.
+fn show_tick() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SHC_TICK").is_some())
+}
 
 /// FatControler's most of troop `t` one recruit click can make (lastTroopsAmountToMakeMax): free peasants (the heavy
 /// camel takes two), the gold, then the weapon / armour / horse stock it needs.
@@ -388,7 +464,8 @@ fn recruit_max(t: i32, st: &HudState) -> i32 {
     if n > 1 {
         let r = |k: usize| st.resources[k];
         let need = match t { 22 => vec![r(17)], 24 => vec![r(19)], 26 => vec![r(21), r(23)], 23 => vec![r(18), r(23)], 25 => vec![r(20), r(24)],
-            27 => vec![r(22), r(24)], 28 => vec![r(22), r(24), st.horses as i32], _ => vec![] };
+            27 => vec![r(22), r(24)], 28 => vec![r(22), r(24), st.horses as i32],
+            SASSANID_KNIGHT => vec![r(20), r(24), st.horses as i32], _ => vec![] };
         n = need.into_iter().fold(n, i32::min);
     }
     n
@@ -399,7 +476,7 @@ fn gold_cost(t: i32, st: &HudState) -> i32 {
     match t {
         5 | 30 => 30, 29 => st.ladderman_cost as i32, 37 => 10, 22 | 72 => 12, 23 | 25 | 26 => 20, 24 => 8, 27 | 28 | 78 => 40,
         70 => 75, 71 => 5, 73 => 60, 74 | 75 | 85 => 80, 76 | 79 | 83 => 100, 77 | 84 => 50, 80 => st.eunuch_cost as i32,
-        81 => 130, 82 => 25, _ => 0,
+        81 => 130, 82 => 25, SASSANID_KNIGHT => 60, _ => 0,
     }
 }
 
@@ -418,13 +495,16 @@ fn recruit_why(t: i32, st: &HudState) -> Option<Option<&'static str>> {
         30 => st.guild_avail[1] > 0,
         29 => st.guild_avail[2] > 0,
         37 => st.guild_avail[0] > 0, // monk_available
+        SASSANID_KNIGHT => st.sassanid.is_some(),
         _ => true,
     };
     let r = &st.resources;
     let kit = match t {
         22 => r[17] > 0, 24 => r[19] > 0, 26 => r[21] > 0 && r[23] > 0, 23 => r[18] > 0 && r[23] > 0, 25 => r[20] > 0 && r[24] > 0,
-        27 => r[22] > 0 && r[24] > 0, 28 => r[22] > 0 && r[24] > 0 && st.horses > 0, _ => true,
+        27 => r[22] > 0 && r[24] > 0, 28 => r[22] > 0 && r[24] > 0 && st.horses > 0,
+        SASSANID_KNIGHT => r[20] > 0 && r[24] > 0 && st.horses > 0, _ => true,
     };
+    if t == SASSANID_KNIGHT && st.sassanid == Some(5) { return Some(Some("EXT_NEEDS_BARRACKS")); } // ext::NO_BARRACKS
     let why = if st.peasants <= (t == 83) as i16 { Some("TEXT_FEEDBACK_020") } else if gold_cost(t, st) > r[15] { Some("TEXT_FEEDBACK_004") }
         else if !kit { Some("TEXT_IN_BARRACKS_002") } else { None };
     shown.then_some(why)
@@ -444,6 +524,8 @@ const GREY: [f32; 4] = [0xdd as f32 / 255.0, 0xdd as f32 / 255.0, 0xdd as f32 / 
 
 pub struct Ui {
     pub(crate) rects: HashMap<String, [f32; 4]>, // x, y, w, h (TexturePacker, top-left origin)
+    colour_rects: HashMap<String, (u32, [f32; 4], f32)>, // the colour atlases' sprites: HUD texture, rect, atlas size
+    pub colour: u8, // UpdateUITroopSprites' colour (1 = default): the player's colour variants of the sprites it sets
     strings: HashMap<String, String>,
     goods: Vec<(usize, f32, f32, String)>, // resource index, left, bottom, icon
     pub(crate) build: Vec<Button>,
@@ -458,11 +540,13 @@ pub struct Ui {
     hits: Vec<([f32; 4], Hit)>, // last frame's clickable rects (logical px)
     pub screen: usize,         // BuildIconLists row: 1 castle .. 6 food
     pub selected: Option<usize>,
+    tent: Option<i32>, // a siege tent tool an EngBuild_* button returned (GameAction → EditorDirector.placeBuilding)
     pub radar: bool, // a minimap texture (HUD texture 2) has been uploaded: draw it
     pub actions: Vec<[i32; 3]>, // DLL_GameAction(action, s, v) from panel buttons, drained by the caller
     pub actions4: Vec<[i32; 4]>, // the same with a third argument (the allies panel's orders and goods)
     pub drag: Option<([f32; 4], u8, i32, f32)>, // a slider held down: its box, Hit::Slider (k, id), the cursor x last applied
     allies: Option<overlays::Allies>, // the allies panel is open (AlliesPanelVisible)
+    merit: Option<overlays::Merit>,   // the standings panel is open (MeritPanelVisible)
     fb: Option<overlays::FreeBuild>,  // the Free Build menu is open (Show_HUD_FreebuildMenu)
     cg: bool,                         // the control groups list is up (Show_HUD_ControlGroups)
     lords: Lords,                     // the last frame's lord table (for the allies / Free Build clicks)
@@ -506,15 +590,21 @@ impl Ui {
         let tsv = |f: &str| -> Option<Vec<Vec<String>>> { Some(read(f)?.lines().map(|l| l.split('\t').map(String::from).collect()).collect()) };
         let num = |s: &str| s.parse::<f32>().unwrap();
         let rects = tsv("rects.tsv")?.into_iter().map(|c| (c[0].clone(), [num(&c[1]), num(&c[2]), num(&c[3]), num(&c[4])])).collect();
+        let colour_rects = shc_extract::ui::ATLASES[1..].iter().zip(COLOUR_TEX..).filter_map(|(a, t)| colour_atlas(dir, a).map(|(w, _, r)| (t, w, r)))
+            .flat_map(|(t, w, r)| r.into_iter().map(move |(k, r)| (k, (t, r, w as f32)))).collect();
         let strings = tsv("strings.tsv")?.into_iter().filter(|c| c.len() > 1).map(|c| (c[0].clone(), c[1].clone())).collect();
         let goods = tsv("goods.tsv")?.into_iter().map(|c| (c[0].parse().unwrap(), num(&c[1]), num(&c[2]), c[3].clone())).collect();
         let build = tsv("build.tsv")?.into_iter().map(|c| Button {
-            screen: c[0].parse().unwrap(), name: c[2].clone(), structure: c[3].clone(), s1: c[4].clone(), s2: c[5].clone(),
+            screen: c[0].parse().unwrap(), name: c[2].clone(), structure: c[3].clone(), s1: bound(&c[4]), s2: bound(&c[5]), // Ballista: "{Binding UIBuildingsM005}"
             x: num(&c[6]), y: num(&c[7]), w: num(&c[8]), h: num(&c[9]), help: c[10].clone(),
             mapper: c.get(11).and_then(|v| v.parse().ok()).unwrap_or(0), // old exports: no column -> no placement
         }).chain(std::iter::once(Button { // SideTabs' GameDeleteButton: ButtonBuildCommand STRUCT_NEW_DELETE = the delete tool
             screen: 0, name: "GameDeleteButton".into(), structure: String::new(), s1: "UI-Buttons A041".into(), s2: "UI-Buttons A042".into(),
             x: 0.0, y: 0.0, w: 20.0, h: 21.0, help: "TEXT_BUBBLE_HELP_TEXT_146".into(), mapper: 0x27,
+        })).chain(std::iter::once(Button { // ours: the Sassanid Stable (Extended rules, shc_sim::ext), after the oil
+            // smelter; the Military row is full, so with ours on it the row is drawn `SQUEEZE` smaller (`squeeze`)
+            screen: 9, name: "ButtonBuildSassanidStable".into(), structure: "STRUCT_STABLES".into(), s1: "UI-Buildings M007".into(), s2: "UI-Buildings M008".into(),
+            x: 476.0, y: 2.0, w: 0.0, h: 65.0, help: "EXT_SASSANID_STABLE".into(), mapper: SASSANID_STABLE,
         })).collect();
         let tabs = tsv("tabs.tsv")?.into_iter().map(|c| ([c[1].clone(), c[2].clone(), c[3].clone(), c[4].clone()], num(&c[5]))).collect();
         let troops = tsv("troops.tsv")?.into_iter().map(|c| (c[0].parse().unwrap(), (c[3].clone(), c[4].clone()))).collect();
@@ -522,12 +612,13 @@ impl Ui {
         let font = fontdue::Font::from_bytes(std::fs::read(dir.join("font.ttf")).ok()?, Default::default()).ok()?;
         let mut font_rgba = vec![0u8; (FONT_PX * FONT_PX * 4) as usize];
         white_block(&mut font_rgba);
-        Some(Self { rects, strings, goods, build, tabs, troops, titles, font, glyphs: HashMap::new(), font_rgba, pen: (4, 0, 0), font_dirty: true,
-            hits: vec![], screen: 1, selected: None, radar: false, actions: vec![], actions4: vec![], drag: None, allies: None, fb: None, cg: false, lords: Lords::default(), delete: None, radar_click: None, radar_at: [0.0; 4], message: None, sub_mode: None, shift: false, open_menu: false, help: None, ctrl: false, stance: None, engi: false, order: None, ost: Default::default(), bar: None, seen: (0, 0), goals: false, edge_mask: 0.0, rclick: None, hidden: false, flat: false,
+        Some(Self { rects, colour_rects, colour: 1, strings, goods, build, tabs, troops, titles, font, glyphs: HashMap::new(), font_rgba, pen: (4, 0, 0), font_dirty: true,
+            hits: vec![], screen: 1, selected: None, tent: None, radar: false, actions: vec![], actions4: vec![], drag: None, allies: None, merit: None, fb: None, cg: false, lords: Lords::default(), delete: None, radar_click: None, radar_at: [0.0; 4], message: None, sub_mode: None, shift: false, open_menu: false, help: None, ctrl: false, stance: None, engi: false, order: None, ost: Default::default(), bar: None, seen: (0, 0), goals: false, edge_mask: 0.0, rclick: None, hidden: false, flat: false,
             open_briefing: false, confirm: None, auto: None, auto_goods: ([[0; 25]; 2], [0; 25]), prev_trade: 0, trade_err: None, seen_ret: 0, last_panel: (0, 0), panel_tip: None, down: false, s: 1.0, w: 0.0, h: 0.0 })
     }
 
     pub(crate) fn text_of(&self, key: &str) -> String {
+        if let Some(&(_, t)) = EXT_TEXT.iter().find(|e| e.0 == key) { return t.to_string(); }
         let s = self.strings.get(key).map_or(key, |s| s.as_str());
         // strings.tsv keeps CSV quoting: """No taxes""" is "No taxes"
         match s.strip_prefix('"').and_then(|s| s.strip_suffix('"')) { Some(q) => q.replace("\"\"", "\""), None => s.to_string() }
@@ -545,15 +636,25 @@ impl Ui {
         out.push((tex, [b, d, c]));
     }
 
+    /// Sprite `key` as drawn: (HUD texture, rect, atlas size). In the player's colour where it has a variant: XAML binds
+    /// every such key through UpdateUITroopSprites' properties (none is a StaticResource), so this is the game's pick.
+    pub(crate) fn sprite(&self, key: &str) -> Option<(u32, [f32; 4], f32)> {
+        if let Some(n) = COLOUR_NAMES.get(self.colour as usize).filter(|n| !n.is_empty()) {
+            let k = format!("{key} {n}");
+            if let Some(&s) = self.colour_rects.get(&k) { return Some(s); }
+            if let Some(&r) = self.rects.get(&k) { return Some((0, r, ATLAS)); } // the Blue ones sit in UI-MasterAtlas
+        }
+        self.rects.get(key).map(|&r| (0, r, ATLAS))
+    }
+
     /// Atlas sprite `key` stretched to screen rect `p` (x0, y0, x1, y1). The texture is stored bottom row first.
     pub(crate) fn img(&self, out: &mut Vec<HudTri>, key: &str, p: [f32; 4], color: [f32; 4]) {
-        let Some(&[x, y, w, h]) = self.rects.get(key) else { return };
-        Self::quad(out, 0, p, [x / ATLAS, (ATLAS - y) / ATLAS, (x + w) / ATLAS, (ATLAS - y - h) / ATLAS], color, 0.0);
+        self.img_part(out, key, [0.0, 0.0, 1.0, 1.0], p, color);
     }
 
     /// WPF `Image` (Stretch=Uniform) inside box `p`: fit, keep aspect, centre.
     pub(crate) fn img_fit(&self, out: &mut Vec<HudTri>, key: &str, p: [f32; 4], color: [f32; 4]) {
-        let Some(&[_, _, w, h]) = self.rects.get(key) else { return };
+        let Some((_, [_, _, w, h], _)) = self.sprite(key) else { return };
         let k = ((p[2] - p[0]) / w).min((p[3] - p[1]) / h);
         let (cx, cy) = ((p[0] + p[2]) / 2.0, (p[1] + p[3]) / 2.0);
         self.img(out, key, [cx - w * k / 2.0, cy - h * k / 2.0, cx + w * k / 2.0, cy + h * k / 2.0], color);
@@ -564,13 +665,28 @@ impl Ui {
         Self::quad(out, 1, p, [t, t, t, t], color, 0.0);
     }
 
+    /// Empty glyph cache and atlas (bar the white fill block): every glyph is rasterised again on its next use.
+    fn font_reset(&mut self) {
+        self.glyphs.clear();
+        self.font_rgba.fill(0);
+        white_block(&mut self.font_rgba);
+        self.pen = (4, 0, 0);
+        self.font_dirty = true;
+    }
+
     fn glyph(&mut self, c: char, px: u32) -> &Glyph {
         if !self.glyphs.contains_key(&(c, px)) {
             let (m, cov) = self.font.rasterize(c, px as f32);
             let (gw, gh) = (m.width as u32, m.height as u32);
             if self.pen.0 + gw + 2 > FONT_PX { self.pen = (0, self.pen.1 + self.pen.2 + 2, 0); }
+            // atlas full (every UI scale, menu and text size adds glyphs): start over rather than cache a blank letter.
+            // ponytail: glyphs already drawn this frame read the cleared atlas for one frame
+            if self.pen.1 + 4 + gh >= FONT_PX {
+                self.font_reset();
+                if self.pen.0 + gw + 2 > FONT_PX { self.pen = (0, 2, 0); }
+            }
             let (x0, y0) = (self.pen.0, self.pen.1 + 4);
-            if y0 + gh < FONT_PX { // ponytail: atlas full = glyph not drawn; 1024² holds thousands at HUD sizes
+            if y0 + gh < FONT_PX && x0 + gw < FONT_PX { // only a glyph bigger than the atlas is skipped
                 for (i, a) in cov.iter().enumerate() {
                     let o = (((y0 + i as u32 / gw.max(1)) * FONT_PX + x0 + i as u32 % gw.max(1)) * 4) as usize;
                     self.font_rgba[o..o + 4].copy_from_slice(&[255, 255, 255, *a]);
@@ -614,11 +730,14 @@ impl Ui {
     }
 
     /// eMappers id of the highlighted build button (0 / None = nothing to place).
-    pub fn selected_mapper(&self) -> Option<i32> { self.selected.map(|i| self.build[i].mapper).filter(|&m| m > 0) }
+    pub fn selected_mapper(&self) -> Option<i32> { self.selected.map(|i| self.build[i].mapper).filter(|&m| m > 0).or(self.tent) }
+
+    /// No build tool any more (MainControls StopAllPlacement / EditorDirector.CancelPlacement).
+    pub fn drop_tool(&mut self) { (self.selected, self.tent) = (None, None); }
 
     /// A build hotkey (keys.rs PLACE, EditorDirector.placeBuildingInteraction): mapper `m`'s button picked, its tab shown.
     pub fn pick_mapper(&mut self, m: i32) {
-        if let Some(i) = self.build.iter().position(|b| b.mapper == m) { (self.screen, self.selected) = (self.build[i].screen, Some(i)); }
+        if let Some(i) = self.build.iter().position(|b| b.mapper == m) { (self.screen, self.selected, self.tent) = (self.build[i].screen, Some(i), None); }
     }
 
     /// The cursor is over a HUD element (last frame's layout).
@@ -657,17 +776,18 @@ impl Ui {
             Hit::Workshop(id, g) => self.actions.push([1023, if self.shift { -1 } else { id }, g]),
             Hit::Slider(k, id) => { self.drag = Some((p, k, id, c[0])); self.slider(k, id, frac) }
             Hit::Ally(k, v) => self.ally_click(k, v),
+            Hit::Merit(k, v) => self.merit_click(k, v),
             Hit::Fb(v) => self.fb_click(v),
             Hit::Cg(op, g) => self.cg_click(op, g),
             Hit::Auto(k, id, g) => self.auto_click(k, id, g),
             Hit::Tab(t) => {
                 if self.screen != t + 1 { crate::audio::ui(crate::audio::ui_id::TAB_CLICK[t], 1.0); crate::audio::ui(crate::audio::ui_id::SWISH, 1.0); }
                 self.screen = t + 1;
-                self.selected = None;
+                self.drop_tool();
             }
             Hit::Build(b) => match submenu(&self.build[b].name) {
-                Some(s) => { if self.screen != s { crate::audio::ui(crate::audio::ui_id::SWISH, 1.0); } self.screen = s; self.selected = None; }
-                None => self.selected = Some(b),
+                Some(s) => { if self.screen != s { crate::audio::ui(crate::audio::ui_id::SWISH, 1.0); } self.screen = s; self.drop_tool(); }
+                None => (self.selected, self.tent) = (Some(b), None),
             },
             // Troops_ChangeStance (1020, v = 287..289); Troops_Disband 1011 / Stop 1010 / Patrol 1019
             Hit::Stance(k) => { self.stance = Some(k); self.actions.push([1020, -1, 287 + k as i32]); }
@@ -857,7 +977,7 @@ impl Ui {
         let bg = self.pr(o, 0.0, 0.0, 800.0, 170.0);
         self.img(out, "UI-HUD 003", bg, white);
         self.hits.push((bg, Hit::Panel));
-        let title = self.text_of(&self.title_key(st.app_sub_mode, st.in_structure_type));
+        let title = self.panel_title(st);
         self.label(out, &title, o, 20.0, 24.0, 32.0, 0.0, BLACK);
         let (sub, id) = (st.app_sub_mode, st.in_structure);
         let ty = if sub == 11 { 10 } else { st.in_structure_type }; // setUpInbuilding: the stockpile panel's type
@@ -867,6 +987,7 @@ impl Ui {
             4 => self.granary(st, out, o),
             23 => { self.recruit(st, out, o, 170.0, &GUILD, cursor); } // engineers' guild
             24 => self.one_recruit(st, out, o, &TUNNELLER, "TEXT_IN_TUNNELLERS_GUILD_002", cursor),
+            34 if st.sassanid.is_some() => { self.recruit(st, out, o, 170.0, &SASSANID, cursor); } // ours: a Sassanid Stable
             96 => { // cathedral: monks (Arab lords: temple guards, their own no-gold line)
                 let arab = matches!(st.lord_type, 1 | 2 | 6 | 7);
                 self.one_recruit(st, out, o, &MONK, if arab { "TEXT_NEW_CTEXT_259" } else { "TEXT_IN_CATHEDRAL_002" }, cursor);
@@ -892,7 +1013,8 @@ impl Ui {
         }
         // ShowInfoPanel: BuildingLine3Text, 18 px wrapped in 380×60 at (140, bottom 40)
         if let Some(t) = self.info_text(st, sub, ty) {
-            for (k, l) in self.wrap(&t, 18.0, 380.0).iter().enumerate() { self.label(out, l, o, 140.0, 70.0 + 22.0 * k as f32, 18.0, 0.0, BLACK); }
+            let w = if st.sassanid.is_some() { 280.0 } else { 380.0 }; // ours: room for the Sassanid recruit button
+            for (k, l) in self.wrap(&t, 18.0, w).iter().enumerate() { self.label(out, l, o, 140.0, 70.0 + 22.0 * k as f32, 18.0, 0.0, BLACK); }
         }
         let plain = !report_panel(sub) && sub != 70;
         // WorkerPanel (GetBuildingSleepable = IsWorkerBuilding): the ZZZ toggle, ToggleSleep (1003); lit while asleep
@@ -903,9 +1025,10 @@ impl Ui {
         // ShowRepairPanel (GetBuildingShowRepair: towers, gatehouses): Repair (RepairBuilding 1002) + the HP bar
         if plain && sub != 53 && matches!(ty, 45..=48 | 74..=78) { self.repair(st, out, o, cursor); }
         // Delete (ours: the original panels have none, only the SideTabs demolish tool): that tool's sprite in the
-        // ZZZ / help column. Not for the keep or the trading post's pages.
+        // ZZZ / help column. Not for the keep or the trading post's pages. The stockpile / armoury goods row (x 150..540,
+        // y 60..112) fills that column: there above the icons, clear of the 8th good's count.
         if plain && !matches!(sub, 2 | 25 | 53..=57) {
-            let p = self.pr(o, 511.0, 88.0, 30.0, 32.0);
+            let p = self.pr(o, 511.0, delete_y(sub), 30.0, 32.0);
             if Self::inside(p, cursor) { self.panel_tip = Some(self.text_of("TEXT_BUBBLE_HELP_TEXT_146")); }
             self.button(out, p, "UI-Buttons A041", "UI-Buttons A042", false, cursor, Some(Hit::Delete(id)));
         }
@@ -926,7 +1049,7 @@ impl Ui {
             let Some(why) = recruit_why(t, st) else { continue };
             let ok = why.is_none();
             let key = |k: u32| format!("UI-Buttons O{k:03}");
-            let w = if w > 0.0 { w } else { self.rects.get(&key(n)).map_or(h / 2.0, |r| h * r[2] / r[3]) };
+            let w = if w > 0.0 { w } else { self.sprite(&key(n)).map_or(h / 2.0, |(_, r, _)| h * r[2] / r[3]) };
             let p = self.pr(o, x, ph - b - h, w, h);
             let over = Self::inside(p, cursor);
             if over { hover = Some(t); }
@@ -945,8 +1068,8 @@ impl Ui {
             let max = recruit_max(t, st);
             let n = if self.shift { max.min(5) } else if self.ctrl { max } else { 1 };
             let cost = format!("{} {}", self.text_of("TEXT_IN_BARRACKS_003"), gold_cost(t, st) * n);
-            let arab_monk = t == 37 && matches!(st.lord_type, 1 | 2 | 6 | 7);
-            let mut name = self.text_of(&if arab_monk { "TEXT_NEW_CTEXT_256".to_string() } else { format!("TEXT_CHIMP_NAMES_{:03}", t + 1) });
+            let mut name = self.troop_name(t, st);
+            if t == SASSANID_KNIGHT { self.panel_tip = Some(self.text_of("EXT_SASSANID_KNIGHT_HELP")); } // ours: what it is
             if n > 1 { name += &format!(" x{n}"); }
             let (shift, ctrl) = (format!("[{}] x{}", self.text_of("TEXT_HOT_KEYS_079").to_uppercase(), max.min(5)), format!("[{}] x{max}", self.text_of("TEXT_HOT_KEYS_080").to_uppercase()));
             if guild {
@@ -955,7 +1078,7 @@ impl Ui {
                 self.label(out, &ctrl, o, 130.0, ph - 28.0, 16.0, 0.0, BLACK);
             } else {
                 self.strip(out, o, 10.0, &cost, 0.0, Some("UISprites F001"), None);
-                self.strip(out, o, 335.0, &name, 0.5, None, Some(&format!("{shift}   {ctrl}")));
+                self.strip(out, o, name_centre(st.app_sub_mode), &name, 0.5, None, Some(&format!("{shift}   {ctrl}")));
             }
         }
         let free = format!("{} {}", self.text_of("TEXT_IN_BARRACKS_004"), st.peasants);
@@ -1013,8 +1136,8 @@ impl Ui {
 
     /// Part `f` (fractions x0, y0, x1, y1) of atlas sprite `key` into screen rect `p`.
     fn img_part(&self, out: &mut Vec<HudTri>, key: &str, f: [f32; 4], p: [f32; 4], color: [f32; 4]) {
-        let Some(&[x, y, w, h]) = self.rects.get(key) else { return };
-        Self::quad(out, 0, p, [(x + f[0] * w) / ATLAS, (ATLAS - y - f[1] * h) / ATLAS, (x + f[2] * w) / ATLAS, (ATLAS - y - f[3] * h) / ATLAS], color, 0.0);
+        let Some((t, [x, y, w, h], a)) = self.sprite(key) else { return };
+        Self::quad(out, t, p, [(x + f[0] * w) / a, (a - y - f[1] * h) / a, (x + f[2] * w) / a, (a - y - f[3] * h) / a], color, 0.0);
     }
 
     /// ImageBrush TileMode=Tile: `key` in `tw`×`th` screen-px tiles from the top-left of `p`, cut at the far edges.
@@ -1317,6 +1440,7 @@ impl Ui {
             return Some(format!("{}{}", st.ai_clock as i32 * 100 / n, self.text_of("TEXT_IN_SIEGE_TENT_007")));
         }
         if sub == 64 { return Some(self.text_of("TEXT_NEW_CTEXT_385")); }
+        if st.sassanid.is_some() { return Some(self.text_of("EXT_SASSANID_STABLE_HELP")); } // ours: the Sassanid Stable
         if report_panel(sub) { return None; }
         let key = match ty {
             1 => "TEXT_IN_HOUSE_002".to_string(), 21 => "TEXT_IN_QUARRYPILE_002".into(), 4 => "TEXT_IN_OXEN_BASE_004".into(),
@@ -1512,6 +1636,18 @@ impl Ui {
     }
 
     /// HUD_Buildings.GetBuildingTitle.
+    /// The building panel's title (ours: a Sassanid Stable's own name).
+    fn panel_title(&self, st: &HudState) -> String {
+        if st.sassanid.is_some() { return self.text_of("EXT_SASSANID_STABLE"); }
+        self.text_of(&self.title_key(st.app_sub_mode, st.in_structure_type))
+    }
+
+    /// A recruit button's troop name (TroopNameText): the Arab lords' temple guard, our Sassanid Knight, else eChimps'.
+    fn troop_name(&self, t: i32, st: &HudState) -> String {
+        let arab_monk = t == 37 && matches!(st.lord_type, 1 | 2 | 6 | 7);
+        self.text_of(&if arab_monk { "TEXT_NEW_CTEXT_256".to_string() } else if t == SASSANID_KNIGHT { "EXT_SASSANID_KNIGHT".to_string() } else { format!("TEXT_CHIMP_NAMES_{:03}", t + 1) })
+    }
+
     fn title_key(&self, panel: i32, ty: i32) -> String {
         match panel {
             4 => "TEXT_IN_GRANARY_001".into(),
@@ -1625,7 +1761,7 @@ impl Ui {
             let troops = st.app_mode == 14 && matches!(st.app_sub_mode, 61 | 62);
             let k = match kind { 46 => 131, 45 => 133, 47 => 127, k => k };
             let m = PICK.iter().find(|p| p.0 == k).map(|p| p.1).filter(|&m| st.available.get(m as usize).copied().unwrap_or(true));
-            if let (false, Some(i)) = (troops, m.and_then(|m| self.build.iter().position(|b| b.mapper == m))) { self.selected = Some(i); }
+            if let (false, Some(i)) = (troops, m.and_then(|m| self.build.iter().position(|b| b.mapper == m))) { (self.selected, self.tent) = (Some(i), None); }
         }
     }
 
@@ -1758,16 +1894,11 @@ impl Ui {
     /// One frame of HUD triangles for window size `w`×`h` (logical px), mouse at `cursor`.
     pub fn draw(&mut self, st: &HudState, w: f32, h: f32, cursor: [f32; 2], tick: usize, ghost: Option<&Ghost>) -> Vec<HudTri> {
         let s = crate::ux::hud_scale(w, h); // Viewbox fit × the player's UI scale (ux.rs, ⌘= / ⌘-)
-        if s != self.s { // glyphs are rasterised per scale: drop the old ones so resizing can't fill the atlas
-            self.glyphs.clear();
-            self.font_rgba.fill(0);
-            white_block(&mut self.font_rgba);
-            self.pen = (4, 0, 0);
-            self.font_dirty = true;
-        }
+        if s != self.s { self.font_reset() } // glyphs are rasterised per scale: drop the old ones
         (self.w, self.h, self.s) = (w, h, s);
         let mut out = vec![];
         self.hits.clear();
+        self.colour = st.lords.colour.max(1);
         if self.hidden { // MainViewModel.SetVisibleState(false): nothing but the right-click menu that brings it back
             self.rclick_draw(&mut out);
             return out;
@@ -1790,6 +1921,7 @@ impl Ui {
         let (a, r, n) = *ACTION_RET.lock().unwrap();
         if n != self.seen_ret {
             self.seen_ret = n;
+            if matches!(a, 1014..=1018 | 1060) && r > 0 { (self.selected, self.tent) = (None, Some(r)); }
             if matches!(a, 1024 | 1025) { self.trade_err = matches!(r, 9 | 10 | 13..=18).then(|| self.text_of(&format!("TEXT_IN_TRADEPOST_{:03}", r + 1))); }
         }
         if !(st.app_mode == 14 && matches!(st.app_sub_mode, 61 | 62)) { self.confirm = None; } // the troops panel closed
@@ -1846,13 +1978,15 @@ impl Ui {
             self.img(&mut out, "UI-HUD 007", [x0, y0, x0 + 876.0 * self.s, y0 + 103.0 * self.s], white);
             // BuildMenuGrid: 496×90 centred in its slot -> (275, 55), inner grid -141, RenderTransform X 16 -> (150, 55)
             let (bx, by) = (150.0, 55.0);
+            let ours = self.screen == 9 && variant_ok(SASSANID_STABLE, st); // ours on the Military row: squeeze it
             for i in 0..self.build.len() {
                 let b = &self.build[i];
                 if b.screen != self.screen || !variant_ok(b.mapper, st) { continue; }
                 // explicit Width/Height; a missing one follows the sprite aspect (Image Stretch=Uniform)
-                let r = self.rects.get(&b.s1).copied().unwrap_or([0.0, 0.0, 1.0, 1.0]);
+                let r = self.sprite(&b.s1).map_or([0.0, 0.0, 1.0, 1.0], |s| s.1);
                 let (bw, bh) = match (b.w, b.h) { (0.0, h) => (h * r[2] / r[3], h), (w, 0.0) => (w, w * r[3] / r[2]), wh => wh };
                 let (mx, my) = margin(b.mapper, st).unwrap_or((b.x, b.y));
+                let (mx, my, bw, bh) = if ours { squeeze(mx, my, bw, bh) } else { (mx, my, bw, bh) };
                 let [x0, y0] = at(self, bx + mx, by + my);
                 let p = [x0, y0, x0 + bw * self.s, y0 + bh * self.s];
                 if !mapper_on(b.mapper, st) { // locked: SpriteLocked, no hit test
@@ -1866,7 +2000,7 @@ impl Ui {
                     self.img(&mut out, "UI Player Border", [p[0] - 3.0, p[1] - 3.0, p[2] + 3.0, p[3] + 3.0], [1.0; 4]);
                 }
                 let key = if hover || sel { &b.s2 } else { &b.s1 };
-                self.img_fit(&mut out, key, p, white);
+                self.img_fit(&mut out, key, p, if b.mapper == SASSANID_STABLE { SASSANID_TINT } else { white });
                 if hover { // HUD_Main rollover: name, then up to two costs and (what the player has) (tooltip.rs)
                     crate::audio::hover(p, if b.name.starts_with("ButtonBuildSub") && !b.name.ends_with("Return") { crate::audio::ui_id::SUBMENU_HOVER } else { crate::audio::ui_id::BUILD_HOVER }, 1.0);
                     let c = st.costs.0.get(b.mapper.max(0) as usize).copied().unwrap_or_default();
@@ -1904,17 +2038,25 @@ impl Ui {
             // SideTabs (HUD_Main.xaml: a right-aligned stack at margin 4,22 of 20 px buttons with right margin 262, so
             // x 632): options, briefing (ButtonGoToBriefingCommand: main.rs opens the mission's briefing), delete tool
             // (pressed look while held), undo (GameAction Undo 1036).
+            // Each one's Tag in the hover-text place, as the build tabs' (MouseEnterBuildingIconHandler).
             let del = self.build.iter().position(|b| b.screen == 0 && b.mapper == 0x27);
-            let tabs = [(38.0, 36.0, "UI-Buttons A033", "UI-Buttons A034", Some(Hit::Options)), (76.0, 28.0, "UI-Buttons A037", "UI-Buttons A038", Some(Hit::Briefing)),
-                (109.0, 21.0, "UI-Buttons A041", "UI-Buttons A042", del.map(Hit::Build)), (136.0, 22.0, "UI-Buttons A045", "UI-Buttons A046", Some(Hit::Act(1036, 0, 0)))];
-            for (y, bh, s1, s2, hit) in tabs {
+            let tabs = [(38.0, 36.0, "UI-Buttons A033", "UI-Buttons A034", Some(Hit::Options), "TEXT_MAINOPTIONS_001"),
+                (76.0, 28.0, "UI-Buttons A037", "UI-Buttons A038", Some(Hit::Briefing), "TEXT_MISSION_BUTTONS_008"),
+                (109.0, 21.0, "UI-Buttons A041", "UI-Buttons A042", del.map(Hit::Build), "TEXT_BUBBLE_HELP_TEXT_146"),
+                (136.0, 22.0, "UI-Buttons A045", "UI-Buttons A046", Some(Hit::Act(1036, 0, 0)), "TEXT_BUBBLE_HELP_TEXT_197")];
+            for (y, bh, s1, s2, hit, tag) in tabs {
                 let held = del.is_some() && self.selected == del && matches!(hit, Some(Hit::Build(_)));
                 let (s1, s2) = if held { ("UI-Buttons A043", "UI-Buttons A043") } else { (s1, s2) };
                 let [x0, y0] = at(self, 632.0, y);
-                self.button(&mut out, [x0, y0, x0 + 20.0 * self.s, y0 + bh * self.s], s1, s2, false, cursor, hit);
+                let p = [x0, y0, x0 + 20.0 * self.s, y0 + bh * self.s];
+                if Self::inside(p, cursor) { rollover = Some(tooltip::Rollover { name: self.text_of(tag), ..Default::default() }); }
+                self.button(&mut out, p, s1, s2, false, cursor, hit);
             }
             let tab = at(self, 553.0, 166.0 - 35.0);
-            self.allies_tab(st, &mut out, cursor, tab); // ButtonAllies (overlays.rs)
+            let allies = self.allies_tab(st, &mut out, cursor, tab); // ButtonAllies (overlays.rs)
+            let tab = at(self, 588.0, 166.0 - 35.0);
+            let merit = self.merit_tab(st, &mut out, cursor, tab); // ButtonMerit (overlays.rs)
+            if let Some(tag) = allies.or(merit) { rollover = Some(tooltip::Rollover { name: self.text_of(tag), ..Default::default() }); }
             let [x0, y0] = at(self, 0.0, 0.0);
             self.hits.insert(0, ([x0, y0, w, h], Hit::Panel));
         }
@@ -1977,7 +2119,13 @@ impl Ui {
             self.radar_at = [rx, ry, rx + 124.0 * self.s, ry + 124.0 * self.s];
             Self::quad(&mut out, 2, self.radar_at, [0.0, 1.0, 1.0, 0.0], white, 0.0);
             // the engine's video over the minimap (MainHUD RadarME; video.rs): a building panel's, an advisor's
-            crate::video::radar(&mut out, &st.ev.video, self.radar_at, matches!(st.lord_type, 1 | 2 | 6 | 7));
+            let engine = crate::video::radar(&mut out, &st.ev.video, self.radar_at, matches!(st.lord_type, 1 | 2 | 6 | 7));
+            // a custom lord's viewer-side reaction (lord_react.rs) when the engine shows none, its line in the message bar
+            let talking = crate::audio::speech_state();
+            if let Some((file, serial, text)) = crate::lord_react::frame(engine, talking.0 || talking.1) {
+                crate::video::react(&mut out, &file, serial, self.radar_at);
+                if let Some(t) = text { self.bar = Some((t, std::time::Instant::now())); }
+            }
             self.hits.push((self.radar_at, Hit::Radar));
         }
 
@@ -1995,8 +2143,10 @@ impl Ui {
             self.text_sh(&mut out, &t, tx, ty, 18.0, 0.0, CREAM);
         }
         self.on_screen_text(st, &mut out); // OnScreenText (ost.rs)
-        let label = format!("tick {tick}");
-        self.text_sh(&mut out, &label, w - 8.0, 22.0, 18.0, 1.0, CREAM);
+        if show_tick() { // SHC_TICK=1: debug only, players don't see it
+            let label = format!("tick {tick}");
+            self.text_sh(&mut out, &label, w - 8.0, 22.0, 18.0, 1.0, CREAM);
+        }
         if let Some(checked) = self.confirm { self.confirm_popup(&mut out, checked, cursor); }
         self.rclick_draw(&mut out);
         out
@@ -2094,6 +2244,18 @@ pub enum RcAction { RotateRight, ZoomOut, ToggleUi, Flatten(bool) }
 /// taken, the held rotation's next repeat, flatten held, which icons show, the compass / zoom / flatten images.
 #[derive(Clone, Debug)]
 pub struct RightClick { at: [f32; 2], centre: [f32; 2], taken: bool, rot_at: Option<std::time::Instant>, flat_held: bool, show: [bool; 4], rot: i16, zoomed: bool, flat: bool }
+
+/// The troop name strip: barracks centred at 335, merc post and bedouin stockade at 260 (their XAML's right margin 300).
+#[test]
+fn troop_name_strip_centre() {
+    assert_eq!((name_centre(1), name_centre(44), name_centre(63)), (335.0, 260.0, 260.0));
+}
+
+/// The ballista's build button binds its sprite: resolved to the atlas name, plain names unchanged.
+#[test]
+fn bound_sprite() {
+    assert_eq!((bound("{Binding UIBuildingsM005}"), bound("UI-Buildings M007")), ("UI-Buildings M005".into(), "UI-Buildings M007".into()));
+}
 
 #[test]
 fn decode_play_state() {
@@ -2228,9 +2390,9 @@ fn panel_buttons_via_hud() {
         let m = l.mem();
         let (r, n) = (b::rec(id), m.i32(b::rec(id) + 0xf8));
         l.mouse = [m.i16(r + 0xee) as i32 + n / 2, m.i16(r + 0xf0) as i32 + n / 2];
-        crate::military::input(l, TroopIn::Press([0.0; 2], [0.0; 2], [0.0; 4]));
+        l.troop_event(TroopIn::Press([0.0; 2], [0.0; 2], [0.0; 4]));
         l.step();
-        crate::military::input(l, TroopIn::Release);
+        l.troop_event(TroopIn::Release);
         l.step();
         l.hud()
     };
@@ -2267,7 +2429,7 @@ fn panel_buttons_via_hud() {
     assert!(buy > 0 && h.resources[2] == wood + buy, "buy: {wood} + {buy} -> {}", h.resources[2]);
     // the demolish tool: SideTabs' delete button (HUD_Main shows again once the panel is closed), then a click on the
     // market the way main.rs sends it (Cmd::Tool, Cmd::Click)
-    for down in [true, false] { crate::military::input(&mut l, TroopIn::Right(down)); l.step(); } // a right click closes the panel
+    for down in [true, false] { l.troop_event(TroopIn::Right(down)); l.step(); } // a right click closes the panel
     let h = l.hud();
     assert_ne!(h.app_mode, 16, "panel still open");
     u.draw(&h, 1684.0, 784.0, [0.0; 2], 0, None);
@@ -2401,6 +2563,44 @@ fn building_panel_buttons() {
     assert!(std::mem::take(&mut u.open_briefing));
 }
 
+/// EngBuild_*'s result (the siege tent tool, `military::after_action` → ACTION_RET) becomes the held build tool, as C#
+/// GameAction → EditorDirector.placeBuilding does: main.rs build_ghost then runs it as DLL_StartMapAction + hover (the
+/// sim's flag marker / red tent ghost). A refused button (≤ 0) arms nothing; another build tool or drop_tool (right
+/// click, the sim's -50) lets it go.
+#[test]
+fn engineer_tent_is_the_build_tool() {
+    let Some(mut u) = Ui::load(&crate::cache_dir().join("ui")) else { return };
+    let st = HudState { app_mode: 14, app_sub_mode: 61, ..HudState::default() };
+    let ret = |u: &mut Ui, a: i32, r: i32| {
+        { let mut x = ACTION_RET.lock().unwrap(); *x = (a, r, x.2 + 1); }
+        u.draw(&st, 1684.0, 784.0, [0.0; 2], 0, None);
+        u.selected_mapper()
+    };
+    for (a, tool) in [(1014, 0xbe), (1015, 0xbf), (1016, 0xc0), (1017, 0xc2), (1018, 0xc1), (1060, 0x166)] {
+        assert_eq!(ret(&mut u, a, tool), Some(tool), "action {a}");
+        u.drop_tool();
+        assert_eq!(u.selected_mapper(), None);
+    }
+    assert_eq!(ret(&mut u, 1014, -1), None, "refused: no tool");
+    assert_eq!(ret(&mut u, 1014, 0xbe), Some(0xbe));
+    let m = u.build.iter().map(|b| b.mapper).find(|&m| m > 0).unwrap();
+    u.pick_mapper(m);
+    assert_eq!(u.selected_mapper(), Some(m), "a build hotkey replaces the tent");
+}
+
+/// Our building panel's Delete button: y in the panel, above the goods row on the stockpile (11) / armoury (12).
+fn delete_y(sub: i32) -> f32 { if matches!(sub, 11 | 12) { 22.0 } else { 88.0 } }
+
+/// The Delete button clears the stockpile / armoury goods row (8 goods from x 150, 50 apart, icon 40 + count to y 112).
+#[test]
+fn delete_clears_goods_row() {
+    let last = [150.0 + 50.0 * 7.0, 60.0, 150.0 + 50.0 * 7.0 + 40.0, 112.0];
+    for sub in [11, 12] {
+        let d = [511.0, delete_y(sub), 541.0, delete_y(sub) + 32.0];
+        assert!(d[3] <= last[1] || d[1] >= last[3] || d[2] <= last[0] || d[0] >= last[2], "sub {sub}: Delete over the 8th good");
+    }
+}
+
 /// Disband asks first (Options > Confirm Disband Troops, on by default): No sends nothing, Yes sends Troops_Disband.
 #[test]
 fn disband_confirmation() {
@@ -2448,4 +2648,223 @@ fn slider_drag() {
     u.drag = None; // released
     u.draw(&st, 1684.0, 784.0, [p[0] + 1.0, y], 0, None);
     assert!(u.actions.is_empty(), "released: no more changes");
+}
+
+
+/// The glyph atlas never hands out a blank letter: 95 printable ASCII characters at 120 sizes (11 400 glyphs, more
+/// than the 2048² atlas holds and five times what filled the old 1024² one) each come back with their coverage in
+/// the atlas where the uv points. The 0.14.0 bug: past ~2000 glyphs, new ones were cached pointing at empty texels.
+#[test]
+fn glyph_atlas_never_drops() {
+    let Some(mut u) = Ui::load(&crate::cache_dir().join("ui")) else { return };
+    let mut resets = 0;
+    for px in 20..140u32 {
+        for c in (33u8..127).map(char::from) {
+            let before = u.glyphs.len();
+            let (m, cov) = u.font.rasterize(c, px as f32);
+            let uv = u.glyph(c, px).uv;
+            if u.glyphs.len() <= before { resets += 1; } // the cache started over
+            let (x0, y0) = ((uv[0] * FONT_PX as f32).round() as u32, (uv[1] * FONT_PX as f32).round() as u32);
+            assert!(y0 >= 4, "'{c}' {px} px over the white fill block");
+            let got: u32 = (0..m.height as u32).flat_map(|y| (0..m.width as u32).map(move |x| (x, y)))
+                .map(|(x, y)| u.font_rgba[(((y0 + y) * FONT_PX + x0 + x) * 4 + 3) as usize] as u32).sum();
+            assert_eq!(got, cov.iter().map(|&a| a as u32).sum::<u32>(), "'{c}' at {px} px not in the atlas");
+            assert!(got > 0, "'{c}' at {px} px blank");
+        }
+    }
+    assert!(resets > 0, "the test should overflow the atlas at least once");
+    for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] { assert_eq!(u.font_rgba[((y * FONT_PX + x) * 4 + 3) as usize], 255, "fill texel {x},{y}"); }
+}
+
+/// The Keeps row (screen 0) is out of reach in a game: no build screen has a clickable button that opens it (the
+/// delete tool, kept in row 0, aside), with the engine's availability unknown (empty list = all allowed) too. 0.14.0
+/// offered it and a keep placed there moved the keep.
+#[test]
+fn keeps_row_unreachable() {
+    let Some(mut u) = Ui::load(&crate::cache_dir().join("ui")) else { return };
+    let st = HudState::default();
+    for screen in 1..u.build.iter().map(|b| b.screen).max().unwrap() + 1 {
+        u.screen = screen;
+        u.draw(&st, 1920.0, 1080.0, [0.0; 2], 0, None);
+        let open: Vec<&str> = u.hits.iter().filter_map(|(_, h)| match *h { Hit::Build(i) => Some(&u.build[i]), _ => None })
+            .filter(|b| b.screen == 0 && b.mapper != 0x27 || submenu(&b.name) == Some(0)).map(|b| b.name.as_str()).collect();
+        assert!(open.is_empty(), "screen {screen} reaches the Keeps row: {open:?}");
+    }
+}
+
+/// A new skirmish (Crater Lake, 1 AI) offers DE's build buttons: the engine allows the keeps and their sub-menu
+/// (DLL_IsMapperAvailable, port = oracle), the HUD still locks the sub-menu (HUD_Main.SetupNewBuildScreen); the
+/// castle tab offers the rest, every other screen what the engine allows.
+#[cfg(feature = "live")]
+#[test]
+fn skirmish_build_buttons() {
+    let Some(mut u) = Ui::load(&crate::cache_dir().join("ui")) else { return };
+    let map = crate::skirmish::maps_dir().join("Crater Lake.map");
+    if !map.exists() { return; }
+    let lobby = crate::skirmish::Lobby { ais: vec![(0, 0)], seed: 1234, ..crate::skirmish::Lobby::new(map) };
+    let mut l = crate::live::Live::from_mem(crate::skirmish::start(&lobby).unwrap());
+    l.step();
+    let h = l.hud();
+    assert!([KEEPS_MENU, 60, 61, 62].iter().all(|&m| h.available[m as usize]), "engine: keeps available in a skirmish");
+    let offered = |u: &mut Ui, screen: usize| -> Vec<String> {
+        u.screen = screen;
+        u.draw(&h, 1920.0, 1080.0, [0.0; 2], 0, None);
+        u.hits.iter().filter_map(|(_, hit)| match *hit { Hit::Build(i) if u.build[i].screen == screen => Some(u.build[i].name.clone()), _ => None }).collect()
+    };
+    assert_eq!(offered(&mut u, 1), ["ButtonBuildStairs", "ButtonBuildWoodenWall", "ButtonBuildStoneWall", "ButtonBuildCrenalatedWall",
+        "ButtonBuildStoneBarracks", "ButtonBuildWoodenBarracks", "ButtonBuildArmoury", "ButtonBuildSubTowers", "ButtonBuildSubGates",
+        "ButtonBuildSubMilitaryBuildings", "ButtonBuildWoodenBedouinStockade"]);
+    for screen in [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14] {
+        let want: Vec<String> = u.build.iter().filter(|b| b.screen == screen && variant_ok(b.mapper, &h) && h.available.get(b.mapper.max(0) as usize).copied().unwrap_or(true))
+            .map(|b| b.name.clone()).collect();
+        assert_eq!(offered(&mut u, screen), want, "screen {screen}");
+    }
+}
+
+/// Extended rules: the Military build screen has the Sassanid Stable button (tinted stables icon); picking it and
+/// clicking the map builds a marked stables through the normal tool path (Live::set_tool / click). A classic game
+/// shows no such button.
+#[cfg(feature = "live")]
+/// UpdateUITroopSprites' pick: "<key> <colour>" from the colour atlases (Blue from UI-MasterAtlas), keys without a
+/// variant and the default colour as they are.
+#[test]
+fn player_colour_sprites() {
+    let Some(mut u) = Ui::load(&crate::cache_dir().join("ui")) else { return };
+    if u.colour_rects.is_empty() { return; } // an export from before the colour atlases
+    let base = |u: &Ui, k: &str| (0, u.rects[k], ATLAS);
+    assert_eq!(u.sprite("UI-Buildings M005"), Some(base(&u, "UI-Buildings M005")), "colour 1: the default");
+    u.colour = 2;
+    assert_eq!(u.sprite("UI-Buildings M005"), u.colour_rects.get("UI-Buildings M005 Orange").copied());
+    assert!(u.sprite("UI-Buildings M005").is_some_and(|s| s.0 >= COLOUR_TEX));
+    assert_eq!(u.sprite("UI-Buildings O029"), Some(base(&u, "UI-Buildings O029")), "no Orange variant: DE keeps it");
+    assert_eq!(u.sprite("UI-HUD 007"), Some(base(&u, "UI-HUD 007")));
+    u.colour = 4;
+    assert_eq!(u.sprite("UI-Buttons K001"), Some(base(&u, "UI-Buttons K001 Blue")));
+    u.colour = 8;
+    assert_eq!(u.sprite("UISprites Z013"), u.colour_rects.get("UISprites Z013 Green").copied());
+}
+
+#[test]
+fn sassanid_stable_button() {
+    use shc_sim::buildings as b;
+    let Some(mut u) = Ui::load(&crate::cache_dir().join("ui")) else { return };
+    let map = crate::skirmish::maps_dir().join("Crater Lake.map");
+    if !map.exists() { return; }
+    // the Military row's drawn buttons (not the Return arrow), left to right
+    let military = |u: &Ui| -> Vec<[f32; 4]> {
+        let mut v: Vec<[f32; 4]> = u.hits.iter().filter_map(|&(p, hit)| match hit { Hit::Build(i) if u.build[i].screen == 9 && !u.build[i].name.ends_with("Return") && u.rects.contains_key(&u.build[i].s1) => Some(p), _ => None }).collect();
+        v.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        v
+    };
+    let mut row = vec![];
+    let button = |u: &mut Ui, h: &HudState| -> Option<[f32; 4]> {
+        u.screen = 9;
+        u.draw(h, 1920.0, 1080.0, [0.0; 2], 0, None);
+        let i = u.build.iter().position(|b| b.mapper == SASSANID_STABLE)?;
+        u.hits.iter().find(|(_, hit)| *hit == Hit::Build(i)).map(|e| e.0)
+    };
+    for extended in [false, true] {
+        let lobby = crate::skirmish::Lobby { ais: vec![(0, 0)], seed: 1234, extended, ..crate::skirmish::Lobby::new(map.clone()) };
+        let mut l = crate::live::Live::from_mem(crate::skirmish::start(&lobby).unwrap());
+        for _ in 0..150 { l.step(); } // the start goods come in (the stables' wood)
+        let h = l.hud();
+        let Some(p) = button(&mut u, &h) else {
+            assert!(!extended, "no Sassanid Stable button in an Extended game");
+            row = military(&u);
+            assert_eq!(row.len(), 6, "DE's six: engineers, mangonel, ballista, stables, tunnellers, oil smelter");
+            continue;
+        };
+        // the row: every DE button drawn (the ballista's sprite resolved), none covering another more than DE's own
+        // neighbours do (4 px), and ours ending no further right than the classic row's oil smelter + 20 px (the frame)
+        let r = military(&u);
+        assert_eq!(r.len(), row.len() + 1, "{r:?}");
+        assert!(r.windows(2).all(|w| w[0][2] - w[1][0] <= 6.0), "overlap: {r:?}");
+        assert!(r.last().unwrap()[2] <= row.last().unwrap()[2] + 20.0 && r.last() == Some(&p), "ours past the frame: {r:?} vs {row:?}");
+        assert!(extended, "a Sassanid Stable button in a classic game");
+        assert!(u.click([(p[0] + p[2]) / 2.0, (p[1] + p[3]) / 2.0]) && u.selected_mapper() == Some(SASSANID_STABLE));
+        l.mem().set_i32(0x18379926c + b::PSTRIDE, 5000); // gold
+        assert!(l.set_tool(SASSANID_STABLE), "tool refused");
+        let (kx, ky) = l.keep().map(|(x, y)| (x as i32, y as i32)).unwrap();
+        let spot = (8..40).step_by(3).flat_map(|d| [(d, 0), (-d, 0), (0, d), (0, -d)]).map(|(dx, dy)| (kx + dx, ky + dy))
+            .find(|&(x, y)| l.hover(SASSANID_STABLE, x, y).ok).expect("no spot");
+        let (_, chores) = l.click(SASSANID_STABLE, spot.0, spot.1);
+        for _ in 0..4 { l.step(); }
+        let m = l.mem();
+        let s: Vec<i32> = (1..b::SLOTS).filter(|&i| b::state(m, i) != 0 && b::kind(m, i) == 0x23).collect();
+        assert!(chores > 0 && s.len() == 1 && shc_sim::ext::is_sassanid_stable(m, s[0]), "{chores} chores, stables {s:?}");
+    }
+}
+
+/// Extended rules: a Sassanid Stable's panel has the recruit button (no barracks yet: drawn locked with its reason,
+/// a click still sends MakeTroop [1007, 1, 0x5a] as the barracks' buttons do); a plain stables' panel has none.
+#[cfg(feature = "live")]
+#[test]
+fn stable_recruit_button() {
+    use crate::live::{Live, TroopIn};
+    use shc_sim::buildings as b;
+    let Some(mut u) = Ui::load(&crate::cache_dir().join("ui")) else { return };
+    let map = crate::skirmish::maps_dir().join("Crater Lake.map");
+    if !map.exists() { return; }
+    let lobby = crate::skirmish::Lobby { ais: vec![(0, 0)], seed: 1234, extended: true, ..crate::skirmish::Lobby::new(map) };
+    let mut l = Live::from_mem(crate::skirmish::start(&lobby).unwrap());
+    for _ in 0..150 { l.step(); }
+    l.mem().set_i32(0x18379926c + b::PSTRIDE, 5000); // gold
+    let m = l.mem();
+    let yard = (1..b::SLOTS).find(|&i| b::state(m, i) == 2 && b::owner(m, i) == 1 && b::kind(m, i) == 10).expect("stockpile");
+    m.set_i32(b::rec(yard) + 0x120 + 2 * 4, 100); // wood for two stables
+    for _ in 0..5 { l.step(); }
+    let (kx, ky) = l.keep().map(|(x, y)| (x as i32, y as i32)).unwrap();
+    let mut spots = (8..40).step_by(3).flat_map(|d| [(d, 0), (-d, 0), (0, d), (0, -d)]).map(|(dx, dy)| (kx + dx, ky + dy));
+    let mut build = |l: &mut Live, tool: i32| -> i32 {
+        assert!(l.set_tool(tool));
+        let (x, y) = spots.find(|&(x, y)| l.hover(tool, x, y).ok).expect("no spot");
+        l.click(tool, x, y);
+        for _ in 0..4 { l.step(); }
+        l.set_tool(0);
+        let m = l.mem();
+        (1..b::SLOTS).filter(|&i| b::state(m, i) != 0 && b::kind(m, i) == 0x23).max().unwrap()
+    };
+    let ours = build(&mut l, SASSANID_STABLE);
+    let plain = build(&mut l, 0x41);
+    assert!(ours != plain && shc_sim::ext::is_sassanid_stable(l.mem(), ours) && !shc_sim::ext::is_sassanid_stable(l.mem(), plain));
+    let open = |l: &mut Live, id: i32| {
+        let m = l.mem();
+        let (r, n) = (b::rec(id), m.i32(b::rec(id) + 0xf8));
+        l.mouse = [m.i16(r + 0xee) as i32 + n / 2, m.i16(r + 0xf0) as i32 + n / 2];
+        l.troop_event(TroopIn::Press([0.0; 2], [0.0; 2], [0.0; 4]));
+        l.step();
+        l.troop_event(TroopIn::Release);
+        l.step();
+        l.hud()
+    };
+    let recruit = |u: &mut Ui, h: &HudState| { u.draw(h, 1684.0, 784.0, [0.0; 2], 0, None); u.hits.iter().find(|(_, hit)| matches!(hit, Hit::Recruit(SASSANID_KNIGHT, _))).copied() };
+    let h = open(&mut l, plain);
+    assert_eq!((h.app_mode, h.app_sub_mode, h.sassanid), (16, 34, None), "plain stables panel");
+    assert!(recruit(&mut u, &h).is_none(), "a button on a plain stables");
+    let h = open(&mut l, ours);
+    assert_eq!((h.app_mode, h.app_sub_mode, h.sassanid), (16, 34, Some(shc_sim::ext::NO_BARRACKS)), "Sassanid Stable panel, no barracks yet");
+    let (p, hit) = recruit(&mut u, &h).expect("no recruit button");
+    assert_eq!(hit, Hit::Recruit(SASSANID_KNIGHT, Some("EXT_NEEDS_BARRACKS")));
+    u.actions.clear();
+    assert!(u.click([(p[0] + p[2]) / 2.0, (p[1] + p[3]) / 2.0]));
+    assert_eq!(u.actions, vec![[1007, 1, SASSANID_KNIGHT]]);
+    assert_eq!(u.message.as_deref(), Some("You need a barracks to train Sassanid Knights."));
+}
+
+/// Our names: the Sassanid Stable's build button and panel, the Sassanid Knight's recruit button; a stables and the
+/// barracks' knight keep the game's.
+#[test]
+fn sassanid_names() {
+    let Some(u) = Ui::load(&crate::cache_dir().join("ui")) else { return };
+    let help = |m: i32| u.build.iter().find(|b| b.mapper == m).map(|b| u.text_of(&b.help)).unwrap();
+    assert_eq!(help(SASSANID_STABLE), "Sassanid Stable");
+    assert_ne!(help(0x41), "Sassanid Stable");
+    let stables = HudState { app_mode: 16, app_sub_mode: 34, in_structure_type: 35, ..Default::default() };
+    let ours = HudState { sassanid: Some(0), ..stables.clone() };
+    assert_eq!(u.panel_title(&ours), "Sassanid Stable");
+    assert_eq!(u.panel_title(&stables), u.text_of(&u.title_key(34, 35)));
+    assert_ne!(u.panel_title(&stables), "Sassanid Stable");
+    assert_eq!(u.troop_name(SASSANID_KNIGHT, &ours), "Sassanid Knight");
+    assert_eq!(u.troop_name(28, &stables), u.text_of("TEXT_CHIMP_NAMES_029"));
+    assert_ne!(u.troop_name(28, &stables), "Sassanid Knight");
 }

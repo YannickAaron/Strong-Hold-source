@@ -196,7 +196,7 @@ struct Now { file: String, key: i32, p: Player, last: Option<usize>, done: bool 
 struct Slot { want: Option<Want>, now: Option<Now> }
 const NO: Slot = Slot { want: None, now: None };
 thread_local! {
-    static SLOTS: RefCell<[Slot; 3]> = const { RefCell::new([NO, NO, NO]) };
+    static SLOTS: RefCell<[Slot; 4]> = const { RefCell::new([NO, NO, NO, NO]) }; // banner, engine minimap, full, reaction
     // the building panel's sketch picture: (asked for this frame, in the texture), Assets/GUI/Images file names
     static SKETCHES: RefCell<(Option<String>, Option<String>)> = const { RefCell::new((None, None)) };
 }
@@ -230,11 +230,11 @@ pub fn pump(queue: &wgpu::Queue, small: &wgpu::Texture, full: &wgpu::Texture) {
                 if sound(&n.file).is_some() { crate::audio::video(None) }
                 if i == 1 { ENDED.store(n.key as u32, Ordering::Relaxed) } // stopped / replaced: RadarME_Ended
             }
-            let size = [[BANNER[0], BANNER[1], 16], [BLD, BLD, 16], FULL][i];
+            let size = [[BANNER[0], BANNER[1], 16], [BLD, BLD, 16], FULL, [BLD, BLD, 16]][i];
             slot.now = want.and_then(|w| Some(Now { p: Player::open(&w.file, w.mode, size)?, file: w.file, key: w.key, last: None, done: false }));
         }
         if let Some(n) = &mut slot.now {
-            let (tex, x) = [(small, 0), (small, BANNER[0]), (full, 0)][i];
+            let (tex, x) = [(small, 0), (small, BANNER[0]), (full, 0), (small, BANNER[0])][i];
             let Some(k) = n.p.update(queue, tex, x) else {
                 if i == 1 && !n.done { ENDED.store(n.key as u32, Ordering::Relaxed) }
                 n.done = true;
@@ -329,10 +329,31 @@ impl Engine {
 pub fn radar(out: &mut Vec<HudTri>, e: &Engine, p: [f32; 4], arab: bool) -> bool {
     let Some((name, looped, serial)) = &e.now else { return false };
     let name = if arab && name.contains("action_marriage") { "st37_mosque1" } else { name };
-    let w = want(1, format!("{name}.vid"), *serial as i32, if *looped { Mode::Loop } else { Mode::Once });
+    let file = format!("{name}.vid");
+    let w = want(1, file.clone(), *serial as i32, if *looped { Mode::Loop } else { Mode::Once });
     if w.is_none() { ENDED.store(*serial, Ordering::Relaxed) } // MediaElement fails: MediaEnded at once
-    if w == Some(true) { quad(out, SMALL, p, [BANNER[0] as f32 / SMALL_W as f32, 0.0, 1.0, BLD as f32 / SMALL_H as f32], [1.0; 4]) }
-    w == Some(true)
+    // our change: a line that outlasts its clip (waitForSpeech, a custom lord's) keeps the clip's last frame up until
+    // he is done talking, instead of the minimap popping back mid-sentence. Drawing only: `playing` is as before.
+    let talking = crate::audio::speech_state();
+    let held = w == Some(false) && (e.wait || name.starts_with("custom_")) && (talking.0 || talking.1) && over(1, &file, *serial as i32);
+    if w == Some(true) || held { quad(out, SMALL, p, [BANNER[0] as f32 / SMALL_W as f32, 0.0, 1.0, BLD as f32 / SMALL_H as f32], [1.0; 4]) }
+    w == Some(true) || held
+}
+
+/// Slot `slot` played `file` (`key`) once to its end: its last frame is still in the texture.
+fn over(slot: usize, file: &str, key: i32) -> bool {
+    SLOTS.with(|s| s.borrow()[slot].now.as_ref().is_some_and(|n| n.file == file && n.key == key && n.done && n.last.is_some()))
+}
+
+/// hud.rs: a custom lord's viewer-side reaction clip `file` (lord_react.rs, `serial` restarts it) played once over the
+/// minimap rect `p`. Its own slot, so the engine's video channel (whose end feeds the sim's binkPlaying) never sees it;
+/// it shares that slot's texture area, so it is only asked for while the engine shows nothing. Its last frame stays
+/// up while asked for (his line can outlast it). False = not shown.
+pub fn react(out: &mut Vec<HudTri>, file: &str, serial: i32, p: [f32; 4]) -> bool {
+    let w = want(3, file.to_string(), serial, Mode::Once);
+    let shown = w == Some(true) || w.is_some() && over(3, file, serial); // its last frame stays while lord_react keeps it
+    if shown { quad(out, SMALL, p, [BANNER[0] as f32 / SMALL_W as f32, 0.0, 1.0, BLD as f32 / SMALL_H as f32], [1.0; 4]) }
+    shown
 }
 
 /// lord_info.rs: a custom lord's living portrait `file` (custom_lords::vid "portrait", 528×308 with its alpha) looped

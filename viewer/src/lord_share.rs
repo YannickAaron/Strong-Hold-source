@@ -151,6 +151,7 @@ pub static SHOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 /// same name are there. A lord imported joins the custom lords list (the skirmish's Add-AI faces) at once.
 pub fn import_ui(file: &Path, replace: bool) {
     *PENDING.lock().unwrap() = None;
+    crate::map_share::SHOW_MAPS.store(false, std::sync::atomic::Ordering::Relaxed); // Extras shows the lords
     SHOW.store(true, std::sync::atomic::Ordering::Relaxed);
     let msg = match import(file, replace) {
         Ok(n) => { custom_lords::rescan(); (format!("Imported {}", n.join(", ")), true) }
@@ -398,7 +399,7 @@ mod tests {
         assert_eq!(import_into(&f, &root, false), Ok(vec!["Lord David von Lindschied".into()]));
         let (l, m) = (root.join("CustomLords/Lord David von Lindschied"), root.join("CustomMedia/Lord David von Lindschied"));
         assert!(l.join("trailer.webm").exists() && l.join("face.png").exists() && l.join("sprite/sprites.tsv").exists());
-        assert_eq!(std::fs::read_dir(&m).unwrap().count(), 37, "32 wav (30 lines + lobby add / kick) + 4 webm + text.txt");
+        assert_eq!(std::fs::read_dir(&m).unwrap().count(), 63, "41 wav (30 lines + lobby add / kick + 9 reactions) + 20 webm + text.txt + react.txt");
         let c = custom_lords::load(&l).expect("loads");
         assert_eq!(c.aivs.len(), 8);
     }

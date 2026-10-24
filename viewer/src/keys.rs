@@ -7,8 +7,15 @@ const MODERN: &str = include_str!("../../re/data/hotkeys_de.txt");
 const CLASSIC: &str = include_str!("../../re/data/hotkeys_sh1.txt");
 /// The port's own additions on top of the original's table (the preset files stay the original's): function, slot,
 /// key. A new function gets a row; a key is only added while that slot is empty and nothing else holds the key.
-/// ToggleMuteSounds is the original's (unbound there, and nothing handles it): the port gives it Ctrl+M.
-const EXTRA: [(&str, usize, &str); 4] = [("QuickSave", 1, "F5"), ("QuickLoad", 0, "F9"), ("ToggleStats", 0, "F3"), ("ToggleMuteSounds", 0, "M,ctrl")];
+/// ToggleMuteSounds is the original's (unbound there, and nothing handles it): the port gives it Ctrl+M. The rest are
+/// controls DE lacks (docs/BEYOND_DE.md): Shift+Ctrl+n adds the selection to control group n (the engine's own
+/// GroupTroops variant, unused by DE), Ctrl+A selects every own unit of the selection's types on the map, Delete
+/// takes / drops the delete tool, Ctrl+W switches an open fletcher / poleturner / blacksmith to its other weapon.
+const EXTRA: [(&str, usize, &str); 17] = [("QuickSave", 1, "F5"), ("QuickLoad", 0, "F9"), ("ToggleStats", 0, "F3"), ("ToggleMuteSounds", 0, "M,ctrl"),
+    ("AddToGroup1", 0, "Alpha1,shift,ctrl"), ("AddToGroup2", 0, "Alpha2,shift,ctrl"), ("AddToGroup3", 0, "Alpha3,shift,ctrl"),
+    ("AddToGroup4", 0, "Alpha4,shift,ctrl"), ("AddToGroup5", 0, "Alpha5,shift,ctrl"), ("AddToGroup6", 0, "Alpha6,shift,ctrl"),
+    ("AddToGroup7", 0, "Alpha7,shift,ctrl"), ("AddToGroup8", 0, "Alpha8,shift,ctrl"), ("AddToGroup9", 0, "Alpha9,shift,ctrl"),
+    ("AddToGroup0", 0, "Alpha0,shift,ctrl"), ("SelectAllOfType", 0, "A,ctrl"), ("DeleteTool", 0, "Delete"), ("SwitchOutput", 0, "W,ctrl")];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Keys { pub rows: Vec<(String, [String; 2])> } // KeyFunctions order
@@ -87,9 +94,9 @@ pub fn code(f: &str) -> Option<i32> { lines(MODERN).position(|l| l.0 == f).map(|
 
 /// Whether a key on `f` does something in the port (main.rs `hotkey`); the F1 sheet leaves F1 / Shift+F1 to these.
 pub fn runs(f: &str) -> bool {
-    const RUN: [&str; 23] = ["Pause", "IncreaseEngineSpeed", "DecreaseEngineSpeed", "ZoomIn", "ZoomOut", "MapRotateLeft", "MapRotateRight",
+    const RUN: [&str; 26] = ["Pause", "IncreaseEngineSpeed", "DecreaseEngineSpeed", "ZoomIn", "ZoomOut", "MapRotateLeft", "MapRotateRight",
         "QuickSave", "QuickLoad", "ToggleStats", "Save", "Load", "FlattenLandscape", "ToggleUI", "ToggleFrameRate", "ToggleMuteSounds",
-        "RotateBuilding", "Up", "Down", "Left", "Right", "OptionsMenu", "Cathedral"];
+        "RotateBuilding", "Up", "Down", "Left", "Right", "OptionsMenu", "Cathedral", "SelectAllOfType", "DeleteTool", "SwitchOutput"];
     RUN.contains(&f) || PLACE.iter().any(|p| p.0 == f) || game_action(f, &Ctx { mode: 14, sub: 61, sh1_centre: true, attack_here: true, centre: None }).is_some()
 }
 
@@ -114,9 +121,19 @@ pub const PLACE: [(&str, i32); 78] = [("PlaceWalls", 25), ("PlaceStairs", 27), (
 /// tile under the window centre (SetBookmark; None = off the map).
 pub struct Ctx { pub mode: i32, pub sub: i32, pub sh1_centre: bool, pub attack_here: bool, pub centre: Option<[i32; 2]> }
 
+/// CameraControls2D.Update's wheel with Options > Controls "SH1 mouse wheel" (Settings_SH1MouseWheel): up =
+/// HomeKeep (your keep), down = CycleBookmarks (GameAction 1026) at most every 250 ms (`since` = the last cycle); no
+/// zoom. None = nothing to send.
+pub fn sh1_wheel(up: bool, since: Option<std::time::Duration>) -> Option<[i32; 3]> {
+    if up { return Some([code("HomeKeep")?, -1, 0]); }
+    since.is_none_or(|d| d.as_millis() > 250).then_some([1026, 0, 0])
+}
+
 /// KeyManager.Update's DLL_GameAction(action, a, b) for function `f` (directSentFunctions, the stance / stop /
 /// attack-here / patrol keys), None = nothing to send. Camera keys answer y * 1000 + x (live.rs centres on it).
 pub fn game_action(f: &str, c: &Ctx) -> Option<[i32; 3]> {
+    // ours: GroupTroopsN with a = 10 adds the selection to group N (FUN_1800ca050) instead of replacing it
+    if let Some(n) = f.strip_prefix("AddToGroup") { return Some([code(&format!("GroupTroops{n}"))?, 10, 0]); }
     let k = code(f)?;
     let troops = c.mode == 14 && matches!(c.sub, 61 | 62);
     let panel = |subs: &[i32]| c.mode == 16 && subs.contains(&c.sub);
@@ -213,7 +230,7 @@ fn keys_load_save_rebind() {
     // the Modern preset is the live game's KEYS block (+ the port's extras) and survives a save / load
     let m = Keys::modern();
     assert_eq!(m.text(), MODERN.replace("QuickSave:Home:", "QuickSave:Home:F5:").replace("ToggleMuteSounds:\n", "ToggleMuteSounds:M,ctrl:\n")
-        .replace("MPPing:P,alt:\n", "MPPing:P,alt:\nQuickLoad:F9:\nToggleStats:F3:\n"));
+        .replace("MPPing:P,alt:\n", "MPPing:P,alt:\nQuickLoad:F9:\nToggleStats:F3:\nAddToGroup1:Alpha1,shift,ctrl:\nAddToGroup2:Alpha2,shift,ctrl:\nAddToGroup3:Alpha3,shift,ctrl:\nAddToGroup4:Alpha4,shift,ctrl:\nAddToGroup5:Alpha5,shift,ctrl:\nAddToGroup6:Alpha6,shift,ctrl:\nAddToGroup7:Alpha7,shift,ctrl:\nAddToGroup8:Alpha8,shift,ctrl:\nAddToGroup9:Alpha9,shift,ctrl:\nAddToGroup0:Alpha0,shift,ctrl:\nSelectAllOfType:A,ctrl:\nDeleteTool:Delete:\nSwitchOutput:W,ctrl:\n"));
     assert_eq!((m.action("F5"), m.action("F9"), Keys::from_block("||KEYS||\nQuickSave:Home:\n||KEYS||\n").get("QuickSave")), (Some("QuickSave"), Some("QuickLoad"), ["Home", "F5"]));
     assert_eq!(Keys::from_block(&m.text()), m);
     assert_eq!((m.action("P"), m.action("Alpha1,ctrl"), m.action("Return")), (Some("Pause"), Some("GroupTroops1"), None)); // Return is ",mp"
@@ -227,6 +244,16 @@ fn keys_load_save_rebind() {
     let c = Keys::classic();
     assert_eq!((c.action("X"), c.action("C"), c.get("ZoomIn")), (Some("MapRotateLeft"), Some("MapRotateRight"), ["", ""]));
     assert_eq!(Keys::from_block("||KEYS||\nPause:K:\n||KEYS||\n").action("K"), Some("Pause"));
+}
+
+/// SH1 mouse wheel: up = HomeKeep every notch, down = CycleBookmarks no more than every 250 ms.
+#[test]
+fn sh1_wheel_mapping() {
+    use std::time::Duration;
+    assert_eq!(sh1_wheel(true, Some(Duration::ZERO)), Some([6, -1, 0]));
+    assert_eq!(sh1_wheel(false, None), Some([1026, 0, 0]));
+    assert_eq!(sh1_wheel(false, Some(Duration::from_millis(100))), None);
+    assert_eq!(sh1_wheel(false, Some(Duration::from_millis(300))), Some([1026, 0, 0]));
 }
 
 #[test]
@@ -246,6 +273,8 @@ fn keys_game_actions() {
     assert_eq!((go("M", &de), go("M", &Ctx { mode: 16, sub: 25, ..de }), go("H", &de)), (Some([1047, 26, -1]), Some([7, -1, 0]), Some([1047, 40, -1])));
     // groups: Ctrl+n assigns, n selects (a second press centres: the sim's select_clan), Ctrl+Alt+n / Alt+n bookmarks
     assert_eq!((go("Alpha3,ctrl", &field), go("Alpha3", &field), go("Alpha0", &field)), (Some([0x16, -1, 0]), Some([0x20, -1, 0]), Some([0x1d, -1, 0])));
+    // ours: Shift+Ctrl+n adds to group n (GroupTroops with a = 10)
+    assert_eq!((go("Alpha3,shift,ctrl", &field), go("Alpha0,shift,ctrl", &field)), (Some([0x16, 10, 0]), Some([0x13, 10, 0])));
     assert_eq!((go("Alpha2,ctrl,alt", &field), go("Alpha2,alt", &field)), (Some([0x29, 120, 250]), Some([0x33, -1, 0])));
     assert_eq!(go("Alpha1", &Ctx { mode: 16, sub: 1, ..field }), None); // barracks panel: assembly points (not ported)
     // stances R / T / Y, Stop (Backspace), Patrol (Shift+F7): troops panel only (patrol: always, like the original)

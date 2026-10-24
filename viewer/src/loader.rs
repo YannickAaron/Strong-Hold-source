@@ -199,6 +199,7 @@ pub fn load_save(path: &std::path::Path) -> Result<shc_sim::mem::Mem, String> {
     let file = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut m = shc_sim::mem::Mem::default();
     shc_sim::world::load_save(&mut m, &file).map_err(|e| format!("{}: {e:?}", path.display()))?;
+    crate::extended::after_load(&mut m, path);
     Ok(m)
 }
 

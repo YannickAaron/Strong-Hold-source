@@ -180,7 +180,7 @@ impl Ui {
 
     /// Image with HorizontalAlignment Center at `cx` and its bottom at `bottom`; a 0 size follows the sprite's aspect.
     fn bottom_img(&mut self, out: &mut Vec<HudTri>, o: [f32; 2], key: &str, cx: f32, bottom: f32, w: f32, h: f32) {
-        let Some(&[_, _, rw, rh]) = self.rects.get(key) else { return };
+        let Some((_, [_, _, rw, rh], _)) = self.sprite(key) else { return };
         let (w, h) = match (w, h) { (0.0, h) => (h * rw / rh, h), (w, 0.0) => (w, w * rh / rw), wh => wh };
         self.img(out, key, self.pr(o, cx - w / 2.0, bottom - h, w, h), WHITE);
     }
@@ -298,7 +298,6 @@ impl Ui {
 
     /// 76 / 68 / 67 / 66 army: header (fear-factor combat bonus on page 1, total troops on the others), each troop
     /// type's picture and count, the page toggle (76 → 68 → 67 → 66 → 76).
-    /// ponytail: pictures in the default (red) colour; the game swaps in the player's colour variant.
     fn army(&mut self, st: &HudState, out: &mut Vec<HudTri>, o: [f32; 2], cursor: [f32; 2]) {
         let d = &st.report;
         let page = match st.app_sub_mode { 76 => 0, 68 => 1, 67 => 2, _ => 3 };

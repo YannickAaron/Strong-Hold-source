@@ -8,14 +8,23 @@ use crate::hud::HudState;
 use crate::replay::Rec;
 
 /// Minimap texture size in pixels: GameMap.getMaxRadarSize of an 800 map (tilemapSize − 4), the game's "zoomed out"
-/// radar = whole map. Smaller maps render at their own size (`Live::radar_n`) and are scaled up to this.
+/// radar = whole map. Smaller radars (`Live::radar_n`) are scaled up to this.
 pub const RADAR_N: i32 = 796;
+
+/// GameMap.resetRadarZoom at a map start: Options' "radar zoomed out" (Settings_RadarDefaultZoomedOut) = the whole
+/// map (getMaxRadarSize: tilemapSize − 4, at most 800), else 124 px around the camera (capRadarZoom: never past the
+/// whole map). `tilemap` ≤ 4 (no size read): an 800 map's.
+pub fn radar_size(tilemap: i32, zoomed_out: bool) -> i32 {
+    let max = if tilemap <= 4 { RADAR_N } else { (tilemap - 4).min(800) };
+    if zoomed_out { max } else { max.min(124) }
+}
 
 /// Placement footprint side of an eMappers id: FUN_180069400 (jump table at 0x1800694c0; same as sim setup::f69400,
 /// which is private). -1 = no footprint (not placeable as a building).
 #[cfg_attr(not(feature = "live"), allow(dead_code))]
 pub fn footprint(mapper: i32) -> i32 {
     const IDX: [u8; 412] = *include_bytes!("../../formats/data/aiv_size_jumptable.bin");
+    let mapper = if mapper == 0x1cc { 0x41 } else { mapper }; // ours: the Sassanid Stable is a stables (shc_sim::ext)
     const SIDE: [i32; 15] = [2, 4, 3, 5, 2, 6, 1, 7, 11, 9, 10, 13, 0, 8, -1];
     let k = mapper.wrapping_sub(0x2c) as u32;
     if k >= 0x19c { -1 } else { SIDE[IDX[k as usize] as usize] }
@@ -30,6 +39,7 @@ pub const NOT_PORTED: i32 = -3; // mapaction has no path for this tool
 pub const BROKE: i32 = -2; // valid spot but no chore queued: FUN_1800cb630 said the player can't afford it
 pub const NO_STONE: i32 = -4; // wall tools: FUN_1800ce850 = 0 pieces affordable (the release queues nothing)
 pub const PAUSED: i32 = -5; // pause latch set (GameAction 1048): mapaction refuses tools and clicks
+pub const DONE: i32 = -6; // the click placed and the sim dropped the tool (DLL_MapAction -50: C# CancelPlacement)
 pub const NEED: i32 = -10; // NEED - n: FUN_1800cb630 would refuse, "… needed" = TEXT_FEEDBACK_{n+1} (`Live::afford`)
 
 impl Verdict {
@@ -69,6 +79,12 @@ pub fn ported(_: i32) -> bool { false }
 /// Tools driven by press / drag / release (walls, stairs, moat dig / undig, pitch ditch): `mapaction::is_drag`.
 #[cfg(feature = "live")]
 pub fn is_drag(tool: i32) -> bool { shc_sim::mapaction::is_drag(tool) }
+
+/// The assembly-point flag tools (eMappers MAPPER_PLACE_ASSEMBLY_POINT*) of a building panel (app sub mode): barracks,
+/// mercenary post, Bedouin stockade, engineers' and tunnellers' guild, as KeyManager picks them there.
+pub fn rally_tools(sub: i32) -> Vec<i32> {
+    match sub { 1 => (332..=338).collect(), 44 => (360..=366).collect(), 63 => (391..=398).collect(), 23 => vec![367, 368], 24 => vec![369], _ => vec![] }
+}
 #[cfg(not(feature = "live"))]
 pub fn is_drag(_: i32) -> bool { false }
 
@@ -85,7 +101,7 @@ mod sim {
         tiles: Vec<(i16, i16)>, // (x, y) of every valid map tile, by tile index (x = -1: none)
         t0: std::time::Instant,  // engine clock (timeGetTime) for the draw pass's animation clocks
         sent: bool,              // first draw frame done
-        preview: Vec<usize>,     // tile indices of the drag tool preview the sim drew last (mapaction::PREVIEW)
+        pub(crate) preview: Vec<usize>, // tile indices of the drag tool preview the sim drew last (mapaction::PREVIEW)
         pub view: Option<[i32; 4]>, // draw-pass camera (left, right, top, bottom); None = whole map
         pub mouse: [i32; 2],        // map tile under the cursor (-1 = off the map), DLL_RunTick mouse_x / mouse_y
         pub centre: [i32; 4],       // DLL_RunTick centre tile x, y and tiles wide / high (radar camera)
@@ -110,6 +126,7 @@ mod sim {
         pub fn load(path: &str) -> Self {
             let mut m = Mem::default();
             shc_sim::world::load_save(&mut m, &std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"))).expect("parse save");
+            crate::extended::after_load(&mut m, std::path::Path::new(path));
             Self::from_mem(m)
         }
 
@@ -132,11 +149,12 @@ mod sim {
                     if m.u8(t::VALID + (y * 800 + x) as u64) != 0 { tiles[(t::row_off(&m, y) + x) as usize] = (x as i16, y as i16); }
                 }
             }
-            // GameMap.getMaxRadarSize: tilemapSize (0x1860ab524) − 4, at most 800; then GameAction 0x406
-            // (ResizeRadarMapBuffer). Mission maps are 200 / 300 / ...: their radar is that many pixels.
-            let size = m.i32(0x1860ab524);
-            let radar_n = if size <= 4 { RADAR_N } else if size > 800 { 800 } else { size - 4 };
+            // GameMap.resetRadarZoom by tilemapSize (0x1860ab524), then GameAction 0x406 (ResizeRadarMapBuffer)
+            let radar_n = radar_size(m.i32(0x1860ab524), crate::menu::opt("RadarDefaultZoomedOut", false));
             shc_sim::hudstate::set_radar_size(&mut m, radar_n);
+            // FatControler's start: Options' "show planned moat" (Settings_ShowPlannedMoat) = GameAction ShowPlannedMoat
+            // 1067 (1, 1); the draw pass then shows dug-to-be moat tiles (sim draw.rs)
+            if crate::menu::opt("Moat", false) { shc_sim::frontend::game_action(&mut m, 1067, 1, 1, 0, 0); }
             let me = m.i32(ma::LOCAL).max(1);
             Self { radar_n, m, last: vec![[0; 21]; 320_800], tiles, t0: std::time::Instant::now(), sent: false, view: None, preview: vec![],
                 mouse: [-1, -1], centre: [400, 400, 30, 30], pos: None, flattened: false, ret: vec![0; shc_sim::hudstate::RET_LEN], sel: vec![], held: None,
@@ -295,19 +313,23 @@ mod sim {
         pub fn hud(&mut self) -> HudState {
             let mut h = HudState::decode(&self.ret, &self.sel).unwrap_or_default();
             h.game_paused = self.m.u8(PAUSE); // = ret +2200, read now: a paused '.' step clears the latch for its tick
-            h.available = (0..0x1b8).map(|id| shc_sim::hudstate::mapper_available(&self.m, id)).collect();
-            h.costs = crate::hud::Table((0..0x1b8).map(|id| self.cost(id)).collect());
-            h.coords = crate::hud::Table((0..0x1b8).map(|id| ma::mapper_coord(&self.m, id)).collect());
+            // every eMappers id, and ours past them (shc_sim::ext::MAPPER_STABLE)
+            const IDS: i32 = shc_sim::ext::MAPPER_STABLE + 1;
+            h.available = (0..IDS).map(|id| shc_sim::hudstate::mapper_available(&self.m, id)).collect();
+            h.costs = crate::hud::Table((0..IDS).map(|id| self.cost(id)).collect());
+            h.coords = crate::hud::Table((0..IDS).map(|id| ma::mapper_coord(&self.m, id)).collect());
+            // ours: a Sassanid Stable's panel (Extended rules) and whether its recruit can go now
+            h.sassanid = (h.app_mode == 16 && h.app_sub_mode == 34 && shc_sim::ext::is_sassanid_stable(&self.m, h.in_structure))
+                .then(|| shc_sim::ext::can_recruit(&self.m, self.me).err().unwrap_or(0));
             h.end = crate::endgame::read(&self.m);
             // the game is over: its statistics for Skirmish Masters (DLL_GetMPScoreData; masters.rs records them)
             if h.end.is_some() { crate::menu::trail_menu::masters::capture(&self.m, self.t0.elapsed().as_millis() as u32); }
             h.ev = crate::hud::Events { campaign: self.m.i32(0x183663eb8) == 0, ..self.ev.clone() }; // game mode 0 = campaign
             crate::military::hud_extra(&self.m, &mut h); // local player, lords still in, game kind (allies / Free Build)
             let hill = self.hill.as_ref().or(match &self.tap { Some(crate::game_replay::Tap::Play(p)) => p.hill.as_ref(), _ => None });
-            if let Some(hill) = hill {
-                let names = self.net.as_ref().map_or(vec![], |n| n.status().lock().unwrap().players.clone());
-                h.hill = Some(crate::koth::board(hill, &self.m, self.me, &names));
-            }
+            let names = self.net.as_ref().map_or(vec![], |n| n.status().lock().unwrap().players.clone());
+            h.lords.who = crate::endgame::player_names(&self.m, self.me, &names); // the standings panel's names
+            if let Some(hill) = hill { h.hill = Some(crate::koth::board(hill, &self.m, self.me, &names)); }
             h
         }
 
@@ -322,9 +344,9 @@ mod sim {
             let Some(id) = (1..b::SLOTS).find(|&i| b::state(&self.m, i) != 0 && !before.contains(&i)) else { return };
             let (r, n) = (b::rec(id), self.m.i32(b::rec(id) + 0xf8));
             self.mouse = [self.m.i16(r + 0xee) as i32 + n / 2, self.m.i16(r + 0xf0) as i32 + n / 2];
-            crate::military::input(self, TroopIn::Press([0.0; 2], [0.0; 2], [0.0; 4]));
+            self.troop_event(TroopIn::Press([0.0; 2], [0.0; 2], [0.0; 4]));
             self.step();
-            crate::military::input(self, TroopIn::Release);
+            self.troop_event(TroopIn::Release);
             self.step();
             self.sent = false;
             let h = self.hud();
@@ -346,6 +368,17 @@ mod sim {
             self.clear_preview();
             if mapper == 0 || !ma::supported(mapper) { ma::start(&mut self.m, 0); return false; }
             ma::start(&mut self.m, mapper) >= 0
+        }
+
+        /// Ours: every assembly point of the open panel's building to tile (x, y), each through its own flag tool as
+        /// the panel's buttons place them (mapaction `rally`: the spot must be reachable; chore 0x66 per point).
+        /// Returns the chores queued; the tool is dropped afterwards.
+        pub fn rally(&mut self, x: i32, y: i32) -> usize {
+            let tools = rally_tools(self.hud().app_sub_mode);
+            let mut n = 0;
+            for t in tools { if self.set_tool(t) { n += ma::click(&mut self.m, x, y, self.me).len(); } }
+            self.set_tool(0);
+            n
         }
 
         /// DLL_MapAction hover (mouse state 0): the original validator FUN_1800770d0 on the footprint around (x, y).
@@ -436,6 +469,7 @@ mod sim {
             self.free_slots();
             let n = ma::click(&mut self.m, x, y, self.me).len();
             let v = self.verdict(tool, x, y);
+            if n > 0 && self.m.i32(ma::TOOL) == 0 { return (Verdict { why: DONE, ..v }, n); } // siege tents: crew used up
             (if v.ok && n == 0 { Verdict { ok: false, why: BROKE, ..v } } else { v }, n)
         }
 
@@ -466,7 +500,9 @@ mod sim {
             let kind = shc_sim::buildings::mapper_kind(mapper);
             if kind <= 0 || self.free(kind) { return [0; 5]; }
             let c = 0x1867e2b7c + kind as u64 * 0x14;
-            [0, 4, 8, 0xc, 0x10].map(|o| self.m.i32(c + o))
+            let mut v = [0, 4, 8, 0xc, 0x10].map(|o| self.m.i32(c + o));
+            if mapper == shc_sim::ext::MAPPER_STABLE { v[4] += shc_sim::ext::STABLE_EXTRA_GOLD; } // ours: a stables + 300 gold
+            v
         }
 
         /// FUN_1800b8920 (private `buildings::fb8920`): free placement for the local player.
@@ -556,6 +592,11 @@ mod sim {
             (t > 0 && tx >= 0).then_some((tx as i32, ty as i32))
         }
 
+        /// The oldest camera spot (radar object +0x13938 / +0x13988: ally pings, events) as a game tile, if any.
+        pub fn action_point(&self) -> Option<(i32, i32)> {
+            (self.m.i32(shc_sim::hudstate::RADAR + 0x13a28) > 0).then(|| (self.m.i32(shc_sim::hudstate::RADAR + 0x13938), self.m.i32(shc_sim::hudstate::RADAR + 0x13988)))
+        }
+
         /// DLL_GameAction(action, s, v, 0, 0) as player 1 (`frontend::game_action`, byte-identical to the DLL).
         pub fn game_action(&mut self, action: i32, s: i32, v: i32) -> i32 { self.game_action4(action, s, v, 0) }
         /// The same with a third argument (Ally_Orders' enemy, Ally_Send / RequestGoods' amount).
@@ -633,13 +674,19 @@ mod sim {
         println!("occupied: {v:?} {:?}", v.text());
     }
 
-    /// Campaign mission 1 is a 200-tile map: the radar is GameMap.getMaxRadarSize = 196 px (scaled up for the HUD) and
-    /// filled, not a 200-px corner of an 800-px picture; a click on its far corner still finds a tile; the castle tab
-    /// has locked (unavailable) buttons the HUD keeps on screen.
+    /// Campaign mission 1 is a 200-tile map: zoomed out, the radar is GameMap.getMaxRadarSize = 196 px (scaled up for
+    /// the HUD) and filled, not a 200-px corner of an 800-px picture; a click on its far corner still finds a tile; the
+    /// castle tab has locked (unavailable) buttons the HUD keeps on screen. Not zoomed out: 124 px.
     #[test]
     fn mission_radar_size() {
+        assert_eq!([radar_size(200, true), radar_size(200, false), radar_size(804, true), radar_size(1000, true), radar_size(0, false)], [196, 124, 800, 800, 124]);
+        let dir = std::env::temp_dir().join(format!("shc-radar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.cfg"), "||SETTINGS||\nRadarDefaultZoomedOut:True\nMoat:True\n||SETTINGS||\n").unwrap();
+        crate::skirmish::set_test_profile(&dir);
         let Ok(m) = crate::skirmish::start_mission(1, 1) else { return }; // needs the game's Maps folder
         let mut l = Live::from_mem(m);
+        assert_eq!(l.m.u8(0x183668084), 1, "show planned moat: ShowPlannedMoat 1067 sent at the start");
         l.records();
         l.step();
         assert_eq!(l.radar_n, 196);
@@ -913,12 +960,14 @@ impl Live {
     pub fn step(&mut self) -> Vec<Rec> { vec![] }
     pub fn hud(&mut self) -> HudState { HudState::default() }
     pub fn set_tool(&mut self, _: i32) -> bool { false }
+    pub fn rally(&mut self, _: i32, _: i32) -> usize { 0 }
     pub fn hover(&mut self, t: i32, x: i32, y: i32) -> Verdict { Verdict::unported(t, x, y) }
     pub fn clear_preview(&mut self) {}
     pub fn click(&mut self, t: i32, x: i32, y: i32) -> (Verdict, usize) { (Verdict::unported(t, x, y), 0) }
     pub fn drag_input(&mut self, t: i32, _: i32, x: i32, y: i32) -> (Verdict, usize) { (Verdict::unported(t, x, y), 0) }
     pub fn game_action(&mut self, _: i32, _: i32, _: i32) -> i32 { 0 }
     pub fn game_action4(&mut self, _: i32, _: i32, _: i32, _: i32) -> i32 { 0 }
+    pub fn action_point(&self) -> Option<(i32, i32)> { None }
     pub fn set_paused(&mut self, _: bool) {}
     pub fn rotate(&mut self, _: i32, _: i32, _: i32) {}
     pub fn tutorial(&mut self, _: i32, _: i32) {}
@@ -964,6 +1013,8 @@ pub fn camera(r: [f32; 4]) -> [i32; 4] {
 /// camera goes to that tile (`Frame::goto`); `Save`: write a .sav there (pause menu); `Rotate(rot, x, y)`:
 /// DLL_SetMapRotation, the camera centres on game tile (x, y) once the map has turned.
 pub enum Cmd { Run { playing: bool, rate: f32 }, View([i32; 4], [f32; 4]), Step, Tool(i32), Hover(i32, i32), Click(i32, i32), Drag(i32, i32, i32), Action([i32; 3]), Action4([i32; 4]), Mouse(i32, i32), Delete(i32), Tax(i32), Rations, Troops(TroopIn), Radar(i32, i32), Save(std::path::PathBuf), SaveReplay, Rotate(i32, i32, i32), Tutorial(i32, i32), ViewPos([i32; 2]), Flatten(bool), AppMode(i32, i32),
+    /// Ours: the open panel's assembly points to a tile (`Live::rally`); every own unit of the selection's types.
+    Rally(i32, i32), SelectTypes,
     /// The map editor (editor.rs): DLL_MapAction in mouse state 0..3 (`EdIn`), DLL_SetEditorPlayer, the map saved there.
     Editor(EdIn), EditorPlayer(i32), SaveMap(std::path::PathBuf) }
 
@@ -1045,6 +1096,7 @@ pub struct Thread {
     pub replay: bool,              // playing a replay: only Run / View / Step / Radar reach the sim (game_replay.rs)
     pub stats: std::sync::Arc<std::sync::Mutex<crate::stats::History>>, // per-player values over time (stats.rs), sampled on the sim thread
     pub ed: std::sync::Arc<std::sync::Mutex<Option<crate::menu::editor::Info>>>, // the map editor's map info, after each frame
+    pub saved: std::sync::Arc<std::sync::Mutex<Option<Result<std::path::PathBuf, String>>>>, // the last Cmd::SaveMap's result, taken by the editor HUD
 }
 
 impl Thread {
@@ -1063,7 +1115,14 @@ impl Thread {
         let hist = stats.clone();
         let ed = std::sync::Arc::new(std::sync::Mutex::new(None));
         let ed_out = ed.clone();
+        let saved = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let saved_out = saved.clone();
         std::thread::spawn(move || {
+            // QoS one class under the UI thread's: at the default class a busy Mac (builds, a browser) took the core away
+            // for 50-400 ms in the middle of a 3 ms tick, so ticks came in bursts and walking units stopped between them.
+            // User-interactive (the UI's own) kept the ticks as even but dropped more display frames under load
+            #[cfg(target_os = "macos")]
+            unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0); }
             let mut tool = (0, false); // (mapper, mapaction runs it)
             rate = crate::speed::clamp(&mut l, rate);
             let mut merge = crate::speed::Merge::default(); // above 90 ticks/s: one Frame per display frame (speed.rs)
@@ -1078,7 +1137,7 @@ impl Thread {
             let (mut rot_goto, mut last_rot) = (None, l.rotation());
             loop {
                 #[cfg(feature = "live")]
-                crate::audio::forward(shc_sim::sound::drain()); // the sim's sound queue is per thread: the UI thread plays it
+                { let s = shc_sim::sound::drain(); crate::lord_react::heard(&s); crate::audio::forward(s); } // the sim's sound queue is per thread: the UI thread plays it
                 let mut step = false;
                 let mut hover = None;
                 let mut input = false; // tool / panel input this round: redraw even without a tick
@@ -1113,7 +1172,10 @@ impl Thread {
                         Ok(cmd @ (Cmd::Action(_) | Cmd::Action4(_))) => {
                             input = true;
                             let [a, s, v, c] = match cmd { Cmd::Action([a, s, v]) => [a, s, v, 0], Cmd::Action4(x) => x, _ => unreachable!() };
+                            let spot = l.action_point(); // ActionPointClicked (1035) looks at the oldest camera spot
                             let r = l.game_action4(a, s, v, c);
+                            if a == 1063 { crate::lord_react::gave(s); } // Ally_SendGoods: his request answered
+                            if a == 1035 { goto = spot.or(goto); }
                             println!("game action {a} ({s}, {v}) -> {r}");
                             // EngineInterface.GameAction: a camera key (keep, groups, bookmarks, lord, ...; every
                             // KeyFunctions code that answers > 0), CycleBookmarks / CentreMarker: y * 1000 + x to centre on
@@ -1122,7 +1184,7 @@ impl Thread {
                             crate::military::after_action(l.mem(), a, r);
                         }
                         #[cfg(feature = "live")]
-                        Ok(Cmd::Troops(t)) => { input = true; crate::military::input(&mut l, t) }
+                        Ok(Cmd::Troops(t)) => { input = true; l.troop_event(t) }
                         #[cfg(not(feature = "live"))]
                         Ok(Cmd::Troops(_)) => {}
                         Ok(Cmd::Radar(x, y)) => { input = true; goto = l.radar_tile(x, y); }
@@ -1143,14 +1205,26 @@ impl Thread {
                             if !tool.1 && ported(tool.0) { continue; } // refused by the game: nothing to click with
                             let (v, n) = if tool.1 { l.click(tool.0, x, y) } else { (Verdict::unported(tool.0, x, y), 0) };
                             println!("click mapper {} at tile {x},{y}: {v:?}, {n} chore(s)", tool.0);
+                            if v.why == DONE { tool = (0, false); } // until the UI drops it too (Cmd::Tool(0))
                             set(v, !playing);
                         }
+                        Ok(Cmd::Rally(x, y)) => {
+                            input = true;
+                            let n = l.rally(x, y);
+                            if tool.1 { l.set_tool(tool.0); } // the flag tools replaced the build tool
+                            println!("rally points to {x},{y}: {n} chore(s)");
+                        }
+                        #[cfg(feature = "live")]
+                        Ok(Cmd::SelectTypes) => { input = true; println!("select all of the selection's types: {}", crate::military::select_types(l.mem())); }
+                        #[cfg(not(feature = "live"))]
+                        Ok(Cmd::SelectTypes) => {}
                         Ok(Cmd::Editor(e)) => { input = true; l.editor_input(e) }
                         Ok(Cmd::EditorPlayer(p)) => { input = true; l.editor_player(p) }
-                        Ok(Cmd::SaveMap(p)) => match l.save_map(&p) {
-                            Ok(()) => println!("saved map {}", p.display()),
-                            Err(e) => eprintln!("save map {}: {e}", p.display()),
-                        },
+                        Ok(Cmd::SaveMap(p)) => {
+                            let r = l.save_map(&p);
+                            match &r { Ok(()) => println!("saved map {}", p.display()), Err(e) => eprintln!("save map {}: {e}", p.display()) }
+                            *saved_out.lock().unwrap() = Some(r.map(|_| p).map_err(|e| e.to_string()));
+                        }
                         Ok(Cmd::Tax(d)) => { l.set_tax(l.tax() + d); println!("tax level {}", l.tax()) }
                         Ok(Cmd::Rations) => { l.set_rations((l.rations() + 1) % 5); println!("rations {}", l.rations()) }
                         Ok(Cmd::Rotate(r, x, y)) => { l.rotate(r, x, y); rot_goto = Some((x, y)); }
@@ -1170,21 +1244,28 @@ impl Thread {
                 }
                 if let Some((x, y)) = hover {
                     match tool {
+                        (0, _) => {}
                         (t, true) if is_drag(t) => set(l.drag_input(t, 0, x, y).0, !playing),
                         (t, true) => set(l.hover(t, x, y), !playing),
                         (t, false) if !ported(t) => set(Verdict::unported(t, x, y), !playing),
                         _ => {} // the game refused the tool (walls without stone, a tent without an engineer): no ghost
                     }
                 }
+                let due_at = pace.0;
                 if step || (playing && l.net_ready() && pace.due(Instant::now(), rate)) {
                     l.view = rect.map(camera);
                     if !playing { l.set_paused(false); } // '.' while paused: one real tick
+                    let (t_step, c_step) = (Instant::now(), crate::thread_cpu_us());
                     let recs = l.step();
+                    // SHC_TRACE: tick, µs: now, step wall, start after due, step CPU (wall ≫ CPU = the thread was preempted)
+                    crate::trace(|w, now| { let _ = writeln!(w, "S {} {now} {} {} {}", l.tick(), t_step.elapsed().as_micros(), t_step.saturating_duration_since(due_at).as_micros(), crate::thread_cpu_us() - c_step); });
                     if !playing { l.set_paused(true); }
                     #[cfg(feature = "live")]
                     if let Some(c) = l.tap.as_mut().and_then(|t| t.follow()) { goto = Some(c); } // a replay: the recorded camera
                     #[cfg(feature = "live")]
                     crate::stats::sample(l.mem(), &mut hist.lock().unwrap());
+                    #[cfg(feature = "live")]
+                    { let (me, t) = (l.me, l.tick()); crate::lord_react::watch(l.mem(), me, t); } // read only
                     let Some(recs) = merge.take(recs, rate, step || goto.is_some() || l.rotation() != last_rot) else { continue };
                     let radar = (n % 8 == 0).then(|| l.radar(view));
                     n += 1;
@@ -1204,7 +1285,7 @@ impl Thread {
             }
         });
         Self { tx, rx, tick, rot, verdict, tool: None, hover_at: [i32::MIN; 2], mouse_at: [i32::MIN; 2], press_w: None,
-            keys: [false; 3], rect: Default::default(), sent: ([f32::NAN; 2], [0.0; 2], [false; 3]), cursor: None, stats, ed, replay }
+            keys: [false; 3], rect: Default::default(), sent: ([f32::NAN; 2], [0.0; 2], [false; 3]), cursor: None, stats, ed, saved, replay }
     }
 
     /// Left press on the map with no build tool at world px `w` / window px `s` (DLL_TroopSelection state 1).

@@ -3,6 +3,7 @@ mod audio;
 mod cursor;
 mod endgame;
 mod koth; // the King of the Hill game mode (koth.rs)
+mod extended; // Extended rules beside a save (extended.rs)
 mod gestures;
 #[cfg(feature = "live")]
 mod game_replay; // game replays (game_replay.rs)
@@ -16,7 +17,9 @@ mod macos;
 mod map;
 mod menu;
 mod custom_lords; // DE's CustomLords / CustomMedia folders: custom AI lords (custom_lords.rs)
+mod lord_react; // a custom lord's viewer-side reactions: clip + line on what you see happen (lord_react.rs)
 mod lord_share; // a custom lord's .zip import, custom lords in LAN games (lord_share.rs)
+mod map_share; // custom maps in LAN games, the published maps (map_share.rs)
 mod paths; // per-OS game / cache / data folders
 mod setup; // first run: the user's own copy of the game (Steam download), exported once (setup/)
 #[cfg(feature = "live")]
@@ -120,21 +123,24 @@ fn parse_tables(atlases: &str, sprites: &str) -> (Vec<Atlas>, Vec<(String, Sprit
 /// SHC_AI=n (screenshots): the lobby's / --skirmish's one AI is lord n (1000 = the first custom lord).
 fn dev_ai() -> Option<usize> { std::env::var("SHC_AI").ok()?.parse().ok() }
 
-/// SHC_FIGHT=n[,type[,dx,dy]] (screenshots of a lord's walk / fight / death): n of your troops (default swordsmen,
+/// SHC_FIGHT=n[,type[,dx,dy[,owner]]][;...] (screenshots of a lord's walk / fight / death): n of your troops (default swordsmen,
 /// type 27) on player 2's keep roof at the start, waiting for his lord (placed there at ~tick 100); with dx,dy the
-/// troops stand that many tiles off the keep on open ground instead (archers there draw the lord out: lord_go_keep).
+/// troops stand that many tiles off the keep on open ground instead (archers there draw the lord out: lord_go_keep);
+/// owner 2 = his own troops (a custom lord's livery next to yours).
 #[cfg(feature = "live")]
 fn dev_fight(l: &mut live::Live) {
     let Ok(v) = std::env::var("SHC_FIGHT") else { return };
-    let f: Vec<i16> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-    let (Some(&n), ty, (dx, dy)) = (f.first(), f.get(1).copied().unwrap_or(27), (f.get(2).copied().unwrap_or(0), f.get(3).copied().unwrap_or(0))) else { return };
-    let Some((kx, ky)) = l.keep_of(2) else { eprintln!("SHC_FIGHT: player 2 has no keep"); return };
-    let (x, y) = (kx + dx, ky + dy);
-    use shc_sim::terrain as t;
-    let m = l.mem();
-    let h = m.u8(t::at(t::HEIGHT, 1, t::row_off(m, y as i32) + x as i32)) as i16;
-    for k in 0..n { shc_sim::units::helpers::spawn(m, 1, 1, (x + k % 5 - 2) * 8, (y + k / 5 % 5 - 2) * 8, h, ty as i32); } // 5×5 block
-    println!("SHC_FIGHT: {n} of type {ty} at {x},{y} h {h} (player 2's keep {kx},{ky})");
+    for g in v.split(';') { // several groups: "5,27,3,4;5,27,3,6,2" = yours beside his
+        let f: Vec<i16> = g.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        let (Some(&n), ty, (dx, dy), owner) = (f.first(), f.get(1).copied().unwrap_or(27), (f.get(2).copied().unwrap_or(0), f.get(3).copied().unwrap_or(0)), f.get(4).copied().unwrap_or(1)) else { continue };
+        let Some((kx, ky)) = l.keep_of(2) else { eprintln!("SHC_FIGHT: player 2 has no keep"); return };
+        let (x, y) = (kx + dx, ky + dy);
+        use shc_sim::terrain as t;
+        let m = l.mem();
+        let h = m.u8(t::at(t::HEIGHT, 1, t::row_off(m, y as i32) + x as i32)) as i16;
+        for k in 0..n { shc_sim::units::helpers::spawn(m, owner as i32, 1, (x + k % 5 - 2) * 8, (y + k / 5 % 5 - 2) * 8, h, ty as i32); } // 5×5 block
+        println!("SHC_FIGHT: {n} of type {ty} for player {owner} at {x},{y} h {h} (player 2's keep {kx},{ky}; yours {:?})", l.keep_of(1));
+    }
 }
 
 /// "body_hunter-1716x" -> ("body_hunter-x", 1716). Frames of one animation share the key.
@@ -162,7 +168,7 @@ struct Gfx {
 }
 
 /// HUD: screen-space uniform, UI atlas + font atlas bind groups (index = `HudTri.0`), own vertex buffer.
-struct HudGfx { screen_buf: wgpu::Buffer, buf: wgpu::Buffer, groups: [wgpu::BindGroup; 8], font: wgpu::Texture, radar: wgpu::Texture, video: wgpu::Texture, screen: wgpu::Texture, small: wgpu::Texture, coa: wgpu::Texture }
+struct HudGfx { screen_buf: wgpu::Buffer, buf: wgpu::Buffer, groups: [wgpu::BindGroup; 10], font: wgpu::Texture, radar: wgpu::Texture, video: wgpu::Texture, screen: wgpu::Texture, small: wgpu::Texture, coa: wgpu::Texture }
 
 /// Draw command: (iso row, atlas, vertex range). Rows interleave the static tile buffer with the object buffer.
 type Run = (i32, u32, Range<u32>);
@@ -222,7 +228,7 @@ fn runs(tris: &[Tri], rows: &[i32]) -> Vec<Run> {
 
 #[derive(Default)]
 struct Cam { zoom: f32, off: [f32; 2], cursor: [f32; 2], drag: bool, heights: Vec<i16>, bld: Vec<i16>, use_bld: bool,
-    zoom_pos: f32, zoom_anim: Option<(f32, f32, Instant)>, zoom_delay: Option<(bool, Instant)>,
+    zoom_pos: f32, zoom_anim: Option<(f32, f32, Instant)>, zoom_delay: Option<(bool, Instant)>, cycled: Option<Instant>,
     map: Option<MapBox>, keys: [bool; 4], cursor_in: bool, edge_mask: f32, bounds: Option<[f32; 5]>, ui_hidden: bool }
 // map: where the camera may go (None: no limits, e.g. --map / --sheet); keys: arrow keys held (left, right, up, down);
 // cursor_in: the mouse is in the window (edge scrolling); edge_mask: MapLowerEdgeMaskHeight in design px (limit);
@@ -416,8 +422,10 @@ struct App {
     menu: Option<menu::Menu>, // front end / Escape menu shown (no args, --menu; Escape in game)
     last_lobby: Option<skirmish::Lobby>, // the running game's lobby (Restart Mission)
     campaign: Option<(i32, i32, bool)>, // the running campaign mission: id, difficulty, win recorded
+    scenario: Option<(PathBuf, i32, bool)>, // the running Custom Scenario: map, difficulty, win recorded (Show Completed)
     tutorial: Option<menu::tutorial::Tutorial>, // the tutorial is running (game type 4): its panel (tutorial.rs)
     trail: Option<(i32, i32, i32, bool)>, // the running trail mission (menu/trail_menu.rs): trail, mission 0-based, difficulty, win recorded
+    solo: Option<(PathBuf, i32)>, // the running Custom Scenario (its difficulty) / Free Build (0) map: the side tab's briefing
     screen_image: Option<String>,        // the image in HUD texture menu::SCREEN
     names: Vec<String>,       // sprite names (Gm lookup for games started from the menu)
     end: endgame::Screen,     // --live: Victory / Defeat overlay (endgame.rs)
@@ -484,7 +492,7 @@ impl App {
         let now = Instant::now();
         let names: Vec<String> = named.iter().map(|(n, _)| n.clone()).collect();
         let mut app = Self { atlases, sprites: named.into_iter().map(|(_, s)| s).collect(), cells, hero, gfx: None, scene: None, scene_rows: vec![], sheet: false,
-            cam: Cam { zoom: 1.0, use_bld: true, zoom_pos: 3.0, ..Default::default() }, start: now, last: now, frame_times: vec![], frames: 0, play: None, ui: None, focus: None, drag_from: None, menu: None, last_lobby: None, campaign: None, trail: None, tutorial: None, screen_image: None, names: names.clone(), end: Default::default(), intro: None, menu_loop: video::MenuLoop::new(), cursors: None, mods: Default::default(), keys: keys::Keys::load(), #[cfg(feature = "live")] rp: None, ux: Default::default(), stats: Default::default(), loading: Default::default(), fps: None, editor: None };
+            cam: Cam { zoom: 1.0, use_bld: true, zoom_pos: 3.0, ..Default::default() }, start: now, last: now, frame_times: vec![], frames: 0, play: None, ui: None, focus: None, drag_from: None, menu: None, last_lobby: None, campaign: None, scenario: None, trail: None, solo: None, tutorial: None, screen_image: None, names: names.clone(), end: Default::default(), intro: None, menu_loop: video::MenuLoop::new(), cursors: None, mods: Default::default(), keys: keys::Keys::load(), #[cfg(feature = "live")] rp: None, ux: Default::default(), stats: Default::default(), loading: Default::default(), fps: None, editor: None };
         let args: Vec<String> = std::env::args().collect();
         let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
         if let Some(m) = arg("--map") { app.scene = Some(app.build_map(&m, &names)); }
@@ -506,7 +514,7 @@ impl App {
             if let Some(n) = dev_ai() { lobby.ais = vec![(n, 0)]; }
             lobby.hill = std::env::var("SHC_KOTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0); // SHC_KOTH=300: King of the Hill
             match skirmish::start(&lobby) {
-                Ok(mem) => { let mut l = live::Live::from_mem(mem).with_hill(lobby.hill); dev_fight(&mut l); app.start_live(l, None) }
+                Ok(mem) => { let mut l = live::Live::from_mem(mem).with_hill(lobby.hill); dev_fight(&mut l); app.start_live(l, None); app.last_lobby = Some(lobby) }
                 Err(e) => panic!("{e}"),
             }
         }
@@ -574,8 +582,10 @@ impl App {
         #[cfg(feature = "live")]
         if !l.tap.as_ref().is_some_and(|t| t.playing()) { self.rp = None; } // any other game ends a replay
         self.trail = None; // any other game start leaves the trail (Go::Trail sets it again after this)
+        self.solo = None; // and the Sandbox map (Go::FreeBuild / Scenario set it again)
         self.tutorial = None; // and the tutorial (Go::Tutorial sets it again)
         self.editor = None; // and the map editor (start_editor sets it again)
+        self.scenario = None; // and the Custom Scenario (Go::Scenario sets it again)
         // a new map: camera limits and the cursor pick's heights refill from its first draw list (loads from the
         // pause menu / restarts come here without going through the main menu)
         (self.cam.map, self.cam.heights) = (None, vec![]);
@@ -617,6 +627,7 @@ impl App {
         if self.lan_escape() { return; } // closes a LAN game's chat line (lan.rs)
         match self.menu.as_mut() {
             Some(m) => if let Some(go) = m.back() { self.menu_go(go, el) },
+            None if self.ui.as_mut().is_some_and(|u| u.escape_panel()) => {} // the allies / standings panel closes first
             None if self.play.as_ref().is_some_and(|p| p.live.is_some()) => {
                 if let Some(p) = &mut self.play { p.playing = false; }
                 self.menu = Some(menu::Menu::pause(self.last_lobby.is_some() || self.campaign.is_some() || self.trail.is_some()));
@@ -652,6 +663,17 @@ impl App {
     fn right_button(&mut self, pressed: bool) {
         if self.editor_right(pressed) { return; } // the map editor (menu/editor.rs)
         let over = self.ui.as_ref().is_some_and(|u| u.over(self.cam.cursor));
+        // ours: with a barracks / mercenary post / stockade / guild panel open, a right click on the map moves all its
+        // assembly points there (the panel's flag tools, live::Live::rally); the panel stays, Esc closes it
+        if let (false, Some(p)) = (over, self.play.as_ref()) {
+            if let (Some(l), Some(h)) = (p.live.as_ref(), p.huds.first()) {
+                if h.app_mode == 16 && !live::rally_tools(h.app_sub_mode).is_empty() {
+                    let t = self.cam.tile_at(l.rot);
+                    if pressed { l.send(live::Cmd::Rally(t[0], t[1])); }
+                    return;
+                }
+            }
+        }
         if !pressed {
             if let Some(u) = &mut self.ui { u.rclick = None; } // HUD_RightClick closes with the button
             if let (Some(l), false) = (self.play.as_ref().and_then(|p| p.live.as_ref()), over) {
@@ -661,7 +683,7 @@ impl App {
         }
         if self.ui.as_mut().is_some_and(|u| u.rclick(self.cam.cursor)) { return; } // a troop type off the selection
         let tool = self.ui.as_ref().and_then(|u| u.selected_mapper()).is_some();
-        if let Some(u) = &mut self.ui { u.selected = None; } // drop the build tool (StopAllPlacement)
+        if let Some(u) = &mut self.ui { u.drop_tool(); } // drop the build tool (StopAllPlacement)
         self.drag_from = None;
         if let Some((l, st)) = self.play.as_ref().and_then(|p| Some((p.live.as_ref()?, &p.huds[0]))) {
             l.send(live::Cmd::Troops(live::TroopIn::Right(true)));
@@ -714,6 +736,18 @@ impl App {
         match self.campaign { Some((id, _, false)) => menu::Go::Mission(id), _ => menu::Go::ToMenu }
     }
 
+    /// ButtonGotoBriefing from the HUD: a campaign mission's briefing, a trail mission's or a custom skirmish's
+    /// skirmish overlay, a Custom Scenario's / Free Build's map briefing. None in the tutorial, the editor, a loaded save.
+    fn mid_briefing(&self) -> Option<menu::Menu> {
+        if self.play.is_none() || self.tutorial.is_some() || self.editor.is_some() { return None; }
+        if let Some((id, d, _)) = self.campaign { return Some(menu::Menu::briefing_mid(id, d)); }
+        #[cfg(feature = "live")]
+        if let Some((t, id, d, _)) = self.trail { return menu::Menu::trail_brief(t, id, d, true); }
+        #[cfg(feature = "live")]
+        if let Some(l) = &self.last_lobby { return Some(menu::Menu::skirmish_brief(l)); }
+        self.solo.as_ref().map(|(map, d)| menu::Menu::scenario_briefing(map.clone(), *d, true))
+    }
+
     /// Menu result: load / start a game, leave it, quit.
     fn menu_go(&mut self, go: menu::Go, el: &ActiveEventLoop) {
         #[cfg(feature = "live")]
@@ -727,7 +761,7 @@ impl App {
                 self.editor = None;
                 self.cam.heights.clear();
                 if let Some(g) = &mut self.gfx { g.static_buf = None; }
-                if let Some(u) = &mut self.ui { u.selected = None; u.radar = false; }
+                if let Some(u) = &mut self.ui { u.drop_tool(); u.radar = false; }
                 // a won campaign mission goes on to the next one's story (its campaign's closing page after the 5th;
                 // HUD_MissionOver), a quit one back to its campaign's mission list
                 // a trail mission left: back to its trail map
@@ -815,7 +849,7 @@ impl App {
                     self.trail = Some((t, id, d, false));
                     if let Some(l) = self.play.as_ref().and_then(|p| p.live.as_ref()) { for a in menu::trail_menu::start_actions(t) { l.send(live::Cmd::Action(a)); } }
                     // the trail briefing over the paused mission until its Start (trail_menu.rs, ButtonGotoBriefing)
-                    if let Some(b) = menu::Menu::trail_brief(t, id, d) { if let Some(p) = &mut self.play { p.playing = false; } self.menu = Some(b); }
+                    if let Some(b) = menu::Menu::trail_brief(t, id, d, false) { if let Some(p) = &mut self.play { p.playing = false; } self.menu = Some(b); }
                 }
                 Err(e) => { let mut m = self.menu.take().unwrap_or_else(menu::Menu::main); m.error = Some(e); self.menu = Some(m); }
             },
@@ -823,7 +857,12 @@ impl App {
             menu::Go::Lan(s) => self.lan_start(*s), // a LAN game (lan.rs, menu/mp_menu.rs)
             #[cfg(feature = "live")]
             menu::Go::Start(l) => match self.loaded(|| skirmish::start(&l)) {
-                Ok(m) => { let hill = l.hill; (self.menu, self.last_lobby, self.campaign) = (None, Some(l), None); self.start_live(live::Live::from_mem(m).with_hill(hill), None); }
+                Ok(m) => {
+                    let (hill, competitive) = (l.hill, l.competitive);
+                    (self.menu, self.last_lobby, self.campaign) = (None, Some(l), None);
+                    self.start_live(live::Live::from_mem(m).with_hill(hill), None);
+                    if competitive { if let Some(p) = &mut self.play { p.rate = skirmish::COMPETITIVE_SPEED as f32; } } // its speed; + / - change it
+                }
                 Err(e) => self.menu.as_mut().unwrap().error = Some(e),
             },
             // Options changed settings.cfg: the running game's speed (Director.SetEngineFrameRate); Apply's screen mode
@@ -833,6 +872,9 @@ impl App {
                 self.keys = keys::Keys::load();
                 if let (Some(mode), Some(g)) = (mode, &self.gfx) { ux::set_mode(&g.window, mode); }
                 self.apply_options(); // VSync, cursor lock, background mute (ux.rs)
+                // HUD_Options.ShowMoat_ValueChanged: GameAction ShowPlannedMoat 1067 (1, 1) / (0, 0)
+                let moat = menu::opt("Moat", false) as i32;
+                if let Some(l) = self.play.as_ref().and_then(|p| p.live.as_ref()) { l.send(live::Cmd::Action([1067, moat, moat])); }
             }
             // Sandbox Play: Free Build / Custom Scenarios (FRONT_StandaloneMission.StartMap)
             #[cfg(feature = "live")]
@@ -846,9 +888,11 @@ impl App {
                         let cam = engine_view(&m);
                         self.start_live(live::Live::from_mem(m), cam);
                         if let Some(l) = self.play.as_ref().and_then(|p| p.live.as_ref()) { l.send(live::Cmd::Action([1045, 1, 1])); }
+                        self.solo = match &go { menu::Go::Scenario(map, d) => Some((map.clone(), *d)), menu::Go::FreeBuild(map, _) => Some((map.clone(), 0)), _ => None };
                         if let menu::Go::Scenario(map, d) = go {
+                            self.scenario = Some((map.clone(), d, false));
                             if let Some(p) = &mut self.play { p.playing = false; }
-                            self.menu = Some(menu::Menu::scenario_briefing(map, d));
+                            self.menu = Some(menu::Menu::scenario_briefing(map, d, false));
                         }
                     }
                     Err(e) => if let Some(m) = &mut self.menu { m.error = Some(e) },
@@ -1086,7 +1130,7 @@ impl App {
             let own = if r[0] == 2 { p.gm.lord(file, r[4], r[7]) } else { None }; // a custom lord's own sprite
             // past half its step (`next`), interpChimp shows the body's in-between frame (altFrame1Set), not while a
             // siege engine turns (then the turn's frame)
-            match own.or_else(|| p.gm.body_x(file, turn.unwrap_or(r[4]), next.is_some() && turn.is_none())) { Some(s) => objs.push((key, s, pos, color, team, 1.0)), None => *p.misses.entry(file).or_default() += 1 }
+            match own.or_else(|| p.gm.body_x(file, turn.unwrap_or(r[4]), next.is_some() && turn.is_none()).map(|s| p.gm.own(s, r[7]))) { Some(s) => objs.push((key, s, pos, color, team, 1.0)), None => *p.misses.entry(file).or_default() += 1 }
             // addUpdateFly, gameObjectType 40..47 (the floating numbers over buildings: keep gold, popularity, market):
             // children of the scroll, in Unity units of 64 px: the icon GM 202 frame k17 at x -0.75 (scale 1 for the
             // faces 128..130, 0.5 for the gold 171, else 0.4; sortingOrder +1) and the number k18 + k19·10⁴ in black
@@ -1197,6 +1241,7 @@ impl App {
                 audio::tick(|x, y| { let (x, y) = replay::to_west_pub(l.rot, x as i16, y as i16); let w = replay::cell_px(x, y); [c.off[0] + w[0] * c.zoom, c.off[1] + w[1] * c.zoom] }, sz.width, sz.height);
             }
             for f in l.frames() {
+                TRACE_IN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // map turned: the engine resets its draw cache and re-sends every object it shows (a building looks
                 // different from the new side), so drop the old ones; pick heights refill in the new frame
                 if f.rot != p.world.rot { p.world.objs.clear(); self.cam.heights.clear(); }
@@ -1223,6 +1268,14 @@ impl App {
                     pr.won(id, d);
                     if let Err(e) = pr.save() { eprintln!("campaign progress: {e}"); }
                     self.campaign = Some((id, d, true));
+                }
+                // Custom Scenario won: HUD_MissionOver.LoadVictoryScreen's ManageScores(currentMapName), once
+                if let (Some((_, _, done @ false)), Some(1)) = (&mut self.scenario, p.huds[0].end.as_ref().map(|e| e.result)) {
+                    *done = true;
+                    let (map, d, _) = self.scenario.as_ref().unwrap();
+                    let mut pr = skirmish::Progress::load();
+                    pr.won_map(map, *d);
+                    if let Err(e) = pr.save() { eprintln!("scenario progress: {e}"); }
                 }
                 // minimap click (GameAction RadarClicked → cameraMovedRecalcBounds): centre on that tile
                 if let (Some((x, y)), Some(g)) = (f.goto, &self.gfx) {
@@ -1379,6 +1432,7 @@ impl App {
                 (Some("d"), _) => self.left_button(true),
                 (Some("u"), _) => self.left_button(false),
                 (Some("z"), _) if self.menu.is_some() => self.menu.as_mut().unwrap().wheel(if v == Some("+") { 1.0 } else { -1.0 }),
+                (Some("z"), _) if menu::opt("SH1MouseWheel", false) => self.wheel(if v == Some("+") { 1.0 } else { -1.0 }), // SH1: keep / bookmark
                 (Some("z"), _) => self.adjust_zoom(if v == Some("+") { 0.5 } else { -0.5 }), // a mouse-wheel notch in / out
                 (Some("rd"), _) => self.right_button(true),
                 (Some("ru"), _) => self.right_button(false),
@@ -1468,6 +1522,20 @@ impl App {
                 l.send(live::Cmd::Action([1049, 0, 0]));
                 l.hover_at = [i32::MIN; 2];
             },
+            // ours (keys.rs EXTRA): every own unit of the selection's types on the map (military::select_types)
+            "SelectAllOfType" if !paused => if let Some(l) = &p.live { l.send(live::Cmd::SelectTypes) },
+            // ours: Delete takes the delete tool (the side tab's), a second press drops it
+            "DeleteTool" if !paused => if let Some(u) = self.ui.as_mut() {
+                if u.selected_mapper() == Some(0x27) { u.selected = None } else { u.pick_mapper(0x27) }
+            },
+            // ours: an open fletcher / poleturner / blacksmith switches to its other weapon (the panel's button, 1023)
+            "SwitchOutput" => if let (Some(h), Some(l)) = (st, &p.live) {
+                let pair = match (h.app_mode, h.app_sub_mode) { (16, 13) => Some([17, 18]), (16, 15) => Some([19, 20]), (16, 14) => Some([22, 21]), _ => None };
+                if let Some([a, b]) = pair {
+                    let g = if h.weapon[1] as i32 == a { b } else { a };
+                    if h.can_make[(g - 17) as usize] != 0 { l.send(live::Cmd::Action([1023, h.in_structure, g])) }
+                }
+            },
             // build hotkeys (C = walls): that tool, if the mission offers it (IsMapperAvailable), not while paused
             _ if place.is_some() => if let (false, Some(m), Some(u)) = (paused, place.filter(|&m| available(m)), self.ui.as_mut()) { u.pick_mapper(m) },
             // the rest: one DLL_GameAction (camera keys centre on its answer, live.rs)
@@ -1511,6 +1579,22 @@ impl App {
     /// PerfectPixelWithZoom.adjustZoom in game (map locked, ExtraZoom on): zoomPos ±`d` within 1..=3 (2..=3 when the
     /// window is over 2560×1440 device px, CanUserExtraZoom), then a 0.2 s glide to that level about the window centre.
     /// ponytail: CanUserExtraZoom's small-map limits (160 / 200 / 300) and capZoom (map wider than the screen) skipped.
+    /// In game, CameraControls2D's wheel: the original's zoom levels (±0.5 per notch, 150 ms apart unless the direction
+    /// flips), or with Options > SH1 mouse wheel (read each notch, so the option applies at once) up = your keep, down =
+    /// the next bookmark (keys::sh1_wheel).
+    fn wheel(&mut self, dy: f32) {
+        if dy == 0.0 { return; }
+        let (now, up) = (Instant::now(), dy > 0.0);
+        if menu::opt("SH1MouseWheel", false) {
+            let Some(a) = keys::sh1_wheel(up, self.cam.cycled.map(|t| now - t)) else { return };
+            if a[0] == 1026 { self.cam.cycled = Some(now); }
+            if let Some(l) = self.play.as_ref().and_then(|p| p.live.as_ref()) { l.send(live::Cmd::Action(a)); }
+        } else if self.cam.zoom_delay.is_none_or(|(u, t)| u != up || now > t) {
+            self.cam.zoom_delay = Some((up, now + std::time::Duration::from_millis(150)));
+            self.adjust_zoom(if up { 0.5 } else { -0.5 });
+        }
+    }
+
     fn adjust_zoom(&mut self, d: f32) {
         self.tutorial_action(3, -1); // PerfectPixelWithZoom.adjustZoom
         let Some(g) = &self.gfx else { return };
@@ -1523,7 +1607,7 @@ impl App {
     /// --live build tool: tell the sim thread about tool changes (DLL_StartMapAction) and the hovered tile (DLL_MapAction
     /// state 0), and turn its verdict (or a drag line) into a screen-space ghost. None = no tool / cursor on the HUD.
     fn build_ghost(&mut self) -> Option<hud::Ghost> {
-        let u = self.ui.as_ref()?;
+        let u = self.ui.as_mut()?;
         let l = self.play.as_mut()?.live.as_mut()?;
         let want = u.selected_mapper();
         self.cam.use_bld = bld_pick(want);
@@ -1549,6 +1633,7 @@ impl App {
         }
         // until the sim answers for this tool, show nothing
         let v = l.verdict().filter(|v| v.tool == mp)?;
+        if v.why == live::DONE { u.drop_tool(); return None; } // the sim dropped the tool (DLL_MapAction -50)
         // tools the sim runs draw their own ghost into the preview layer (building sprite, wall line, moat brush, at
         // the right height): only the reason text here; the outline is for tools it can't run
         if v.why != live::NOT_PORTED { return Some(hud::Ghost { tiles: vec![], why: v.text() }); }
@@ -1622,6 +1707,48 @@ fn frame_clock_evens_out_late_frames() {
     assert!(steps[200..].iter().all(|s| (s - 0.00835).abs() < 0.00085), "{:?}", &steps[200..210]);
     let pause = frame_clock(c, &mut f, t0 + std::time::Duration::from_secs_f32(real + 1.0));
     assert_eq!(pause, t0 + std::time::Duration::from_secs_f32(real + 1.0), "a pause: back to real time");
+}
+
+/// Edge / arrow scrolling by the clock's steps (RedrawRequested): even camera steps while the CPU's frames alternate
+/// 16 / 0.7 ms; by the CPU's own times they were 2 steps, then nearly none.
+#[test]
+fn camera_scrolls_on_the_frame_clock() {
+    let t0 = Instant::now();
+    let (mut c, mut f, mut real) = (t0, 1.0 / 120.0, 0.0f32);
+    let mut cam = Cam { keys: [true, false, false, false], ..Default::default() };
+    let mut steps = vec![];
+    for k in 0..400 {
+        real += if k % 2 == 0 { 0.0160 } else { 0.0007 };
+        let next = frame_clock(c, &mut f, t0 + std::time::Duration::from_secs_f32(real));
+        let x = cam.off[0];
+        cam.scroll(1000.0, 800.0, 2.0, false, next.saturating_duration_since(c).as_secs_f32());
+        steps.push(cam.off[0] - x);
+        c = next;
+    }
+    let m = steps[200..].iter().sum::<f32>() / 200.0;
+    assert!(m > 0.0 && steps[200..].iter().all(|s| (s - m).abs() < 0.1 * m), "{:?}", &steps[200..210]);
+}
+
+/// SHC_TRACE=file (dev, scored by re/scripts/judder.py): per frame `F` (timings, camera, the sim ticks taken) and `U`
+/// (every chimp's drawn base), per sim tick `S` (live.rs). SHC_FULL=1 keeps a scripted run fullscreen, as players run it.
+static TRACE: std::sync::Mutex<Option<std::io::BufWriter<std::fs::File>>> = std::sync::Mutex::new(None);
+static TRACE_T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+static TRACE_ACQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // µs waiting for the drawable
+static TRACE_IN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0); // sim Frames taken
+/// Writes to the SHC_TRACE file, if any, with µs since start.
+pub(crate) fn trace(f: impl FnOnce(&mut dyn std::io::Write, u128)) {
+    if let Some(w) = TRACE.lock().unwrap().as_mut() { f(w, TRACE_T0.get_or_init(Instant::now).elapsed().as_micros()) }
+}
+/// This thread's CPU time, µs.
+pub(crate) fn thread_cpu_us() -> u64 {
+    #[cfg(unix)]
+    {
+        let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) };
+        t.tv_sec as u64 * 1_000_000 + t.tv_nsec as u64 / 1000
+    }
+    #[cfg(not(unix))]
+    0 // ponytail: no thread CPU clock on Windows (as perf.rs)
 }
 
 fn scripted() -> bool { std::env::var_os("SHC_SHOT").is_some() || std::env::var_os("SHC_INPUT").is_some() }
@@ -1714,6 +1841,7 @@ impl App {
         match ev {
             WindowEvent::CloseRequested => el.exit(),
             // a custom lord's .zip dropped on the window: imported (lord_share.rs); the menu's Extras screen shows the result
+            WindowEvent::DroppedFile(p) if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("map")) => map_share::import(&p),
             WindowEvent::DroppedFile(p) if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) => {
                 lord_share::import_ui(&p, false);
                 eprintln!("lord import {}: {:?}", p.display(), lord_share::MESSAGE.lock().unwrap());
@@ -1768,15 +1896,9 @@ impl App {
             WindowEvent::MouseInput { button: MouseButton::Middle, state, .. } => self.cam.drag = state == ElementState::Pressed,
             // --live: right release (DLL_TroopSelection rightUp)
             WindowEvent::MouseInput { button: MouseButton::Right, state, .. } => self.right_button(state == ElementState::Pressed),
-            // in game: the original's zoom levels (CameraControls2D: ±0.5 per notch, 150 ms apart unless the direction flips)
             WindowEvent::MouseWheel { delta, .. } if self.play.as_ref().is_some_and(|p| p.live.is_some()) => {
                 let dy = match delta { MouseScrollDelta::LineDelta(_, y) => y, MouseScrollDelta::PixelDelta(p) => p.y as f32 };
-                let now = Instant::now();
-                let up = dy > 0.0;
-                if dy != 0.0 && self.cam.zoom_delay.is_none_or(|(u, t)| u != up || now > t) {
-                    self.cam.zoom_delay = Some((up, now + std::time::Duration::from_millis(150)));
-                    self.adjust_zoom(if up { 0.5 } else { -0.5 });
-                }
+                self.wheel(dy);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta { MouseScrollDelta::LineDelta(_, y) => y * 40.0, MouseScrollDelta::PixelDelta(p) => p.y as f32 };
@@ -1834,8 +1956,14 @@ impl App {
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
+                // the slides' clock (frame_clock) moves the camera too: scrolled / zoomed by real CPU time, the whole
+                // screen stepped 6 px then 3 px while the display showed even frames (macOS hands drawables late, then at once)
+                let (clock, step) = match &mut self.play {
+                    Some(p) => { let prev = p.now; p.now = frame_clock(prev, &mut p.frame_s, now); (p.now, p.now.saturating_duration_since(prev).as_secs_f32()) }
+                    None => (now, (now - self.last).as_secs_f32()),
+                };
                 if let (Some((from, to, t0)), Some(g)) = (self.cam.zoom_anim, &self.gfx) {
-                    let t = ((now - t0).as_secs_f32() / 0.2).min(1.0); // smoovZoomDuration
+                    let t = (clock.saturating_duration_since(t0).as_secs_f32() / 0.2).min(1.0); // smoovZoomDuration
                     let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
                     let c = &mut self.cam;
                     let nz = from + (to - from) * t;
@@ -1846,7 +1974,7 @@ impl App {
                 // in game: scrolling (arrows, window edges) and the original's camera limits after every move / zoom
                 if let (Some(g), true, None) = (&self.gfx, self.play.is_some(), &self.menu) {
                     let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
-                    let (sf, dt) = (g.window.scale_factor() as f32, (now - self.last).as_secs_f32());
+                    let (sf, dt) = (g.window.scale_factor() as f32, step);
                     let before = self.cam.off;
                     self.cam.scroll(sz.width, sz.height, sf, self.mods.shift_key(), dt);
                     if self.cam.off != before { self.tutorial_action(1, -1) } // CameraControls2D: the camera scrolled
@@ -1861,7 +1989,6 @@ impl App {
                     println!("frame {}: time avg {avg:.2} ms, max {max:.2} ms", self.frames);
                     self.frame_times.clear();
                 }
-                if let Some(p) = &mut self.play { p.now = frame_clock(p.now, &mut p.frame_s, now); }
                 if self.play.is_some() && self.frames > 0 { self.tick_replay(self.frame_times.last().copied().unwrap_or(0.0) / 1000.0, 0); }
                 // units sliding between tiles (record 0x34) move every frame, not just every tick (unless a tick just did)
                 let moving = |p: &Play| !p.world.next.is_empty() || p.world.turns.values().any(|t| t.secs > 0.0 && p.now.saturating_duration_since(t.at).as_secs_f32() < t.secs);
@@ -1898,9 +2025,10 @@ impl App {
                 if self.ui.as_mut().is_some_and(|u| std::mem::take(&mut u.open_menu)) && self.menu.is_none() { self.escape(el); }
                 // a building panel's help button: its page over the running game (HUD_Help.OpenHelp(fromMenu: false))
                 if let Some(page) = self.ui.as_mut().and_then(|u| u.help.take()).filter(|_| self.menu.is_none()) { self.menu = Some(menu::Menu::help(&page, false, false)); }
-                // SideTabs' briefing button (ButtonGotoBriefing): a campaign mission's briefing over the paused game
+                // SideTabs' briefing button (ButtonGotoBriefing): the mission's briefing over the paused game, in any game
+                // but the tutorial (game type 4) and the map editor
                 if self.ui.as_mut().is_some_and(|u| std::mem::take(&mut u.open_briefing)) && self.menu.is_none() {
-                    if let (Some((id, d, _)), Some(p)) = (self.campaign, &mut self.play) { p.playing = false; self.menu = Some(menu::Menu::briefing_mid(id, d)); }
+                    if let Some(m) = self.mid_briefing() { if let Some(p) = &mut self.play { p.playing = false; } self.menu = Some(m); }
                 }
                 if let (Some(u), Some(l)) = (self.ui.as_mut(), self.play.as_ref().and_then(|p| p.live.as_ref())) {
                     (u.shift, u.ctrl) = (self.mods.shift_key(), self.mods.control_key());
@@ -2094,7 +2222,20 @@ impl App {
                 let tick = self.play.as_ref().and_then(|p| p.live.as_ref()).map_or(0, |l| l.tick);
                 let hud = if self.menu.is_none() { Self::fps_text(&mut self.fps, self.ui.as_mut(), tick, g.window.inner_size().to_logical::<f32>(g.window.scale_factor()).width, hud) } else { hud }; // F: fps / sim rate
                 let hud = ux::overlay(&mut self.ux, self.ui.as_mut(), &self.keys, &g.window, hud); // F1 sheet, notices
+                let t_pre = Instant::now();
                 draw(g, &self.cam, tris, rows, &hud, shot.as_deref());
+                // F frame, µs: frame start, slide clock, work before draw, drawable wait, draw incl. the wait; sim Frames
+                // taken, sim tick, camera offset x y, zoom
+                trace(|w, _| {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    let us = |t: Instant| t.saturating_duration_since(*TRACE_T0.get().unwrap()).as_micros();
+                    let (tick, clock) = self.play.as_ref().map_or((0, 0), |p| (p.live.as_ref().map_or(0, |l| l.tick), us(p.now)));
+                    let _ = writeln!(w, "F {} {} {clock} {} {} {} {} {tick} {:.3} {:.3} {:.5}", self.frames, us(now), (t_pre - now).as_micros(), TRACE_ACQ.swap(0, Relaxed),
+                        t_pre.elapsed().as_micros(), TRACE_IN.swap(0, Relaxed), self.cam.off[0], self.cam.off[1], self.cam.zoom);
+                    if let Some(p) = self.play.as_ref().filter(|p| p.world.drawn_at == Some(p.now)) {
+                        for (id, b) in &p.world.drawn { let _ = writeln!(w, "U {id} {:.3} {:.3}", b[0], b[1]); }
+                    }
+                });
                 if shot.is_some() && self.frames >= to {
                     if let Some(p) = &self.play {
                         println!("shot at tick {}, rotation {}, {} objects, sprite misses by GM file: {:?}", p.at - 1, p.world.rot, p.world.objs.len(), p.misses);
@@ -2198,17 +2339,26 @@ async fn init_gfx(window: Arc<Window>, atlases: &[Atlas], with_hud: bool) -> Gfx
             dimension: wgpu::TextureDimension::D2, format, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
         });
         // UI-MasterAtlas: 8192² BC7, 14 mips back to back (re/scripts/export_ui_atlas.py); the HUD draws it at ~0.4×
-        let data = std::fs::read(cache_dir().join("ui/UI-MasterAtlas.bc")).unwrap();
-        let atlas = tex("UI-MasterAtlas", 8192, 14, wgpu::TextureFormat::Bc7RgbaUnormSrgb);
-        let mut off = 0;
-        for m in 0..14 {
-            let blocks = (8192u32 >> m).div_ceil(4);
-            let len = (blocks * blocks * 16) as usize;
-            queue.write_texture(wgpu::TexelCopyTextureInfo { texture: &atlas, mip_level: m, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                &data[off..off + len], wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(blocks * 16), rows_per_image: Some(blocks) },
-                wgpu::Extent3d { width: (8192 >> m).max(1), height: (8192 >> m).max(1), depth_or_array_layers: 1 }.physical_size(wgpu::TextureFormat::Bc7RgbaUnormSrgb));
-            off += len;
-        }
+        let bc7 = |name, w: u32, mips: u32| {
+            let data = std::fs::read(cache_dir().join(format!("ui/{name}.bc"))).unwrap();
+            let t = tex(name, w, mips, wgpu::TextureFormat::Bc7RgbaUnormSrgb);
+            let mut off = 0;
+            for m in 0..mips {
+                let blocks = (w >> m).div_ceil(4);
+                let len = (blocks * blocks * 16) as usize;
+                queue.write_texture(wgpu::TexelCopyTextureInfo { texture: &t, mip_level: m, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    &data[off..off + len], wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(blocks * 16), rows_per_image: Some(blocks) },
+                    wgpu::Extent3d { width: (w >> m).max(1), height: (w >> m).max(1), depth_or_array_layers: 1 }.physical_size(wgpu::TextureFormat::Bc7RgbaUnormSrgb));
+                off += len;
+            }
+            t
+        };
+        let atlas = bc7("UI-MasterAtlas", 8192, 14);
+        // hud::COLOUR_TEX..: UI-Colour1/2Atlas, the player-colour sprites (4096², 13 mips); 4×4 when the export lacks them
+        let colour = [shc_extract::ui::ATLASES[1], shc_extract::ui::ATLASES[2]].map(|a| match hud::colour_atlas(&cache_dir().join("ui"), a) {
+            Some((w, mips, _)) => bc7(a, w, mips),
+            None => tex(a, 4, 1, wgpu::TextureFormat::Bc7RgbaUnormSrgb),
+        });
         let font = tex("font", hud::FONT_PX, 1, wgpu::TextureFormat::Rgba8Unorm);
         let screen_buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let mip_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -2243,7 +2393,7 @@ async fn init_gfx(window: Arc<Window>, atlases: &[Atlas], with_hud: bool) -> Gfx
             label: Some("coa"), size: wgpu::Extent3d { width: menu::coa::W, height: menu::coa::H, depth_or_array_layers: 1 }, mip_level_count: 1, sample_count: 1,
             dimension: wgpu::TextureDimension::D2, format: wgpu::TextureFormat::Rgba8UnormSrgb, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
         });
-        let groups = [group(&atlas), group(&font), group(&radar), group(&art), group(&video), group(&screen), group(&small), group(&coa)];
+        let groups = [group(&atlas), group(&font), group(&radar), group(&art), group(&video), group(&screen), group(&small), group(&coa), group(&colour[0]), group(&colour[1])];
         let buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("hud"), size: 4 << 20, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         println!("uploaded UI atlas in {:.2}s", t0.elapsed().as_secs_f32());
         HudGfx { screen_buf, buf, groups, font, radar, video, screen, small, coa }
@@ -2265,7 +2415,9 @@ fn draw(g: &Gfx, cam: &Cam, tris: &[Tri], rows: &[i32], hud: &[hud::HudTri], sho
     while i < stat.len() || j < dynamic.len() {
         if j >= dynamic.len() || (i < stat.len() && stat[i].0 <= dynamic[j].0) { cmds.push((true, &stat[i])); i += 1; } else { cmds.push((false, &dynamic[j])); j += 1; }
     }
+    let t_acq = Instant::now();
     let Ok(frame) = g.surface.get_current_texture() else { return };
+    TRACE_ACQ.store(t_acq.elapsed().as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
     let view = frame.texture.create_view(&Default::default());
     let mut enc = g.device.create_command_encoder(&Default::default());
     {
@@ -2330,6 +2482,8 @@ fn draw(g: &Gfx, cam: &Cam, tris: &[Tri], rows: &[i32], hud: &[hud::HudTri], sho
 }
 
 fn main() {
+    TRACE_T0.get_or_init(Instant::now);
+    if let Some(f) = std::env::var_os("SHC_TRACE") { *TRACE.lock().unwrap() = std::fs::File::create(f).ok().map(std::io::BufWriter::new); }
     paths::app_bundle_start();
     setup::ensure();
     update::start();

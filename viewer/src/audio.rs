@@ -31,6 +31,29 @@ pub mod ui_id {
     pub const DEFEAT: i32 = 321;
 }
 
+/// SFXManager.playIntroSpeech: the front end's greeting on day `day` of `month` (`thursday`: that day is one). Christmas
+/// Eve-ish 14 Dec and 25 Dec, then the extra days (supportsAdditionalVoicelines: English speech, the only one here,
+/// Thanksgiving = the Thursday of 22..28 Nov), else with Options' Custom Intros (`custom`) the player `name`'s line
+/// (stronghold_names_speech_list, re/data/intro_names.tsv: the first listed name that is the whole name, its first
+/// word or its last word, any case), else general_startgame.
+#[cfg_attr(not(feature = "live"), allow(dead_code))]
+pub fn greeting(name: &str, month: i64, day: i64, thursday: bool, custom: bool) -> String {
+    let days = [(12, 14, 18), (12, 25, 17), (10, 19, 130), (9, 25, 119), (4, 18, 120), (10, 13, 121), (10, 25, 122), (9, 22, 123),
+        (3, 9, 124), (11, 4, 125), (1, 1, 126), (6, 21, 127), (12, 21, 128)];
+    if let Some(&(_, _, n)) = days.iter().find(|&&(m, d, _)| (m, d) == (month, day)) { return format!("General_message{n}.wav"); }
+    if month == 11 && (22..=28).contains(&day) && thursday { return "General_message129.wav".into(); }
+    let text = name.to_lowercase();
+    let names = include_str!("../../re/data/intro_names.tsv").lines().filter(|l| !l.starts_with('#')).filter_map(|l| l.split_once('\t'));
+    for (n, wav) in names.filter(|_| custom) {
+        let n = n.to_lowercase();
+        let Some(at) = text.find(&n) else { continue };
+        // the C#: past the start only as the last word; at the start the whole name or its first word
+        let ok = if at > 0 { text.ends_with(&n) && text.as_bytes()[at - 1] == b' ' } else { text.len() == n.len() || text.as_bytes()[n.len()] == b' ' };
+        if ok { return wav.to_string(); }
+    }
+    "general_startgame.wav".into()
+}
+
 #[cfg(feature = "live")]
 mod imp {
     use shc_sim::sound::{drain, Sound};
@@ -189,8 +212,8 @@ mod imp {
 
     /// Once per frame while the menu shows. `front_end` = main menu, save list, lobby (not the in-game Escape menu):
     /// FatControler.changeScene(FrontEnd) → playMusic(3) "A Strong Spice", looped, volume 1 (no volume.txt entry), and
-    /// once per run playIntroSpeech's greeting 0.5 s after the front end first shows (delayPlaySpeech, music not ducked).
-    /// ponytail: no date / player-name greetings.
+    /// once per run playIntroSpeech's greeting (`greeting`) 0.5 s after the front end first shows (delayPlaySpeech, music
+    /// not ducked).
     pub fn menu(front_end: bool) {
         S.with(|s| {
             let mut s = s.borrow_mut();
@@ -205,11 +228,17 @@ mod imp {
                 None if front_end => st.greet = Some(Some(now + Duration::from_millis(500))),
                 Some(Some(t)) if front_end && now >= t => {
                     st.greet = Some(None);
-                    st.a.play_speech(1, "general_startgame.wav", 1.0);
+                    // FatControler: playIntroSpeech(Settings_UserName) by the local date
+                    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64) + crate::saves::tz();
+                    let (d, m, _) = crate::menu::civil(secs);
+                    let thursday = (secs.div_euclid(86400) + 4).rem_euclid(7) == 4; // 1 Jan 1970 was one
+                    let cfg = crate::skirmish::Settings::load();
+                    st.a.play_speech(1, &super::greeting(cfg.get("Name").unwrap_or(""), m, d, thursday, crate::menu::opt("CustomIntros", true)), 1.0);
                 }
                 _ => {}
             }
             if let Some((_, line)) = st.story.take_if(|(t, _)| now >= *t) { st.a.play_speech(3, &line, 1.0) }
+            st.a.mix(false);
             flush(Some(st));
         })
     }
@@ -246,8 +275,12 @@ mod imp {
         })
     }
 
-    /// video.rs: a video's soundtrack (IntroSequence.StartVideo: speech slider × master); None stops it.
-    pub fn video(wav: Option<&std::path::Path>) { with(|st| st.a.play_video(wav, 1.0)) }
+    /// video.rs: a video's soundtrack (IntroSequence.StartVideo: speech slider × master); None stops it. A custom
+    /// lord's (`custom_<slug>_trailer.wav`, custom_lords::vid) plays alone: no music, menu sounds or lines over it.
+    pub fn video(wav: Option<&std::path::Path>) {
+        let solo = wav.and_then(|p| p.file_name()).is_some_and(|f| f.to_string_lossy().starts_with("custom_"));
+        with(|st| st.a.play_video(wav, 1.0, solo))
+    }
 
     /// FRONT_Story page. `music` = engine path ("fx\\music\\crusader.raw"): playMusic(ID, fadePrevious: false, 0.4),
     /// i.e. game volume 0.4 × its volume.txt level, looped, restarted on every call; None leaves the music alone.
@@ -351,7 +384,7 @@ mod imp {
             // game_over's later line: not before its time, and 1 s after channel 1 last talked
             if let Some((t, _)) = &mut st.later { if st.a.speech_playing(1) { *t = (*t).max(Instant::now() + Duration::from_secs(1)) } }
             if let Some((_, l)) = st.later.take_if(|(t, _)| Instant::now() >= *t) { st.a.play_speech(1, &l, 1.0) }
-            st.a.duck_for_speech();
+            st.a.mix(true);
             let (playing, about) = st.a.music_update();
             MUSIC[0].store(playing, Relaxed);
             MUSIC[1].store(about, Relaxed);
@@ -397,6 +430,22 @@ pub fn genie_team(_: usize, _: bool) {}
 pub fn music(_: &str, _: f32) {}
 #[cfg(not(feature = "live"))]
 pub fn game_over(_: bool, _: bool) {}
+
+/// The greeting: a date line first, then (Custom Intros on) the name as a whole word at the start or the end, then
+/// the plain line; the list order decides between "Anne Marie" and "Anne".
+#[test]
+fn intro_greeting() {
+    assert_eq!(greeting("Anne", 12, 25, false, true), "General_message17.wav");
+    assert_eq!(greeting("x", 11, 24, true, true), "General_message129.wav", "Thanksgiving");
+    assert_eq!(greeting("x", 11, 24, false, true), "general_startgame.wav");
+    assert_eq!(greeting("Anne", 5, 5, false, true), "Name6.wav");
+    assert_eq!(greeting("anne marie", 5, 5, false, true), "Name7.wav");
+    assert_eq!(greeting("Lord Andrew", 5, 5, false, true), "Name47.wav", "the last word");
+    assert_eq!(greeting("Andrew the Great", 5, 5, false, true), "Name47.wav", "the first word");
+    assert_eq!(greeting("Andrews", 5, 5, false, true), "general_startgame.wav", "not inside a word");
+    assert_eq!(greeting("Anne", 5, 5, false, false), "general_startgame.wav", "Custom Intros off");
+    assert_eq!(include_str!("../../re/data/intro_names.tsv").lines().filter(|l| !l.starts_with('#')).count(), 330);
+}
 
 #[cfg(all(test, feature = "live"))]
 mod tests {

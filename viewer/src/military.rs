@@ -4,8 +4,7 @@
 //! that over right before every DLL_RunTick; the sim's troop cursor FUN_18008b850 (`troopcursor::f8b850` + its callees
 //! in `troopsel`, inside `frontend::run_tick`) then selects, picks the cursor sprite (draw record type 5) and issues
 //! the orders as chores, with the DE's default SH1 controls (left click orders, right click deselects).
-//! Siege tents and the patrol flag stay here: EngBuild_* / Troops_Patrol return a tool C# starts a MapAction with, and
-//! mapaction has no branch for those tools.
+//! The patrol flag stays here (Troops_Patrol is never a map tool); siege tents are build tools (`mapaction`).
 use crate::live::TroopIn;
 use crate::replay::{self, Rec};
 use shc_sim::{commands, mem::Mem};
@@ -15,7 +14,6 @@ use std::time::{Duration, Instant};
 const UN: u64 = 0x1867e53f0; // +0 count; unit +0x6e4 state, +0x6e6 type, +0x6ee owner, +0x70a selected by, +0x8f8 dying
 const LOCAL: u64 = 0x1888e0d60;
 const GROUPS: u64 = 0x187cc3710; // unit groups (0x688 each); +0 = the selection's group
-const ARGS: u64 = 0x1886be31c; // chore scratch args a..f
 
 fn u(i: i32) -> u64 { UN + i as u64 * 0x490 }
 fn ty(m: &Mem, i: i32) -> i32 { m.i16(u(i) + 0x6e6) as i32 }
@@ -25,6 +23,20 @@ fn alive(m: &Mem, i: i32) -> bool { m.i16(u(i) + 0x6e4) == 2 && m.i16(u(i) + 0x8
 pub fn selected(m: &Mem) -> Vec<i32> {
     let p = m.i32(LOCAL);
     (1..m.i32(UN)).filter(|&i| alive(m, i) && m.i16(u(i) + 0x70a) as i32 == p && m.i16(u(i) + 0x6ee) as i32 == p).collect()
+}
+
+/// Ours (Ctrl+A, keys.rs EXTRA): every own, commandable unit of the selection's types on the whole map becomes the
+/// selection, the way SelectClan selects a control group (marks +0x68c, FUN_180190470: bitmap → new group → chore
+/// 0x10), so it goes out as the same chore in a LAN game. Returns the units selected.
+pub fn select_types(m: &mut Mem) -> i32 {
+    let p = m.i32(LOCAL);
+    let types: std::collections::BTreeSet<i32> = selected(m).iter().map(|&i| ty(m, i)).collect();
+    if types.is_empty() { return 0; }
+    for i in 1..m.i32(UN) {
+        let pick = alive(m, i) && m.i16(u(i) + 0x6ee) as i32 == p && m.i16(u(i) + 0x8fc) != 0 && types.contains(&ty(m, i));
+        m.set_i16(u(i) + 0x68c, pick as i16);
+    }
+    shc_sim::frontend::f190470(m)
 }
 
 /// GameMap.body_actual_dimensions by eChimps type: width, height above and below the feet (game px, ×2 on screen).
@@ -212,54 +224,12 @@ fn patrol(m: &mut Mem) -> bool {
     on != 0
 }
 
-/// SendChore(type) with the scratch args a, b, c…
-fn send(m: &mut Mem, ty: u8, args: &[i32]) {
-    for (k, &v) in args.iter().enumerate() { m.set_i32(ARGS + k as u64 * 4, v); }
-    commands::send(m, ty);
-}
-
-/// Siege engine placement (EngBuild_* return the tool 0xbe..0xc2 / 0x166; the click is FUN_18008ff30's build
-/// branch, which `mapaction` does not run for these tools): chore 0x1c with the engineers' group as the last field,
-/// footprint centred on the tile. The handler validates the spot (`placement::validate`). None = no engineers.
-/// ponytail: the cost check FUN_1800cb630 is pub(crate) in the sim, so an unaffordable engine is only refused by
-/// the handler's own checks.
-pub fn place_siege(m: &mut Mem, tool: i32, x: i32, y: i32) -> Option<String> {
-    if !selected(m).iter().any(|&i| ty(m, i) == 0x1e) { return None; }
-    let size = crate::live::footprint(tool).max(1);
-    let (x, y) = (x - size / 2, y - size / 2);
-    let g = m.i32(GROUPS);
-    send(m, 0x1c, &[x, y, tool, size, 0, g]);
-    Some(format!("siege {tool:#x} at {x},{y}"))
-}
-
-/// Siege tool armed by an EngBuild_* button (0 = none); the next left click on the map places it.
-static SIEGE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
-
-/// Sim-thread side of `live::Cmd::Troops`: an armed siege tool takes the next left click, everything else is
-/// DLL_TroopSelection input.
-pub fn input(l: &mut crate::live::Live, inp: TroopIn) {
-    use std::sync::atomic::Ordering::Relaxed;
-    match inp {
-        TroopIn::Press(..) if SIEGE.load(Relaxed) != 0 => {}
-        TroopIn::Release if SIEGE.load(Relaxed) != 0 => {
-            let [x, y] = l.mouse;
-            let tool = SIEGE.swap(0, Relaxed);
-            println!("{}", place_siege(l.mem(), tool, x, y).unwrap_or_else(|| "siege: no engineers selected".into()));
-        }
-        TroopIn::Right(true) => { SIEGE.store(0, Relaxed); l.troop_event(inp) }
-        _ => l.troop_event(inp),
-    }
-}
-
-/// After DLL_GameAction: EngBuild_* (1014..1018, 1060) return the siege tool C# then places; Troops_Patrol (1019)
-/// toggles the patrol flag. Every result goes to `hud::ACTION_RET` (the market reads its trade errors there).
+/// After DLL_GameAction: Troops_Patrol (1019) toggles the patrol flag. Every result goes to `hud::ACTION_RET` (the
+/// market reads its trade errors there; EngBuild_* 1014..1018 / 1060 return the siege tent tool the HUD then holds
+/// like a build tool, as C# GameAction → EditorDirector.placeBuilding does).
 pub fn after_action(m: &mut Mem, action: i32, ret: i32) {
     if let Ok(mut r) = crate::hud::ACTION_RET.lock() { *r = (action, ret, r.2.wrapping_add(1)); }
-    match action {
-        1014..=1018 | 1060 if ret > 0 => SIEGE.store(ret, std::sync::atomic::Ordering::Relaxed),
-        1019 => println!("patrol {}", if patrol(m) { "on" } else { "off" }),
-        _ => {}
-    }
+    if action == 1019 { println!("patrol {}", if patrol(m) { "on" } else { "off" }); }
 }
 
 /// What the HUD needs beside PlayStateReturnData: the local player, DLL_GetMeritData's "still in" per lord
@@ -274,6 +244,36 @@ pub fn hud_extra(m: &Mem, h: &mut crate::hud::HudState) {
     l.free_build = mp == 0 && mode == 2 && m.i32(0x1832d8cac) == 3;
     let young = m.i32(0x183663eec) + 200 >= m.i32(0x183663ee8);
     for p in 1..9 { l.in_game[p] = m.u8(0x1887ebd7d + p as u64 - 1) != 0 && (young || lord_alive(m, p as i32)); }
+    l.merit_button = mp != 0; // SkirmishModeVisMerit: any skirmish / multiplayer game
+    l.merit = merit(m);
+}
+
+/// DLL_GetMeritData (0x1800833b0) as C# GetMeritData's int[9, 5]: per player 1..8 [player (-1 = no one), rank key
+/// (FUN_180001e20; -1 = the lord fell over 200 ticks into the game), gold (≥ 0), troops (record +0x53c), team].
+/// Read only.
+pub fn merit(m: &Mem) -> [[i32; 5]; 9] {
+    let young = m.i32(0x183663eec) + 200 >= m.i32(0x183663ee8);
+    let mut d = [[0; 5]; 9];
+    for (p, row) in d.iter_mut().enumerate().skip(1) {
+        let r = shc_sim::game::player(p as u32);
+        *row = match () {
+            _ if m.u8(0x1887ebd7d + p as u64 - 1) == 0 => [-1, 0, 0, 0, 0],
+            _ if !young && !lord_alive(m, p as i32) => [p as i32, -1, 0, 0, 0],
+            _ => [p as i32, rank_key(m, r), m.i32(r + 0x50c).max(0), m.i32(r + 0x53c), m.i32(0x1837f1db0 + (p as u64 - 1) * 4)],
+        };
+    }
+    d
+}
+
+/// FUN_180001e20(p): the merit score the Greatest Lord sort uses: the stock (record +0x4d0 + 4 · good) of goods 2..4,
+/// 6, 8, 10..14, 16..24 at their value (FUN_1800ceb30: the market's price table, G + 0x1817bc, ÷ 5) in three sums ÷ 10,
+/// population (+0x2180) × 10, record +0x38e8 and gold ÷ 10. C int arithmetic (wrapping). The Steam DLL's build has
+/// these globals 0x2070 higher than the one the sim ports (its LEA 0x18366c210 = the sim's G).
+fn rank_key(m: &Mem, r: u64) -> i32 {
+    use shc_sim::game::{G, P_GOLD, P_POPULATION};
+    let worth = |goods: &[u64]| goods.iter().fold(0i32, |a, &k| a.wrapping_add((m.i32(G + 0x1817bc + k * 8) / 5).wrapping_mul(m.i32(r + 0x4d0 + k * 4))));
+    (worth(&[2, 3, 4, 6, 8, 14, 16]) / 10).wrapping_add(m.i32(r + P_POPULATION).wrapping_mul(10)).wrapping_add(worth(&[17, 18, 19, 20, 21, 22, 23, 24]) / 10)
+        .wrapping_add(worth(&[10, 11, 12, 13]) / 10).wrapping_add(m.i32(r + 0x38e8)).wrapping_add(m.i32(r + P_GOLD) / 10)
 }
 
 /// FUN_180186e20(units, p): player p's lord unit (id 0x183a0d980, serial 0x183a0d994) is alive (sim commands::lord_alive).
@@ -306,6 +306,16 @@ mod tests {
         crate::skirmish::set_test_profile(&dir);
         let p = crate::paths::test_save(&format!("{name}"));
         std::path::Path::new(&p).exists().then(|| Live::load(&p))
+    }
+    /// DLL_GetMeritData on a 5-lord skirmish save: gold = the HUD's, troops +0x53c, the rank key (FUN_180001e20) =
+    /// wood 70 · 1 + stone 29 · 7 → 27, population 10 · 10, +0x38e8 124, gold 1588 / 10; slots 6..8 empty.
+    #[test]
+    fn merit_rows() {
+        let Some(l) = save("Crater Lake-1test.sav") else { return };
+        let d = merit(l.mem_ref());
+        assert_eq!(d[1], [1, 409, 1588, 19, 0]);
+        assert_eq!(d[2][2], 1686);
+        assert!(d[6..].iter().all(|r| r[0] == -1));
     }
     fn tile(m: &Mem, i: i32) -> (i32, i32) { (m.i16(u(i) + 0x71c) as i32, m.i16(u(i) + 0x71e) as i32) }
     /// Unit goal tile (units-object +0xec / +0xee in `units::u` terms = UN + 0x744 / 0x746).
@@ -595,8 +605,9 @@ mod tests {
         }
     }
 
-    /// asd2's engineers: select them with a box, place a catapult tent (EngBuild_Catapult → tool 0xbe, chore 0x1c
-    /// with their group); a siege tent appears.
+    /// asd2's engineers: select them with a box, EngBuild_Catapult → tool 0xbe, then the tool runs through
+    /// DLL_StartMapAction / DLL_MapAction like any build tool (C# placeBuilding): the hover draws the flag marker
+    /// (file 0x52) on a good spot and the red tent ghost on a bad one, the click queues the tent.
     #[test]
     fn siege_tent() {
         let Some(mut l) = save("asd2.sav") else { return };
@@ -608,17 +619,42 @@ mod tests {
         click(&mut l, w);
         assert!(!selected(l.mem()).is_empty(), "engineer not selected");
         assert_eq!(l.game_action(1014, 0, 0), 0xbe);
+        assert!(l.set_tool(0xbe), "tent tool refused with engineers selected");
         let tents = |l: &mut Live| { let m = l.mem(); (1..b::SLOTS).filter(|&i| b::state(m, i) != 0 && (80..=84).contains(&b::kind(m, i))).count() };
         let n0 = tents(&mut l);
         let (kx, ky) = l.keep().map(|(x, y)| (x as i32, y as i32)).unwrap();
-        let mut placed = None;
-        'o: for d in (-20..=20).step_by(3) { for e in (-20..=20).step_by(3) {
-            if place_siege(l.mem(), 0xbe, kx + d, ky + e).is_none() { panic!("engineers not selected"); }
-            l.step();
-            if tents(&mut l) > n0 { placed = Some((kx + d, ky + e)); break 'o; }
-        }}
-        println!("tent at {placed:?}; tents {n0} -> {}", tents(&mut l));
-        assert!(placed.is_some(), "no siege tent placed");
+        let spots: Vec<_> = (-20..=20).step_by(3).flat_map(|d| (-20..=20).step_by(3).map(move |e| (kx + d, ky + e))).collect();
+        let bad = spots.iter().copied().find(|&(x, y)| !l.hover(0xbe, x, y).ok).expect("no refused spot");
+        l.hover(0xbe, bad.0, bad.1);
+        assert!(!l.preview.is_empty(), "refused spot: no tent ghost in the preview layer");
+        let good = spots.iter().copied().find(|&(x, y)| l.hover(0xbe, x, y).ok).expect("no good spot");
+        let v = l.hover(0xbe, good.0, good.1);
+        assert_eq!(v.size, 3);
+        let recs = l.step();
+        assert!(recs.iter().any(|r| r[3] == 0x52), "good spot: no flag marker (file 0x52) drawn");
+        let (v, n) = l.click(0xbe, good.0, good.1);
+        assert!(v.ok && n == 1, "click: {v:?}, {n} chore(s)");
+        for _ in 0..3 { l.step(); }
+        println!("tent at {good:?}; tents {n0} -> {}", tents(&mut l));
+        assert!(tents(&mut l) > n0, "no siege tent placed");
+    }
+
+    /// Extended rules: a Sassanid Knight's draw records name our art (gm 1044), a DE knight beside it keeps 44.
+    #[test]
+    fn sassanid_drawn_with_own_art() {
+        let Some(mut l) = save("Crater Lake-1test.sav") else { return };
+        let m = l.mem();
+        shc_sim::ext::set(m, true);
+        let a = (1..m.i32(UN)).find(|&i| alive(m, i) && m.i16(u(i) + 0x6ee) == 1).unwrap();
+        let (x, y) = (m.i16(u(a) + 0x70e), m.i16(u(a) + 0x710)); // record +0xb6 / +0xb8 (this file's u is 0x658 lower)
+        let sk = shc_sim::units::helpers::spawn(m, 1, 0, x, y, 0, 0x1c);
+        let de = shc_sim::units::helpers::spawn(m, 1, 0, x, y, 0, 0x1c);
+        shc_sim::ext::make_sassanid(m, sk);
+        let files = |r: &[crate::replay::Rec], i: i32| r.iter().filter(|r| r[0] == 2 && r[10] == i as i16).map(|r| r[3]).collect::<Vec<_>>();
+        let mut seen = (vec![], vec![]);
+        for _ in 0..5 { let r = l.step(); seen.0.extend(files(&r, sk)); seen.1.extend(files(&r, de)); }
+        assert!(!seen.0.is_empty() && seen.0.iter().all(|&f| f == 1044), "Sassanid: {:?}", seen.0);
+        assert!(!seen.1.is_empty() && seen.1.iter().all(|&f| f == 44), "DE knight: {:?}", seen.1);
     }
 
     /// A 3-lord Crater Lake skirmish, me + the Rat on team 1 against the Snake: the HUD's lord table has the Rat as the
@@ -639,5 +675,106 @@ mod tests {
         assert_eq!(l.game_action4(1063, 2, 15, 100), 0, "send refused");
         for _ in 0..5 { l.step(); }
         assert_eq!(gave(&mut l) - before, 100, "100 gold sent");
+    }
+
+    /// Not a check: SHC_SHOWCASE=<path.sav> writes an Extended Crater Lake game with a Sassanid Stable beside a plain
+    /// stables and three recruited Sassanid Knights, for screenshots (`shc-viewer --live <path.sav>`).
+    #[test]
+    #[ignore]
+    fn sassanid_showcase() {
+        let Ok(out) = std::env::var("SHC_SHOWCASE") else { return };
+        let map = crate::skirmish::maps_dir().join("Crater Lake.map");
+        let lobby = crate::skirmish::Lobby { ais: vec![(0, 0)], seed: 1234, extended: true, ..crate::skirmish::Lobby::new(map) };
+        let mut l = Live::from_mem(crate::skirmish::start(&lobby).unwrap());
+        for _ in 0..150 { l.step(); }
+        let m = l.mem();
+        m.set_i32(0x18379926c + b::PSTRIDE, 9000);
+        let yard = (1..b::SLOTS).find(|&i| b::state(m, i) == 2 && b::owner(m, i) == 1 && b::kind(m, i) == 10).unwrap();
+        m.set_i32(b::rec(yard) + 0x120 + 2 * 4, 300);
+        for _ in 0..5 { l.step(); }
+        let (kx, ky) = l.keep().map(|(x, y)| (x as i32, y as i32)).unwrap();
+        let mut spots = (7..40).flat_map(|d| [(d, 0), (0, d), (-d, 0), (0, -d), (d, d)]).map(|(dx, dy)| (kx + dx, ky + dy));
+        for tool in [crate::hud::SASSANID_STABLE, 0x41, 0x56, 0x51] {
+            assert!(l.set_tool(tool));
+            let (x, y) = spots.find(|&(x, y)| l.hover(tool, x, y).ok).expect("no spot");
+            l.click(tool, x, y);
+            for _ in 0..4 { l.step(); }
+            l.set_tool(0);
+        }
+        for _ in 0..0x227 * 3 + 20 { l.step(); } // horses
+        let m = l.mem();
+        let arm = (1..b::SLOTS).find(|&i| b::state(m, i) == 2 && b::owner(m, i) == 1 && b::kind(m, i) == 11).unwrap();
+        let (_, goods) = shc_sim::ext::recruit_cost(m);
+        for g in goods[..3].iter().filter(|&&g| g > 0) {
+            m.set_i32(b::rec(arm) + 0x120 + *g as u64 * 4, 5);
+            m.set_i32(shc_sim::game::player(1) + 0x4d0 + *g as u64 * 4, 5);
+        }
+        for _ in 0..3 { assert_eq!(l.game_action(1007, 1, 0x5a), 0); l.step(); }
+        for _ in 0..800 { l.step(); }
+        let m = l.mem();
+        let n = (1..m.i32(shc_sim::units::OBJ)).filter(|&i| shc_sim::ext::is_sassanid(m, i)).count();
+        println!("Sassanid Knights: {n}");
+        std::fs::write(&out, shc_sim::save::save_game(m, 0)).unwrap();
+        crate::extended::write_beside(std::path::Path::new(&out), true).unwrap();
+    }
+
+
+    /// Ours (keys.rs EXTRA): one archer selected the way SelectClan selects, then Ctrl+A (`select_types`) selects
+    /// every own archer and nothing else; Shift+Ctrl+3 (GroupTroops3 with a = 10) adds a spearman to group 3, which
+    /// held one archer, so selecting group 3 gives both.
+    #[test]
+    fn select_types_and_add_to_group() {
+        let Some(mut l) = save("Crater Lake-1test.sav") else { return };
+        l.step();
+        let (archers, spears) = (own(l.mem_ref(), 0x16), own(l.mem_ref(), 0x18));
+        assert!(archers.len() > 1 && !spears.is_empty(), "{} archers, {} spearmen", archers.len(), spears.len());
+        let pick = |l: &mut Live, ids: &[i32]| {
+            let m = l.mem();
+            shc_sim::frontend::game_action(m, 1022, 0, 0, 0, 0); // nobody selected
+            for i in 1..m.i32(UN) { m.set_i16(u(i) + 0x68c, ids.contains(&i) as i16); }
+            shc_sim::frontend::f190470(m);
+            for _ in 0..2 { l.step(); }
+        };
+        pick(&mut l, &archers[..1]);
+        assert_eq!(selected(l.mem_ref()), archers[..1].to_vec());
+        let n = select_types(l.mem());
+        for _ in 0..2 { l.step(); }
+        let mut sel = selected(l.mem_ref());
+        sel.sort();
+        assert_eq!((n as usize, sel), (archers.len(), archers.clone()), "every archer, nothing else");
+        // group 3 = one archer; then a spearman added (a = 10), the group selects both
+        // GroupTroops acts while troops are selected (0x1860ab4fc, set with the troops panel as SelectClan does)
+        let group = |l: &mut Live, a: i32| { l.mem().set_i32(0x1860ab4fc, 1); shc_sim::frontend::game_action(l.mem(), 0x16, a, 0, 0, 0); };
+        pick(&mut l, &archers[..1]);
+        group(&mut l, -1);
+        pick(&mut l, &spears[..1]);
+        group(&mut l, 10);
+        shc_sim::frontend::game_action(l.mem(), 1022, 0, 0, 0, 0);
+        l.step();
+        shc_sim::frontend::game_action(l.mem(), 0x20, -1, 0, 0, 0); // SelectClan3
+        for _ in 0..2 { l.step(); }
+        let mut sel = selected(l.mem_ref());
+        sel.sort();
+        let mut want = vec![archers[0], spears[0]];
+        want.sort();
+        assert_eq!(sel, want, "group 3 = the archer + the added spearman");
+    }
+
+    /// Ours: a right click on the map with a barracks panel open moves all seven of its assembly points there
+    /// (`Live::rally`, the panel's own flag tools → chore 0x66 each).
+    #[test]
+    fn rally_points_by_right_click() {
+        let Some(mut l) = save("Crater Lake-1test.sav") else { return };
+        l.step();
+        l.open_new(87); // a barracks near the keep, its panel open
+        assert_eq!(l.hud().app_sub_mode, 1, "barracks panel");
+        let (kx, ky) = l.keep().unwrap();
+        let p = l.mem_ref().i32(LOCAL) as u64;
+        let point = |l: &Live, a: u64| { let at = 0x18379b040 + p * 0x583c + a * 4; (l.mem_ref().i16(at), l.mem_ref().i16(at + 2)) };
+        let spot = [(12, 12), (-12, 12), (12, -12), (-12, -12), (20, 0), (0, 20)].into_iter().map(|(dx, dy)| (kx as i32 + dx, ky as i32 + dy))
+            .find(|&(x, y)| l.rally(x, y) == 7).expect("no reachable spot near the keep");
+        l.step();
+        for a in 0..7 { assert_eq!(point(&l, a), (spot.0 as i16, spot.1 as i16), "assembly point {a}"); }
+        assert_eq!(l.hud().app_sub_mode, 1, "the panel stays open");
     }
 }

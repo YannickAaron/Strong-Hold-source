@@ -106,15 +106,19 @@ pub fn export_videos(c: &Custom) {
         }
     }
     let Some(m) = c.media.clone() else { return };
-    std::thread::spawn(move || for mood in ["angry", "happy", "neutral", "sad"] {
-        let (dir, stem) = (crate::cache_dir().join("video"), format!("custom_{slug}_{mood}"));
-        if let Some(src) = file_in(&m, &format!("{mood}.webm")) {
-            if let Err(e) = shc_extract::video::export_custom(&src, &dir, &stem) { eprintln!("custom lord video {}: {e}", src.display()); }
-            // the neutral one again as the backstory page's living portrait (lord_info.rs): video.rs's banner slot
-            // (528×308), the oval fade in its alpha
-            if mood == "neutral" {
-                if let Err(e) = shc_extract::video::export_custom_as(&src, &dir, &format!("custom_{slug}_portrait"), (528, 308), portrait_frame) { eprintln!("custom lord portrait video {}: {e}", src.display()); }
-            }
+    // every webm of CustomMedia/<name>: DE's 4 moods, our variants (`angry_2.webm`), a line's own clip
+    // (`kill_player.webm`) and the viewer-side reactions' (`react_breach.webm`, lord_react.rs); the 4 moods first
+    let mut webms: Vec<(String, PathBuf)> = std::fs::read_dir(&m).into_iter().flatten().flatten().map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("webm")))
+        .filter_map(|p| Some((p.file_stem()?.to_string_lossy().to_ascii_lowercase(), p))).collect();
+    webms.sort_by_key(|(s, _)| (!MOODS.contains(&s.as_str()), s.clone()));
+    std::thread::spawn(move || for (name, src) in webms {
+        let (dir, stem) = (crate::cache_dir().join("video"), format!("custom_{slug}_{name}"));
+        if let Err(e) = shc_extract::video::export_custom(&src, &dir, &stem) { eprintln!("custom lord video {}: {e}", src.display()); }
+        // the neutral one again as the backstory page's living portrait (lord_info.rs): video.rs's banner slot
+        // (528×308), the oval fade in its alpha
+        if name == "neutral" {
+            if let Err(e) = shc_extract::video::export_custom_as(&src, &dir, &format!("custom_{slug}_portrait"), (528, 308), portrait_frame) { eprintln!("custom lord portrait video {}: {e}", src.display()); }
         }
     });
 }
@@ -155,6 +159,7 @@ pub fn mood(key: &str) -> &'static str {
     match key.trim_start_matches("SK_").trim_start_matches("sk_").to_ascii_uppercase().as_str() {
         "TAUNT1" | "TAUNT2" | "TAUNT4" | "ANGRY_SIEGE_LOST" | "VICTORY_HARASS" | "KILL_PLAYER" | "WONT_HELP" | "NOT_SENDING_GOODS" => "angry",
         "ANGRY_CASTLE_DAMAGED" | "DEFEAT" | "DIE_ALLY" | "CANT_ATTACK" | "WONT_ATTACK" | "CANT_HELP" | "TEAM_LOSING" => "sad",
+        k if k.starts_with("REACT_") && k != "REACT_PORTRAIT" => "angry", // lord_react.rs
         "VICTORY_GOOD" | "THANK_GOODS" | "CONGRATS_ON_KILL" | "BOAST_OF_KILL" | "TEAM_WINNING" | "WILL_ATTACK_ENEMY" => "happy",
         _ => "neutral",
     }
@@ -167,15 +172,38 @@ pub fn split(name: &str) -> Option<(usize, String)> {
 }
 /// Player p's line KEY as its CustomMedia wav.
 pub fn wav(p: usize, key: &str) -> Option<PathBuf> { file_in(&in_game(p)?.media?, &format!("{}.wav", key.to_ascii_lowercase())) }
-/// Player p's line KEY as its exported reaction video's stem (video.rs), once the export is there.
+const MOODS: [&str; 4] = ["angry", "happy", "neutral", "sad"];
+/// Player p's line KEY as its exported reaction video's stem (video.rs), once the export is there: the line's own
+/// clip (`<key>.webm`, our extension) or one of its mood's (`<mood>.webm`, `<mood>_2.webm` .. `_9`), at random but
+/// not the one this lord's mood played last.
 pub fn video_stem(p: usize, key: &str) -> Option<String> {
     let c = in_game(p)?;
     c.media.as_ref()?;
-    let stem = format!("custom_{}_{}", slug(&c.name), mood(key));
-    crate::cache_dir().join("video").join(format!("{stem}.vid")).exists().then_some(stem)
+    let base = format!("custom_{}_", slug(&c.name));
+    let have = |s: &str| crate::cache_dir().join("video").join(format!("{base}{s}.vid")).exists();
+    let key = key.to_ascii_lowercase();
+    if have(&key) { return Some(format!("{base}{key}")); }
+    let m = mood(&key);
+    let cands: Vec<String> = (1..10).map(|k| if k == 1 { m.to_string() } else { format!("{m}_{k}") }).filter(|s| have(s)).collect();
+    static LAST: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let mut last = LAST.lock().unwrap();
+    let r = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    let s = format!("{base}{}", pick(&cands, |s| last.contains(&format!("{base}{s}")), r)?);
+    last.retain(|l| !l.starts_with(&format!("{base}{m}")));
+    last.push(s.clone());
+    Some(s)
+}
+/// One of `cands` by `r`, skipping the ones `recent` names unless that leaves none.
+fn pick<'a>(cands: &'a [String], recent: impl Fn(&str) -> bool, r: u32) -> Option<&'a String> {
+    let fresh: Vec<&String> = cands.iter().filter(|s| !recent(s)).collect();
+    if fresh.is_empty() { cands.get(r as usize % cands.len().max(1)) } else { Some(fresh[r as usize % fresh.len()]) }
 }
 /// Player p's line KEY as its text.txt line.
-pub fn text(p: usize, key: &str) -> Option<String> { kv(&std::fs::read_to_string(file_in(&in_game(p)?.media?, "text.txt")?).ok()?, key) }
+pub fn text(p: usize, key: &str) -> Option<String> { media_text(&in_game(p)?, "text.txt", key) }
+/// Player p's viewer-side reaction KEY (lord_react.rs) as its CustomMedia react.txt line (our extension).
+pub fn react_text(p: usize, key: &str) -> Option<String> { media_text(&in_game(p)?, "react.txt", key) }
+/// Line KEY of CustomMedia's `file` (text.txt, react.txt), not empty.
+fn media_text(c: &Custom, file: &str, key: &str) -> Option<String> { kv(&std::fs::read_to_string(file_in(c.media.as_ref()?, file)?).ok()?, key).filter(|v| !v.is_empty()) }
 /// `KEY ="text"` lines (DE's text.txt): KEY's text.
 fn kv(t: &str, key: &str) -> Option<String> {
     t.lines().find_map(|l| {
@@ -357,6 +385,10 @@ mod tests {
         assert_eq!(split("rt_taunt_01.wav"), None);
         assert_eq!((mood("SK_TAUNT3"), mood("sk_defeat"), mood("THANK_GOODS"), mood("TAUNT1")), ("neutral", "sad", "happy", "angry"));
         assert_eq!(slug("Lord David von Lindschied"), "lord_david_von_lindschied");
+        // mood variants: never the one played last while another is there
+        let c: Vec<String> = ["angry", "angry_2", "angry_3"].map(String::from).into();
+        assert!((0..9).all(|r| pick(&c, |s| s == "angry_2", r).unwrap() != "angry_2"));
+        assert_eq!((pick(&c[..1], |_| true, 5).map(|s| s.as_str()), pick(&[], |_| false, 5)), (Some("angry"), None));
     }
 
     /// A CustomLords folder made from the Jewel (her shipped config and first castle) + the game's CustomMediaExample
@@ -447,8 +479,13 @@ mod tests {
         set_in_game(2, Some(c));
         let gm = crate::replay::Gm::new(&names);
         assert_eq!((gm.lord(100, 2, 2), gm.lord(226, 1, 2), gm.lord(100, 2, 3), gm.lord(44, 2, 2), gm.lord(100, 9, 2)), (Some(3), Some(2), None, None, None));
+        // any other DE frame he brings by name (his flags, his troops), for his player's records only
+        let names: Vec<String> = names.into_iter().chain(["anim_flags-3", "test_lord/anim_flags-3"].map(String::from)).collect();
+        let gm = crate::replay::Gm::new(&names);
+        assert_eq!((gm.own(4, 2), gm.own(4, 3)), (5, 4));
         set_in_game(2, None);
         assert_eq!(crate::replay::Gm::new(&names).lord(100, 2, 2), None);
+        assert_eq!(crate::replay::Gm::new(&names).own(4, 2), 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -47,6 +47,19 @@ ToggleHealthBars	TEXT_HOT_KEYS_125
 QuickSave	TEXT_HOT_KEYS_106	
 QuickLoad	=Quick Load	
 ToggleStats	=Statistics	
+AddToGroup1	=Add to Group 1	
+AddToGroup2	=Add to Group 2	
+AddToGroup3	=Add to Group 3	
+AddToGroup4	=Add to Group 4	
+AddToGroup5	=Add to Group 5	
+AddToGroup6	=Add to Group 6	
+AddToGroup7	=Add to Group 7	
+AddToGroup8	=Add to Group 8	
+AddToGroup9	=Add to Group 9	
+AddToGroup0	=Add to Group 0	
+SelectAllOfType	=Select All of the Selected Types	
+DeleteTool	=Delete Tool	
+SwitchOutput	=Switch Workshop Output	
 OpenChat	TEXT_HOT_KEYS_025	
 ShowPings	TEXT_HOT_KEYS_026	
 MPPing	TEXT_HOT_KEYS_134	

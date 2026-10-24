@@ -297,7 +297,8 @@ impl World {
 
 /// GM file id -> sprite index lookup + team palette, from gm.tsv (re/scripts/gen_gm_table.py).
 /// `lords`: per player, the custom lord whose own map sprite its lord wears (custom_lords::sprite_of, at game start).
-pub struct Gm { files: HashMap<i16, Vec<(String, bool, i32)>>, names: HashMap<String, usize>, palettes: HashMap<i16, Vec<[f32; 3]>>, sassanid_stables: bool, lords: [Option<String>; 9] }
+/// `own`: (player, DE sprite) -> that custom lord's frame of the same name (`<slug>/anim_flags-40`): his flags, his troops.
+pub struct Gm { files: HashMap<i16, Vec<(String, bool, i32)>>, names: HashMap<String, usize>, palettes: HashMap<i16, Vec<[f32; 3]>>, lords: [Option<String>; 9], own: HashMap<(usize, usize), usize> }
 
 impl Gm {
     pub fn new(names: &[String]) -> Self {
@@ -313,21 +314,18 @@ impl Gm {
                 }).collect());
             }
         }
-        // SHC_SASSANID_KNIGHT=1 (dev, until the sim draws marked knights as gm 1044): every knight draws with our
-        // bundled Sassanid art
-        if std::env::var_os("SHC_SASSANID_KNIGHT").is_some() && names.iter().any(|n| n == "sassanid_knight-0") {
-            if let Some(e) = files.get(&1044).cloned() { files.insert(44, e); }
+        let lords: [Option<String>; 9] = std::array::from_fn(|p| crate::custom_lords::sprite_of(p).filter(|s| names.iter().any(|n| n.starts_with(&format!("{s}/")))));
+        let names: HashMap<String, usize> = names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect();
+        let mut own = HashMap::new();
+        for (p, slug) in lords.iter().enumerate().filter_map(|(p, s)| Some((p, format!("{}/", s.as_ref()?)))) {
+            own.extend(names.iter().filter_map(|(n, &i)| Some(((p, *names.get(n.strip_prefix(&slug)?)?), i))));
         }
-        // SHC_SASSANID_STABLE=1 (dev, until the sim's tiler emits gm 1045 for marked stables): every stables draws as
-        // the Sassanid Stable
-        let sassanid_stables = std::env::var_os("SHC_SASSANID_STABLE").is_some();
-        let lords = std::array::from_fn(|p| crate::custom_lords::sprite_of(p).filter(|s| names.iter().any(|n| *n == format!("{s}/body_lord-1"))));
-        Self { files, names: names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect(), palettes, sassanid_stables, lords }
+        Self { files, names, palettes, lords, own }
     }
 
     /// A Sassanid Stable's tile piece: gm 1045, images 569..604 (the stables' numbering).
     pub fn sassanid_stable(&self, file: i16, image: i16) -> bool {
-        (file == 1045 || (self.sassanid_stables && file == 7)) && (569..=604).contains(&image)
+        file == 1045 && (569..=604).contains(&image)
     }
 
     /// Not the original's: the stables' horse layer (anim_stables, gm 98: a head looking out over a dark stall block,
@@ -351,6 +349,10 @@ impl Gm {
         let slug = self.lords.get((colour & 0x3fff) as usize)?.as_ref()?;
         self.names.get(&format!("{slug}/body_lord-{}", image as i32 - 1)).copied()
     }
+
+    /// DE sprite `s` of a record owned by `colour` (k7, the player before `World::colours`), or the frame of the same
+    /// name its custom lord brings (custom_lords::add_sprites).
+    pub fn own(&self, s: usize, colour: i16) -> usize { self.own.get(&((colour & 0x3fff) as usize, s)).copied().unwrap_or(s) }
 
     /// `gmSprites[file][image]`: the entry with the largest ID_Offset <= image wins (sea_new vs sea_shore).
     fn get(&self, file: i16, image: i32) -> Option<usize> { self.get_x(file, image, false) }

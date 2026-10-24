@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 pub const DISCOVERY_PORT: u16 = 47777;
 pub const GAME_PORT: u16 = 47778;
-const VERSION: u32 = 7; // 7: custom lords (Lobby.customs, Human.missing, Msg::Have)
+const VERSION: u32 = 9; // 7: custom lords (Lobby.customs, Human.missing, Msg::Have); 8: Extended rules (Lobby.extended, one more memory page); 9: Lobby.competitive, custom maps (map_sum, MapFile)
 /// Input delay at the start, before any round trip is measured: the original's LAN floor (FUN_180027f00).
 pub const DELAY: i32 = 10;
 /// The fewest ticks from a command to its exec tick: the gate needs P ≥ T + 2 with P = tick + delay − 1.
@@ -63,7 +63,9 @@ pub struct Human {
 /// The lobby the host edits and every peer mirrors. Players: the humans (host first), then the AI lords.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lobby {
-    pub map: String, // map file name in skirmish::maps_dir(); every machine needs the game's maps
+    pub map: String, // map file name: in skirmish::maps_dir(), or a user map (map_share.rs)
+    /// 0 = one of the game's maps; else the user map's checksum (map_share::to_wire): peers without it get it from the host.
+    pub map_sum: u64,
     pub humans: Vec<Human>,
     pub ais: Vec<(usize, i32)>, // (lord index as skirmish::Lobby.ais, team)
     pub fairness: i32,
@@ -82,12 +84,16 @@ pub struct Lobby {
     pub hill: i32,
     /// The custom lords among `ais` (an AI `custom_lords::BASE + i` is entry i): name and checksum (lord_share.rs).
     pub customs: Vec<(String, u64)>,
+    /// Extended rules (skirmish::Lobby::extended)
+    pub extended: bool,
+    /// The competitive start (skirmish::competitive_start) for every human.
+    pub competitive: bool,
 }
 
 impl Lobby {
     pub fn new(host: &str) -> Self {
-        Lobby { map: "Crater Lake.map".into(), humans: vec![Human { name: host.into(), team: 0, lord: -1, coa: crate::menu::coa::mine().code(), missing: vec![] }], ais: vec![], fairness: 3, goods: 1,
-            outposts: true, speed: 40, coop: None, slots: vec![], spectators: vec![], loaded: false, hill: 0, customs: vec![] }
+        Lobby { map: "Crater Lake.map".into(), map_sum: 0, humans: vec![Human { name: host.into(), team: 0, lord: -1, coa: crate::menu::coa::mine().code(), missing: vec![] }], ais: vec![], fairness: 3, goods: 1,
+            outposts: true, speed: 40, coop: None, slots: vec![], spectators: vec![], loaded: false, hill: 0, customs: vec![], extended: false, competitive: false }
     }
     pub fn players(&self) -> usize { self.humans.len() + self.ais.len() }
     /// The player number of human k (0 = the host): its slot, else the next number no slot has.
@@ -96,6 +102,8 @@ impl Lobby {
     }
     /// The human players' numbers.
     pub fn player_numbers(&self) -> Vec<i32> { (0..self.humans.len()).map(|k| self.player_of(k)).collect() }
+    /// A loaded game has a slot per human it was saved with; more humans would get numbers the save lacks.
+    pub fn slots_full(&self) -> bool { self.loaded && self.humans.len() >= self.slots.len() }
 }
 
 /// How a peer joins: a new player in the lobby, a player coming back to a running game, a spectator.
@@ -144,8 +152,11 @@ pub enum Msg {
     Paused { by: i32, left: i32 },
     /// To the host: a player asks for game speed `rate`; from the host: everyone runs at `rate` now.
     Speed { rate: i32 },
-    /// Client → host, in the lobby: the lobby's custom lords this player lacks (empty = has them all).
+    /// Client → host, in the lobby: the lobby's custom lords this player lacks (empty = has them all), and the map
+    /// (`map_share::MISSING` + its name) when it lacks that.
     Have { from: i32, missing: Vec<String> },
+    /// Host → a client that lacks the lobby's user map: the file (map_share::receive checks it).
+    MapFile { name: String, sum: u64, bytes: Vec<u8> },
 }
 
 // ---- wire format: [u32 len][kind u8][fields], little endian, strings / blobs u32-length-prefixed
@@ -177,7 +188,7 @@ impl W {
         for s in &l.spectators { self.str(s); }
         self.u8(l.loaded as u8).i32(l.hill).i32(l.customs.len() as i32);
         for (n, s) in &l.customs { self.str(n).u64(*s); }
-        self
+        self.u8(l.extended as u8).u8(l.competitive as u8).u64(l.map_sum)
     }
 }
 
@@ -209,7 +220,8 @@ impl R<'_> {
         let spectators = (0..self.len()?).map(|_| self.str()).collect::<Option<_>>()?;
         let (loaded, hill) = (self.u8()? != 0, self.i32()?);
         let customs = (0..self.len()?).map(|_| Some((self.str()?, self.u64()?))).collect::<Option<_>>()?;
-        Some(Lobby { map, humans, ais, fairness, goods, outposts, speed, coop, slots, spectators, loaded, hill, customs })
+        let (extended, competitive, map_sum) = (self.u8()? != 0, self.u8()? != 0, self.u64()?);
+        Some(Lobby { map, map_sum, humans, ais, fairness, goods, outposts, speed, coop, slots, spectators, loaded, hill, customs, extended, competitive })
     }
 }
 
@@ -250,6 +262,7 @@ impl Msg {
             Msg::Say { from, to, text } => { w.u8(22).i32(*from).u32(*to).str(text); }
             Msg::Speed { rate } => { w.u8(23).i32(*rate); }
             Msg::Have { from, missing } => { w.u8(24).i32(*from).i32(missing.len() as i32); for n in missing { w.str(n); } }
+            Msg::MapFile { name, sum, bytes } => { w.u8(25).str(name).u64(*sum).bytes(bytes); }
         }
         let mut out = (w.0.len() as u32).to_le_bytes().to_vec();
         out.extend(w.0);
@@ -304,6 +317,7 @@ impl Msg {
             21 => Msg::Paused { by: r.i32()?, left: r.i32()? },
             23 => Msg::Speed { rate: r.i32()? },
             24 => { let from = r.i32()?; Msg::Have { from, missing: (0..r.len()?).map(|_| r.str()).collect::<Option<_>>()? } }
+            25 => Msg::MapFile { name: r.str()?, sum: r.u64()?, bytes: r.bytes()? },
             _ => return None,
         })
     }
@@ -370,6 +384,9 @@ pub struct Found {
     pub running: bool,
     /// Players of a running game whose connection dropped: (player, name), they may rejoin.
     pub lost: Vec<(i32, String)>,
+    /// The game mode (Lobby::hill: 0 conquest, else King of the Hill to that many points); None = a host from before
+    /// the answer carried it.
+    pub hill: Option<i32>,
 }
 
 /// Ask the LAN (broadcast + this machine) for hosted games; answers within `wait`.
@@ -386,17 +403,22 @@ fn discover_at(port: u16, wait: Duration) -> Vec<Found> {
     let (mut out, t0, mut buf) = (vec![], Instant::now(), [0u8; 1024]);
     while t0.elapsed() < wait {
         let Ok((n, from)) = s.recv_from(&mut buf) else { continue };
-        let text = String::from_utf8_lossy(&buf[..n]).into_owned();
-        let f: Vec<&str> = text.split('\n').collect();
-        if f.len() >= 7 && f[0] == format!("SHC-LAN {VERSION}") {
-            let (Ok(port), Ok(players)) = (f[4].parse::<u16>(), f[3].parse()) else { continue };
-            let lost = f[6].split(',').filter_map(|e| e.split_once(':')).filter_map(|(p, n)| Some((p.parse().ok()?, n.to_string()))).collect();
-            let found = Found { addr: SocketAddr::new(from.ip(), port), name: f[1].into(), map: f[2].into(), players, running: f[5] == "game", lost };
-            // the same host answers the broadcast and the localhost query: keep one
-            if !out.iter().any(|o: &Found| o.addr.port() == port && o.name == found.name) { out.push(found); }
-        }
+        let Some(found) = parse_found(&String::from_utf8_lossy(&buf[..n]), from.ip()) else { continue };
+        // the same host answers the broadcast and the localhost query: keep one
+        if !out.iter().any(|o: &Found| o.addr.port() == found.addr.port() && o.name == found.name) { out.push(found); }
     }
     out
+}
+
+/// A host's discovery answer (`Net::set_announce`) from `ip`; None = not ours / another VERSION.
+fn parse_found(text: &str, ip: std::net::IpAddr) -> Option<Found> {
+    let f: Vec<&str> = text.split('\n').collect();
+    if f.len() < 7 || f[0] != format!("SHC-LAN {VERSION}") { return None; }
+    let (port, players) = (f[4].parse::<u16>().ok()?, f[3].parse().ok()?);
+    let lost = f[6].split(',').filter_map(|e| e.split_once(':')).filter_map(|(p, n)| Some((p.parse().ok()?, n.to_string()))).collect();
+    // the mode came later as an 8th line: older hosts leave it out, older finders (f.len() >= 7) ignore it
+    let hill = f.get(7).and_then(|h| h.parse().ok());
+    Some(Found { addr: SocketAddr::new(ip, port), name: f[1].into(), map: f[2].into(), players, running: f[5] == "game", lost, hill })
 }
 
 /// "host:port" or "host" (GAME_PORT) → an address; names are resolved.
@@ -470,8 +492,8 @@ pub struct Net {
     stop: Arc<AtomicBool>,
     port: u16,
     pub sent_bytes: u64,
-    /// Client, lobby: the customs table and local lord count last checked, and the missing list last sent.
-    lords_checked: Option<(Vec<(String, u64)>, usize)>,
+    /// Client, lobby: the customs table, local lord count and map last checked, and the missing list last sent.
+    lords_checked: Option<(Vec<(String, u64)>, usize, String, u64)>,
     lords_reported: Option<Vec<String>>,
 }
 
@@ -544,8 +566,8 @@ impl Net {
         let l = &self.lobby;
         let name = l.humans.first().map_or(self.name.as_str(), |h| h.name.as_str());
         let lost: Vec<String> = self.lost.iter().map(|(p, n)| format!("{p}:{}", n.replace([',', ':', '\n'], " "))).collect();
-        *self.announce.lock().unwrap() = format!("SHC-LAN {VERSION}\n{name}\n{}\n{}\n{}\n{}\n{}", l.map.trim_end_matches(".map"), l.players(), self.port,
-            if self.started.is_some() { "game" } else { "lobby" }, lost.join(","));
+        *self.announce.lock().unwrap() = format!("SHC-LAN {VERSION}\n{name}\n{}\n{}\n{}\n{}\n{}\n{}", l.map.trim_end_matches(".map"), l.players(), self.port,
+            if self.started.is_some() { "game" } else { "lobby" }, lost.join(","), l.hill);
     }
 
     /// Host: to every peer except `but`; client: to the host.
@@ -662,7 +684,7 @@ impl Net {
             if v != VERSION { refuse(&mut c, "Different game version."); continue; }
             let taken = |p: i32, peers: &[(i32, Conn)]| peers.iter().any(|(q, _)| *q == p);
             let id = match join {
-                Join::Play if self.started.is_none() && self.lobby.players() < 8 => {
+                Join::Play if self.started.is_none() && self.lobby.players() < 8 && !self.lobby.slots_full() => {
                     let me = (2..=8).find(|p| !taken(*p, &self.peers) && !self.lobby.player_numbers().contains(p)).unwrap_or(8);
                     let mut l = self.lobby.clone();
                     l.humans.push(Human { name, team: 0, lord: -1, coa, missing: vec![] });
@@ -671,7 +693,10 @@ impl Net {
                     self.set_lobby(l);
                     self.peers.last().unwrap().0 // its human's number (a loaded game's slot)
                 }
-                Join::Play => { refuse(&mut c, if self.started.is_some() { "The game is running: watch it instead." } else { "The game is full." }); continue; }
+                Join::Play => {
+                    refuse(&mut c, if self.started.is_some() { "The game is running: watch it instead." } else if self.lobby.slots_full() { "The saved game has no free player: watch it instead." } else { "The game is full." });
+                    continue;
+                }
                 // a dropped player (not removed yet), or a spectator back after a host migration
                 Join::Rejoin(p) if self.started.is_some() && !taken(p, &self.peers) && p != self.me
                     && (p >= SPECTATOR || self.lobby.player_numbers().contains(&p) && !self.removed.contains(&p)) => {
@@ -729,12 +754,24 @@ impl Net {
                         let mut l = self.lobby.clone();
                         if let Some(k) = l.player_numbers().iter().position(|&q| q == from) { l.humans[k].missing = missing.clone(); }
                         if l != self.lobby { self.set_lobby(l); }
+                        // it lacks the lobby's user map: send it (map_share.rs)
+                        if missing.iter().any(|n| n.strip_prefix(crate::map_share::MISSING) == Some(self.lobby.map.as_str())) && self.lobby.map_sum != 0 {
+                            match crate::map_share::find(&self.lobby.map, self.lobby.map_sum).and_then(|p| std::fs::read(p).ok()) {
+                                // ponytail: the host's frame waits while a few MB go out (a LAN: well under a second)
+                                Some(bytes) => self.send_to(from, &Msg::MapFile { name: self.lobby.map.clone(), sum: self.lobby.map_sum, bytes }),
+                                None => eprintln!("lan: {} lacks {}, which is not here either", from, self.lobby.map),
+                            }
+                        }
                     }
+                    Msg::MapFile { name, sum, bytes } if !self.host => match crate::map_share::receive(name, *sum, bytes) {
+                        Ok(p) => { println!("lan: got the map {}", p.display()); (self.lords_checked, self.lords_reported) = (None, None); } // Have again
+                        Err(e) => eprintln!("lan: map from the host refused: {e}"),
+                    },
                     Msg::Turn { .. } | Msg::Hash { .. } => {
                         if self.host { self.send(&m, from); }
                         out.push(m);
                     }
-                    Msg::Hello { .. } | Msg::Welcome { .. } | Msg::Lobby(_) | Msg::Peers(_) | Msg::Start { .. } | Msg::Refused(_) | Msg::Have { .. } => {}
+                    Msg::Hello { .. } | Msg::Welcome { .. } | Msg::Lobby(_) | Msg::Peers(_) | Msg::Start { .. } | Msg::Refused(_) | Msg::Have { .. } | Msg::MapFile { .. } => {}
                     _ => out.push(m),
                 }
             }
@@ -770,10 +807,14 @@ impl Net {
     /// lobby, or a lord imported here meanwhile).
     fn report_lords(&mut self) {
         if self.host || self.started.is_some() { return; }
-        let key = (self.lobby.customs.clone(), crate::custom_lords::count());
+        let key = (self.lobby.customs.clone(), crate::custom_lords::count(), self.lobby.map.clone(), self.lobby.map_sum);
         if self.lords_checked.as_ref() == Some(&key) { return; }
         self.lords_checked = Some(key);
-        let missing = crate::lord_share::missing(&self.lobby.customs);
+        let mut missing = crate::lord_share::missing(&self.lobby.customs);
+        if self.lobby.coop.is_none() && crate::map_share::find(&self.lobby.map, self.lobby.map_sum).is_none() {
+            crate::map_share::forget(); // copied in by hand meanwhile?
+            if crate::map_share::find(&self.lobby.map, self.lobby.map_sum).is_none() { missing.push(format!("{}{}", crate::map_share::MISSING, self.lobby.map)); }
+        }
         if self.lords_reported.as_ref() == Some(&missing) { return; }
         self.lords_reported = Some(missing.clone());
         let m = Msg::Have { from: self.me, missing };
@@ -858,11 +899,11 @@ pub fn game(l: &Lobby, me: i32, seed: i32) -> Result<shc_sim::mem::Mem, String> 
         let file = std::fs::read(&map).map_err(|e| format!("{}: {e}", map.display()))?;
         return Ok(start_mem(&s, &file, seed));
     }
-    let map = crate::skirmish::maps_dir().join(&l.map);
+    let map = crate::map_share::find(&l.map, l.map_sum).ok_or(format!("{} is not on this machine", l.map))?;
     // the custom lords by this machine's own list (name + checksum); one missing here cannot start
     let ais = crate::lord_share::from_wire(&l.ais, &l.customs);
     if let Some(n) = crate::lord_share::missing(&l.customs).first() { return Err(format!("{n} is not installed here: import his zip first")); }
-    let base = crate::skirmish::Lobby { ais, fairness: l.fairness, goods: l.goods, outposts: l.outposts, seed, ..crate::skirmish::Lobby::new(map.clone()) };
+    let base = crate::skirmish::Lobby { ais, fairness: l.fairness, goods: l.goods, outposts: l.outposts, seed, extended: l.extended, ..crate::skirmish::Lobby::new(map.clone()) };
     let n = crate::skirmish::start_positions(&map).ok_or(format!("{} is not a skirmish map", l.map))?;
     if (n as usize) < l.players() { return Err(format!("{} has {n} start positions for {} players", l.map, l.players())); }
     let h = l.humans.len() as i32;
@@ -879,6 +920,7 @@ pub fn game(l: &Lobby, me: i32, seed: i32) -> Result<shc_sim::mem::Mem, String> 
     let file = std::fs::read(&map).map_err(|e| format!("{}: {e}", map.display()))?;
     shc_formats::map::parse(&file).map_err(|e| format!("{}: {e:?}", l.map))?;
     let mut m = start_mem(&s, &file, seed);
+    if l.competitive { crate::skirmish::competitive_start(&mut m, 1..=h); }
     if me >= SPECTATOR { local_bytes(&mut m, 0, false); }
     Ok(m)
 }
@@ -1815,7 +1857,11 @@ impl crate::App {
             Lockstep::join(net, delay, Duration::from_secs(60)).map(|(ls, m)| (m, Some(ls)))
         } else if let Some(path) = save {
             let m = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display())).and_then(|f| load_game(&f, &lobby, me));
-            m.map(|m| { let t = m.i32(shc_sim::core::TICK_COUNTER); (m, Some(Lockstep::new(net, delay, t))) })
+            m.map(|mut m| {
+                crate::extended::after_load(&mut m, &path); // peers get the flag page with the host's state
+                let t = m.i32(shc_sim::core::TICK_COUNTER);
+                (m, Some(Lockstep::new(net, delay, t)))
+            })
         } else {
             game(&lobby, me, seed).map(|m| {
                 let ls = Lockstep::new(net, delay, m.i32(shc_sim::core::TICK_COUNTER));
@@ -1946,7 +1992,7 @@ mod tests {
         l.humans.push(Human { name: "zwei".into(), team: 2, lord: 5, coa: "0222110191010".into(), missing: vec!["Lord T".into()] });
         l.customs = vec![("Lord T".into(), 0x1234_5678_9abc_def0)];
         l.ais.push((4, 1));
-        (l.coop, l.slots, l.spectators, l.loaded, l.hill) = (Some((2, 7, true)), vec![1, 3], vec!["watcher".into()], true, 300);
+        (l.coop, l.slots, l.spectators, l.loaded, l.hill, l.extended) = (Some((2, 7, true)), vec![1, 3], vec!["watcher".into()], true, 300, true);
         let a: SocketAddr = "192.168.1.20:47790".parse().unwrap();
         for m in [Msg::Hello { name: "a".into(), version: 2, listen: 51000, join: Join::Rejoin(3), tick: 77, through: 90, coa: "0222110191010".into() }, Msg::Lobby(l.clone()),
             Msg::Start { lobby: l, seed: -7, delay: 10, state: true }, Msg::Peers(vec![(2, a)]),
@@ -1986,6 +2032,7 @@ mod tests {
         assert_eq!(c.me, 2);
         let mut l = h.lobby.clone();
         l.ais.push((0, 0));
+        l.hill = crate::koth::TARGETS[2];
         h.set_lobby(l.clone());
         h.say("hi");
         let t0 = Instant::now();
@@ -1994,7 +2041,20 @@ mod tests {
         assert_eq!(c.chat, vec![(1, "hi".to_string())]);
         let (t0, mut found) = (Instant::now(), vec![]);
         while !found.iter().any(|f: &Found| f.addr.port() == h.port()) && t0.elapsed() < Duration::from_secs(10) { found = discover_at(disc_port, Duration::from_millis(300)); }
-        assert!(found.iter().any(|f| f.addr.port() == h.port() && f.name == "Host" && f.players == l.players() && !f.running), "{found:?}");
+        assert!(found.iter().any(|f| f.addr.port() == h.port() && f.name == "Host" && f.players == l.players() && !f.running && f.hill == Some(600)), "{found:?}");
+    }
+
+    /// The discovery answer's game mode (8th line): read from a new host, None from an older one; the first 7 lines
+    /// stay what older finders parse.
+    #[test]
+    fn found_carries_mode() {
+        let ip = std::net::IpAddr::from([127, 0, 0, 1]);
+        let new = format!("SHC-LAN {VERSION}\nHost\nCrater Lake\n2\n47778\nlobby\n3:Ann\n600");
+        let f = parse_found(&new, ip).unwrap();
+        assert_eq!((f.addr.port(), f.players, f.lost.clone(), f.hill), (47778, 2, vec![(3, "Ann".to_string())], Some(600)));
+        let old: Vec<&str> = new.split('\n').take(7).collect();
+        assert_eq!(parse_found(&old.join("\n"), ip), Some(Found { hill: None, ..f }), "an older host");
+        assert_eq!(parse_found("SHC-LAN 6\nHost\nx\n2\n1\nlobby\n\n0", ip), None, "another version");
     }
 
     /// In-game chat to some players (HUD_MPChatPanel recipients): a client's line to one other client goes through the
@@ -2091,6 +2151,48 @@ mod tests {
         assert_eq!(got.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>(), [format!("{good:?}")]);
     }
 
+    /// A loaded game's lobby takes as many humans as the save has slots; one more is refused with the reason.
+    #[test]
+    fn loaded_lobby_refuses_extra_joins() {
+        let mut h = Net::test_host();
+        let mut l = h.lobby.clone();
+        (l.loaded, l.slots) = (true, vec![1, 3]);
+        h.set_lobby(l);
+        let addr = SocketAddr::from(([127, 0, 0, 1], h.port()));
+        let j = std::thread::spawn(move || Net::join(addr, "Gast"));
+        let t0 = Instant::now();
+        while h.lobby.humans.len() < 2 && t0.elapsed() < Duration::from_secs(10) { h.poll(); std::thread::sleep(Duration::from_millis(2)); }
+        let c = j.join().unwrap().expect("the save's second slot");
+        assert_eq!(c.me, 3);
+        let j = std::thread::spawn(move || Net::join(addr, "Dritter"));
+        let t0 = Instant::now();
+        while !j.is_finished() && t0.elapsed() < Duration::from_secs(10) { h.poll(); std::thread::sleep(Duration::from_millis(2)); }
+        let why = match j.join().unwrap() { Ok(_) => "joined".to_string(), Err(e) => e };
+        assert_eq!(why, "The saved game has no free player: watch it instead.");
+        assert_eq!(h.lobby.humans.len(), 2);
+    }
+
+    /// The host's limits: chat over CHAT_MAX is dropped, a Turn keeps its first TURN_MAX chores, a connection that
+    /// never says Hello is dropped after HELLO_WAIT.
+    #[test]
+    fn host_limits() {
+        let tax = |exec: u8| vec![0x22, exec, 0, 0, 0, 0, 0, 0, 3];
+        assert!(check(2, Msg::Chat { from: 2, text: "x".repeat(CHAT_MAX + 1) }).is_none());
+        assert!(check(2, Msg::Chat { from: 2, text: "x".repeat(CHAT_MAX) }).is_some());
+        assert!(check(2, Msg::Say { from: 2, to: 0, text: "x".repeat(CHAT_MAX + 1) }).is_none());
+        let Some(Msg::Turn { packets, .. }) = check(2, Msg::Turn { from: 2, through: 9, packets: vec![tax(5); TURN_MAX + 40] }) else { panic!("turn") };
+        assert_eq!(packets.len(), TURN_MAX);
+        let mut h = Net::test_host();
+        let s = TcpStream::connect(("127.0.0.1", h.port())).unwrap();
+        let t0 = Instant::now();
+        while h.pending.is_empty() && t0.elapsed() < Duration::from_secs(5) { h.poll(); std::thread::sleep(Duration::from_millis(2)); }
+        assert_eq!(h.pending.len(), 1, "accepted, waiting for Hello");
+        h.pending[0].0 = Instant::now() - HELLO_WAIT - Duration::from_secs(1);
+        h.poll();
+        assert!(h.pending.is_empty(), "dropped without a Hello");
+        drop(s);
+    }
+
     /// `chore_type` is the set `shc_sim::commands::size` takes without a panic.
     #[cfg(feature = "live")]
     #[test]
@@ -2100,6 +2202,27 @@ mod tests {
         let sim: Vec<u8> = (0..=0x7f).filter(|&t| std::panic::catch_unwind(|| shc_sim::commands::size(t)).is_ok()).collect();
         std::panic::set_hook(hook);
         assert_eq!(sim, (0..=0x7f).filter(|&t| chore_type(t)).collect::<Vec<u8>>());
+    }
+
+    /// A peer of the previous protocol (no Extended rules, one memory page less) is refused at the door, not let in to
+    /// desync mid-game.
+    #[test]
+    fn old_version_refused() {
+        let mut h = Net::test_host();
+        let mut s = TcpStream::connect(("127.0.0.1", h.port())).unwrap();
+        s.write_all(&Msg::Hello { name: "Old".into(), version: VERSION - 1, listen: 1, join: Join::Play, tick: 0, through: 0, coa: String::new() }.encode()).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut n = [0u8; 4];
+            s.read_exact(&mut n).unwrap();
+            let mut b = vec![0u8; u32::from_le_bytes(n) as usize];
+            s.read_exact(&mut b).unwrap();
+            Msg::decode(&b)
+        });
+        let t0 = Instant::now();
+        while !reader.is_finished() && t0.elapsed() < Duration::from_secs(10) { h.poll(); std::thread::sleep(Duration::from_millis(2)); }
+        assert_eq!(format!("{:?}", reader.join().unwrap()), format!("{:?}", Some(Msg::Refused("Different game version.".into()))));
+        assert_eq!(h.lobby.humans.len(), 1);
     }
 
     /// A client that stops reading is dropped after WRITE_TIMEOUT instead of blocking the host for good.
@@ -2236,7 +2359,10 @@ mod tests {
         pub fn maps() -> bool { crate::skirmish::maps_dir().join("Crater Lake.map").exists() }
 
         /// A host and `n` clients on localhost, started on Crater Lake with one AI (Rat): their Lives.
-        pub fn start(n: usize, hash_every: i32) -> Vec<Live> {
+        pub fn start(n: usize, hash_every: i32) -> Vec<Live> { start_with(n, hash_every, |_| {}) }
+
+        /// `start` with the host's lobby changed by `f` first.
+        pub fn start_with(n: usize, hash_every: i32, f: impl Fn(&mut Lobby)) -> Vec<Live> {
             let mut host = Net::test_host();
             let addr = SocketAddr::from(([127, 0, 0, 1], host.port()));
             let mut clients = vec![];
@@ -2248,6 +2374,7 @@ mod tests {
             }
             let mut l = host.lobby.clone();
             l.ais = vec![(0, 0)];
+            f(&mut l);
             host.set_lobby(l);
             let (lobby, seed, delay) = host.start(1792400000, DELAY);
             let t0 = Instant::now();
@@ -2340,6 +2467,58 @@ mod tests {
         }
         assert!(per_tick < 200.0, "{per_tick} B/tick");
         assert!(n.hashes_checked >= 590);
+    }
+
+    /// Extended rules over LAN: both peers start Extended; the host builds a barracks and a Sassanid Stable and recruits
+    /// a Sassanid Knight (all as chores through the lockstep); the original's sync check finds no difference, and the
+    /// client has the same marked knight.
+    #[cfg(feature = "live")]
+    #[test]
+    fn extended_lockstep() {
+        use shc_sim::buildings as b;
+        if !maps() { return; }
+        let mut ls = start_with(1, 10, |l| l.extended = true);
+        assert!(ls.iter_mut().all(|l| shc_sim::ext::on(l.mem())), "both Extended");
+        let t0 = ls[0].tick();
+        let mut ls = run_all(ls, t0 + 150); // the start goods and their stockpile
+        for l in &mut ls { // the same writes on both peers at the same tick: gold, wood
+            let m = l.mem();
+            m.set_i32(0x18379926c + b::PSTRIDE, 5000);
+            let yard = (1..b::SLOTS).find(|&i| b::state(m, i) == 2 && b::owner(m, i) == 1 && b::kind(m, i) == 10).expect("stockpile");
+            m.set_i32(b::rec(yard) + 0x120 + 2 * 4, 200);
+        }
+        let mut ls = run_all(ls, t0 + 170);
+        let (kx, ky) = ls[0].keep().map(|(x, y)| (x as i32, y as i32)).unwrap();
+        let mut spots = (8..40).step_by(3).flat_map(|d| [(d, 0), (-d, 0), (0, d), (0, -d)]).map(|(dx, dy)| (kx + dx, ky + dy));
+        for tool in [0x56, 0x51, crate::hud::SASSANID_STABLE] { // barracks, armoury, ours
+            let h = &mut ls[0];
+            assert!(h.set_tool(tool), "tool {tool:#x}");
+            let (x, y) = spots.find(|&(x, y)| h.hover(tool, x, y).ok).expect("no spot");
+            assert!(h.click(tool, x, y).1 > 0, "no chore for {tool:#x}");
+            h.set_tool(0);
+        }
+        let mut ls = run_all(ls, t0 + 0x227 + 300); // the stable breeds its first horse
+        for l in &mut ls { // a pike and metal armour in the armoury, on both at the same tick
+            let m = l.mem();
+            let arm = (1..b::SLOTS).find(|&i| b::state(m, i) == 2 && b::owner(m, i) == 1 && b::kind(m, i) == 11).expect("armoury");
+            let (_, goods) = shc_sim::ext::recruit_cost(m);
+            for g in goods[..3].iter().filter(|&&g| g > 0) {
+                m.set_i32(b::rec(arm) + 0x120 + *g as u64 * 4, 5);
+                m.set_i32(shc_sim::game::player(1) + 0x4d0 + *g as u64 * 4, 5); // the player's total of it
+            }
+        }
+        let mut ls = run_all(ls, t0 + 0x227 + 320);
+        assert_eq!(shc_sim::ext::can_recruit(ls[0].mem(), 1), Ok(()));
+        assert_eq!(ls[0].game_action(1007, 1, 0x5a), 0);
+        let mut ls = run_all(ls, t0 + 0x227 + 900);
+        let (a, c) = (sums(&mut ls[0]), sums(&mut ls[1]));
+        let knights = |l: &mut Live| { let m = l.mem(); (1..m.i32(shc_sim::units::OBJ)).filter(|&i| shc_sim::ext::is_sassanid(m, i)).count() };
+        let stables = |l: &mut Live| { let m = l.mem(); (1..b::SLOTS).filter(|&i| shc_sim::ext::is_sassanid_stable(m, i)).count() };
+        println!("host: {}\nclient: {}", log(&ls[0]), log(&ls[1]));
+        assert_eq!(a, c, "in sync");
+        assert_eq!((stables(&mut ls[0]), stables(&mut ls[1])), (1, 1), "the stable on both");
+        assert_eq!((knights(&mut ls[0]), knights(&mut ls[1])), (1, 1), "the Sassanid Knight on both");
+        assert_eq!(ls[1].net.as_ref().unwrap().resyncs, 0, "no resync needed");
     }
 
     /// A desync (one building byte changed on the client) is found by the original's sync check and repaired from the
@@ -2706,6 +2885,50 @@ mod tests {
         println!("{ticks} ticks in {:?}: host {:?}, client {:?}", start.elapsed(), (a.0, a.1, a.2), (b.0, b.1, b.2));
         assert_eq!(a.3, b.3, "final sync sums differ");
         assert!(a.2 >= ticks as u64 - 2 && b.2 >= ticks as u64 - 2, "sync checks compared: {} / {}", a.2, b.2);
+    }
+
+    /// A user map in a LAN game: a client whose Have says it lacks the lobby's map gets the file from the host
+    /// (Msg::MapFile), and map_share::receive keeps it where `find` (the game start's lookup) finds it.
+    #[cfg(feature = "live")]
+    #[test]
+    fn custom_map_lan() {
+        let Ok(bytes) = std::fs::read(crate::skirmish::maps_dir().join("Crater Lake.map")) else { return };
+        let dir = std::env::temp_dir().join(format!("shc-lan-map-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::skirmish::set_test_profile(dir.clone());
+        let mine = crate::map_share::receive("Shared Isle.map", 0, &bytes).unwrap(); // the host's user map
+        let (name, sum) = crate::map_share::to_wire(&mine);
+        assert_eq!((name.as_str(), sum), ("Shared Isle.map", crate::map_share::checksum(&bytes)));
+        let mut h = Net::test_host();
+        let mut l = h.lobby.clone();
+        (l.map, l.map_sum) = (name.clone(), sum);
+        h.set_lobby(l);
+        let mut s = TcpStream::connect(("127.0.0.1", h.port())).unwrap();
+        s.write_all(&Msg::Hello { name: "Gast".into(), version: VERSION, listen: 1, join: Join::Play, tick: 0, through: 0, coa: String::new() }.encode()).unwrap();
+        let t0 = Instant::now();
+        while h.lobby.humans.len() < 2 && t0.elapsed() < Duration::from_secs(5) { h.poll(); std::thread::sleep(Duration::from_millis(2)); }
+        s.write_all(&Msg::Have { from: 2, missing: vec![format!("{}{name}", crate::map_share::MISSING)] }.encode()).unwrap();
+        // the fake client reads frames on its own thread (the host's write waits for it) until the map comes
+        let reader = std::thread::spawn(move || {
+            let mut len = [0u8; 4];
+            while s.read_exact(&mut len).is_ok() {
+                let mut f = vec![0u8; u32::from_le_bytes(len) as usize];
+                if s.read_exact(&mut f).is_err() { break; }
+                if let Some(Msg::MapFile { name, sum, bytes }) = Msg::decode(&f) { return Some((name, sum, bytes)); }
+            }
+            None
+        });
+        while !reader.is_finished() && t0.elapsed() < Duration::from_secs(10) { h.poll(); std::thread::sleep(Duration::from_millis(2)); }
+        let (n, s2, b) = reader.join().unwrap().expect("no MapFile from the host");
+        assert_eq!((n.as_str(), s2, b.len()), ("Shared Isle.map", sum, bytes.len()));
+        assert_eq!(h.lobby.humans[1].missing.len(), 1, "Start waits for it");
+        // the client side: a machine without the map keeps what came
+        std::fs::remove_file(&mine).unwrap();
+        crate::map_share::forget();
+        assert!(crate::map_share::find(&n, s2).is_none());
+        let kept = crate::map_share::receive(&n, s2, &b).unwrap();
+        assert_eq!(crate::map_share::find(&n, s2), Some(kept));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A custom lord in a LAN game: a lord the client lacks shows in its Have and blocks the host's Start (the

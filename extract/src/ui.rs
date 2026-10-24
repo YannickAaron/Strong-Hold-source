@@ -1,7 +1,7 @@
 //! = re/scripts/export_ui.py (XAML, font, strings) + export_ui_atlas.py (HUD atlas and tables), straight from the
 //! asset files: XAML only lives in memory. C#-derived tables come from re/data/cs_*.tsv (gen_cs_tables.py).
 use crate::classes::{self, MONO_BEHAVIOUR, MONO_SCRIPT, TEXTURE2D};
-use crate::unity::SFile;
+use crate::unity::{read_range, SFile};
 use crate::Result;
 use regex::Regex;
 use std::{collections::HashMap, fmt::Write as _, fs, path::Path};
@@ -12,6 +12,8 @@ const BUILD_LISTS: &str = include_str!("../../re/data/cs_build_lists.tsv");
 const MAPPERS: &str = include_str!("../../re/data/cs_mappers.tsv");
 const CHIMPS: &str = include_str!("../../re/data/cs_chimps.tsv");
 const TITLES: &str = include_str!("../../re/data/cs_building_titles.tsv");
+/// UI-MasterAtlas, then the player-colour ones (hud.rs loads them as textures 0, 8, 9).
+pub const ATLASES: [&str; 3] = ["UI-MasterAtlas", "UI-Colour1Atlas", "UI-Colour2Atlas"];
 
 /// NoesisXaml / NoesisFont objects: source path ("Assets/GUI/Sprites/UI-MasterAtlas.xaml") -> content.
 pub fn noesis(data: &Path) -> Result<HashMap<String, Vec<u8>>> {
@@ -91,30 +93,45 @@ pub fn strings(game: &Path) -> Result<String> {
     Ok(s)
 }
 
+/// Atlases `names` (of ATLASES): `<name>.bc` = BC7, all mips back to back, and the XAML's x:Key -> SourceRect: UI-MasterAtlas's
+/// in rects.tsv, the colour ones in `<name>.tsv` after a `#size <w> <mips>` line. The .tsv is written last: it marks a whole export.
+pub fn atlases(data: &Path, x: &HashMap<String, Vec<u8>>, out: &Path, names: &[&str]) -> Result<()> {
+    let ggm = SFile::open(&data.join("globalgamemanagers.assets"))?;
+    let mut found: HashMap<String, classes::Texture2D> = HashMap::new();
+    for f in ["globalgamemanagers.assets", "sharedassets1.assets", "resources.assets"] {
+        if found.len() == names.len() { break; }
+        let file = if f == "globalgamemanagers.assets" { None } else { Some(SFile::open(&data.join(f))?) };
+        for r in file.as_ref().unwrap_or(&ggm).each(TEXTURE2D) {
+            let (_, b) = r?;
+            let n = classes::name(&b);
+            if names.contains(&n.as_str()) && !found.contains_key(&n) { found.insert(n, classes::texture2d(&b)); }
+        }
+    }
+    for &a in names {
+        let t = found.remove(a).ok_or_else(|| format!("{a} not found"))?;
+        let size: usize = (0..t.mips).map(|m| ((t.w >> m) / 4).max(1) * ((t.h >> m) / 4).max(1) * 16).sum();
+        let image = if t.image.is_empty() { read_range(&data.join(t.stream.2.rsplit('/').next().unwrap_or(&t.stream.2)), t.stream.0, size)? } else { t.image };
+        if t.format != 25 || t.w != t.h || image.len() != size { return Err(format!("{a}: unexpected format").into()); }
+        fs::write(out.join(format!("{a}.bc")), &image)?;
+        let xaml = x.get(&format!("Assets/GUI/Sprites/{a}.xaml")).ok_or_else(|| format!("{a}.xaml not found"))?;
+        let master = a == ATLASES[0];
+        let mut s = if master { String::new() } else { format!("#size\t{}\t{}\t0\t0\n", t.w, t.mips) };
+        for c in re(&format!(r#"x:Key="([^"]+)" Source="\{{StaticResource {a}\}}" SourceRect="(\d+),(\d+),(\d+),(\d+)""#)).captures_iter(&String::from_utf8_lossy(xaml)) {
+            writeln!(s, "{}\t{}\t{}\t{}\t{}", &c[1], &c[2], &c[3], &c[4], &c[5])?;
+        }
+        fs::write(out.join(if master { "rects.tsv".into() } else { format!("{a}.tsv") }), s)?;
+    }
+    Ok(())
+}
+
 pub fn export(game: &Path, data: &Path, out: &Path) -> Result<()> {
     fs::create_dir_all(out)?;
-    // 1. atlas pixels: inline BC7, all mips
-    let ggm = SFile::open(&data.join("globalgamemanagers.assets"))?;
-    let mut atlas = None;
-    for r in ggm.each(TEXTURE2D) {
-        let (_, b) = r?;
-        if classes::name(&b) == "UI-MasterAtlas" { atlas = Some(classes::texture2d(&b)); break; }
-    }
-    let t = atlas.ok_or("UI-MasterAtlas not found")?;
-    let size: usize = (0..t.mips).map(|m| ((t.w >> m) / 4).max(1) * ((t.h >> m) / 4).max(1) * 16).sum();
-    if t.format != 25 || t.image.len() != size { return Err("UI-MasterAtlas: unexpected format".into()); }
-    fs::write(out.join("UI-MasterAtlas.bc"), &t.image)?;
-
+    // 1. + 2. atlas pixels and rects
     let x = noesis(data)?;
+    atlases(data, &x, out, &ATLASES)?;
     let xaml = |rel: &str| -> Result<String> {
         Ok(String::from_utf8_lossy(x.get(&format!("Assets/GUI/{rel}")).ok_or_else(|| format!("{rel} not found"))?).into_owned())
     };
-    // 2. rects
-    let mut s = String::new();
-    for c in re(r#"x:Key="([^"]+)" Source="\{StaticResource UI-MasterAtlas\}" SourceRect="(\d+),(\d+),(\d+),(\d+)""#).captures_iter(&xaml("Sprites/UI-MasterAtlas.xaml")?) {
-        writeln!(s, "{}\t{}\t{}\t{}\t{}", &c[1], &c[2], &c[3], &c[4], &c[5])?;
-    }
-    fs::write(out.join("rects.tsv"), s)?;
     // 3. goods bar
     let mut s = String::new();
     for c in re(concat!(r#"(?s)<Grid\s+HorizontalAlignment="Left"\s+VerticalAlignment="Bottom"\s+Width="50"\s+Height="50"\s+"#,

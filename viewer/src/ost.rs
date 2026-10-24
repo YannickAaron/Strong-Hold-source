@@ -31,7 +31,7 @@ pub(super) struct OstUi {
     goods: Option<Goods>,
     speed: Option<(f32, Instant)>, // OST_GAME_SPEED: the speed shown, until when
     first_speed: Option<f32>,
-    owner: Option<(String, String)>, // OST_WhoOwns_Text, OST_WhoOwns_Building
+    owner: Option<(String, String, [i32; 3])>, // OST_WhoOwns_Text, OST_WhoOwns_Building, (player, lord kind, team)
 }
 
 #[derive(Clone)]
@@ -153,9 +153,19 @@ impl Ui {
         }
         self.who_owns(st, on[WHO_OWNS]);
         self.left_stack(st, out, &on, &fresh);
-        if let Some((name, building)) = self.ost.owner.clone() {
-            // MainHUD who-owns grid (bottom 180, two halves): name 24 px left in the right half, bottom 25 up; the
-            // building's name 14 px #CCCCCC under it. ponytail: the owner's face / ally shield images are not drawn
+        if let Some((name, building, [p, kind, team])) = self.ost.owner.clone() {
+            // MainHUD who-owns grid (bottom 180, two halves, 72 high): the face 72² right in the left half (margin 10:
+            // OST_WhoOwns_FaceBackground, _Face, Face Border), the team's shield 23×29 at the right half's top-left
+            // (-8, -6; OST_WhoOwns_Allies); name 24 px left in the right half, bottom 25 up; the building's name 14 px
+            // #CCCCCC under it
+            let [fx, fy] = self.anchor(960.0 - 10.0 - 72.0, 1080.0 - 180.0 - 72.0, 0.5, 1.0);
+            let face = [fx, fy, fx + 72.0 * self.s, fy + 72.0 * self.s];
+            self.lord_face(out, face, p.clamp(0, 8) as usize, if kind < 1 { -1 } else { kind }, true, 1.0);
+            self.img(out, "Face Border", face, [1.0; 4]);
+            if (1..=4).contains(&team) {
+                let [sx, sy] = self.anchor(960.0 - 8.0, 1080.0 - 180.0 - 72.0 - 6.0, 0.5, 1.0);
+                self.img(out, &format!("Team Allies Shield {team} Large"), [sx, sy, sx + 23.0 * self.s, sy + 29.0 * self.s], [1.0; 4]);
+            }
             let lh = self.font.horizontal_line_metrics(24.0).map_or(30.0, |m| m.new_line_size);
             self.block(out, &name, 965.0, 1080.0 - 180.0 - 25.0 - lh, [0.5, 1.0], 24.0, 0.0, CREAM, Some(BG));
             if !building.is_empty() {
@@ -169,12 +179,12 @@ impl Ui {
     /// name variant, data5 the building type; shown at once, gone when the engine removes it.
     fn who_owns(&mut self, st: &HudState, on: bool) {
         if !on { self.ost.owner = None; return; }
-        let [p, kind, _, variant, building] = st.ev.ost[WHO_OWNS].data;
+        let [p, kind, team, variant, building] = st.ev.ost[WHO_OWNS].data;
         let name = if kind < 1 {
             crate::skirmish::Settings::load().get("UserName").filter(|n| !n.is_empty()).map_or_else(|| format!("Player {p}"), str::to_string)
         } else { self.text_of(&crate::endgame::name(kind, variant)) };
         let b = self.titles.get(building.max(0) as usize).map(|k| self.text_of(k)).filter(|s| !s.is_empty()).map_or(String::new(), |s| format!("  {s}  "));
-        self.ost.owner = Some((format!("  {name}  "), b));
+        self.ost.owner = Some((format!("  {name}  "), b, [p, kind, team]));
     }
 
     /// The top-left stack (OST_StartingGoods.xaml, 18 px rows 25 high): the cart (8 s across the screen), the timer

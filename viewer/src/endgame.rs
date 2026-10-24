@@ -63,6 +63,22 @@ pub(crate) fn name(kind: i32, v: i32) -> String {
     }
 }
 
+/// Platform_Multiplayer.getSkirmishName for every player: an AI lord's name (a text key, or a custom lord's own
+/// name), else the LAN game's human by `lan` (player, name), you by Options > Player Settings, else "Player n".
+#[cfg(feature = "live")]
+pub fn player_names(m: &shc_sim::mem::Mem, me: i32, lan: &[(i32, String)]) -> [String; 9] {
+    std::array::from_fn(|p| {
+        let kind = m.i32(0x188571c34 + p as u64 * 4);
+        match lan.iter().find(|n| n.0 == p as i32) {
+            _ if p == 0 => String::new(),
+            _ if kind != 0 => name(kind, m.i16(0x188571c58 + p as u64 * 4) as i32),
+            Some(n) => n.1.clone(),
+            None if p as i32 == me => crate::menu::coa::player_name(),
+            None => format!("Player {p}"),
+        }
+    })
+}
+
 /// SpriteMapping.shcRemapColours: the default colour index of player p (the map's colour table).
 const SHC: [u8; 9] = [0, 1, 3, 4, 2, 6, 5, 7, 8];
 /// Player p's colour index (SpriteMapping.remapColours[p]): `colours[p]` as the game set it up, else the default.

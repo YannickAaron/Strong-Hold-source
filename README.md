@@ -5,7 +5,7 @@ Crusader: Definitive Edition, **except the simulation** (`sim/`). It's here so y
 Mac before you trust the DMG: every line that uses the network, your Steam sign-in, your disk or other programs is in
 this repository.
 
-Snapshot v0.14.0 (one commit per release; tags match the [releases](https://github.com/YannickAaron/Strong-Hold/releases)).
+Snapshot v0.15.0 (one commit per release; tags match the [releases](https://github.com/YannickAaron/Strong-Hold/releases)).
 
 ## What's here
 
@@ -36,7 +36,8 @@ Also not here: game files of any kind. The app gets those from your own copy of 
 - **Network:** `viewer/src/update.rs` (once a day: the latest release from GitHub's API; when you click Update, the
   release's `Strong-Hold-update.tar.gz`, installed only if its SHA-256 is the one GitHub lists, then `codesign
   --verify`), `viewer/src/lord_share.rs` (the published custom lords, from the release tagged `lords`; a lord's zip
-  only when you click Get / Update, checked the same way), `viewer/src/setup/steam.rs`
+  only when you click Get / Update, checked the same way), `viewer/src/map_share.rs` (the published maps, from the
+  release tagged `maps`, the same way; in a LAN game the host sends a player its map), `viewer/src/setup/steam.rs`
   (Steam, only when you download), `viewer/src/lan.rs` (local network, only in LAN games: UDP 47777, TCP 47778).
 - **Files:** `viewer/src/paths.rs`. The app writes to `~/Library/Application Support/Strong Hold` and
   `~/Library/Logs/Strong Hold.log`, and, when you click Update, replaces its own .app (`viewer/src/update.rs`: the

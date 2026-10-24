@@ -1,4 +1,5 @@
 //! In-game panels outside the bottom-right slot: the allies panel (HUD_AlliesPanel, skirmish / multiplayer), the
+//! standings (HUD_MeritPanel), the
 //! extreme powers bar (HUD_ExtremePowers), the Free Build events / invasions menu (HUD_FreebuildMenu) and the control
 //! groups list over the troops panel (HUD_ControlGroups). Layout from their XAML in design px, the orders are the
 //! C# ButtonClicked GameActions. A child module of hud.rs like reports.rs: it draws with Ui's helpers and state.
@@ -17,6 +18,21 @@ impl Pane {
 /// picked and their amount (-1 = none yet), and whether Send opened on the ally's own request (req_goods_asked_for).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Allies { view: u8, cur: usize, goods: i32, amount: i32, asked: bool }
+
+/// HUD_MeritPanel's state: sortBy (0 Greatest Lord, 1 gold, 2 troops) and sortReversed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Merit { sort: u8, rev: bool }
+
+/// HUD_MeritPanel.populateList: the players top to bottom for DLL_GetMeritData rows `d`. Sort 0 by rank key then gold,
+/// 1 by gold then troops, 2 by troops then gold, all descending, a full tie in player order; `rev` turns it round.
+/// The original also ranks the empty slots (player -1) and draws them as blank rows between; they are left out here.
+pub(super) fn ranking(d: &[[i32; 5]; 9], sort: u8, rev: bool) -> Vec<usize> {
+    let (a, b) = match sort { 1 => (2, 3), 2 => (3, 2), _ => (1, 2) };
+    let mut v: Vec<usize> = (1..9).filter(|&p| d[p][0] > 0).collect();
+    v.sort_by_key(|&p| std::cmp::Reverse((d[p][a], d[p][b]))); // stable: ties stay in player order
+    if rev { v.reverse(); }
+    v
+}
 
 /// HUD_FreebuildMenu's state: the event picked and its slider value, the invading side, the troop kind the invasion
 /// slider sets and every kind's count, the Invade Now lock-out (2 s after an invasion).
@@ -125,6 +141,13 @@ impl Ui {
     /// Everything here, drawn over the HUD (after the main panels, before the message bar and tooltip).
     pub(super) fn overlays(&mut self, st: &HudState, out: &mut Vec<HudTri>, cursor: [f32; 2], troops: bool) {
         if troops && self.cg { self.control_groups(st, out, cursor); }
+        // MainHUD's action point button (19×19, margin 0,0,220,130 bottom-right) while camera spots wait (FatControler
+        // Show_ActionPoint): an ally's ping (Alt+P, MPPing), an event's place; a click jumps to the oldest
+        // (ButtonActionPoint: GameAction ActionPointClicked 1035); the engine drops each after 20 s
+        if st.action_points > 0 {
+            let [x, y] = self.br(1920.0 - 220.0 - 19.0, 1080.0 - 130.0 - 19.0);
+            self.button(out, [x, y, x + 19.0 * self.s, y + 19.0 * self.s], "UI-Buttons R003", "UI-Buttons R004", false, cursor, Some(Hit::Act(1035, 0, 0)));
+        }
         self.extreme_bar(st, out, cursor);
         if st.lords.free_build {
             let [x0, y0] = self.bl(0.0, 1080.0 - 68.0); // the objectives button's place (IngameUIScreens extras, margin 0,0,0,34)
@@ -134,6 +157,8 @@ impl Ui {
         }
         if !st.lords.allies_button { self.allies = None; }
         if self.allies.is_some() { self.allies_panel(st, out, cursor); }
+        if !st.lords.merit_button { self.merit = None; }
+        if self.merit.is_some() { self.merit_panel(st, out, cursor); }
         if self.fb.is_some() { self.free_build(st, out, cursor); }
     }
 
@@ -204,6 +229,16 @@ impl Ui {
         }
     }
 
+    /// Player `p`'s face (allies panel, the who-owns line): the lord colour's background when `bg`, then getAIFace(kind)
+    /// (a custom lord: its own picture); `kind` -1 = a human: the generic face. ponytail: no Steam avatars.
+    pub(super) fn lord_face(&mut self, out: &mut Vec<HudTri>, r: [f32; 4], p: usize, kind: i32, bg: bool, alpha: f32) {
+        let c = [1.0, 1.0, 1.0, alpha];
+        if bg { self.img(out, face_bg(p), r, c); }
+        if let Some(cl) = crate::custom_lords::by_kind(kind) { if !crate::custom_lords::draw_face(out, &cl, r, c) { self.img_fit(out, ai_face(crate::custom_lords::parent(&cl) as i16 + 1), r, c); } }
+        else if kind != -1 { self.img_fit(out, ai_face(kind as i16), r, c); }
+        else { self.img(out, "Face Background Generic", r, c); self.img(out, "Face Border", r, c); }
+    }
+
     /// HUD_ControlGroups.ButtonClicked: Select = SelectClanN (29 + N), Create / Add / Delete = GroupTroopsN (19 + N) with
     /// -1 / 10 / 20; 9 = the troops panel's toggle (ButtonTroopPanelToggleCG). The C# sends SelectClan8 for "9" and
     /// SelectClan9 for "0" (and drops Delete 0); here every row works its own group.
@@ -219,16 +254,17 @@ impl Ui {
 
     /// HUD_Main's ButtonAllies (553, bottom, 30×35; skirmish / multiplayer) with the Notification pip while an ally asks
     /// for goods or help or has an order (ShowAlliesPip); a click opens / closes the panel. `at` = its top-left.
-    pub(super) fn allies_tab(&mut self, st: &HudState, out: &mut Vec<HudTri>, cursor: [f32; 2], at: [f32; 2]) {
-        if !st.lords.allies_button { return; }
+    /// Hovered: its Tag ("Talk to allies") for the hover-text place (MouseEnterBuildingIconHandler, as the build tabs).
+    pub(super) fn allies_tab(&mut self, st: &HudState, out: &mut Vec<HudTri>, cursor: [f32; 2], at: [f32; 2]) -> Option<&'static str> {
+        if !st.lords.allies_button { return None; }
         let p = [at[0], at[1], at[0] + 30.0 * self.s, at[1] + 35.0 * self.s];
         self.button(out, p, "UI-Buttons A053", "UI-Buttons A054", false, cursor, Some(Hit::Ally(15, 0)));
-        if Self::inside(p, cursor) { self.panel_tip = Some(self.text_of("TEXT_BUBBLE_HELP_TEXT_342")); }
         let l = &st.lords;
         if l.side(true).iter().any(|&a| l.req[a][0] > 0 || l.help[a] != 0 || matches!(l.order[a], 1 | 2)) {
             let h = self.rects.get("Notification").map_or(15.0, |r| 15.0 * r[3] / r[2]);
             self.img(out, "Notification", [p[0], p[3] - h * self.s, p[0] + 15.0 * self.s, p[3]], [1.0; 4]);
         }
+        Self::inside(p, cursor).then_some("TEXT_BUBBLE_HELP_TEXT_342")
     }
 
     /// HUD_AlliesPanel.ButtonClicked (`k` = which button, `v` its index / amount / good).
@@ -238,6 +274,7 @@ impl Ui {
         let Some(mut a) = self.allies else {
             if k == 15 { // HUD_AlliesPanel.Open: the main view (or "no allies"), Genie_11
                 crate::audio::speech(3, "Genie_11.wav");
+                self.merit = None;
                 self.allies = Some(Allies { goods: -1, amount: -1, ..Default::default() });
             }
             return;
@@ -245,7 +282,7 @@ impl Ui {
         let ally = list.get(a.cur).copied().unwrap_or(0) as i32;
         let back = |a: &mut Allies| a.view = 0;
         match k {
-            0 => if (v as usize) < list.len() { a.cur = v as usize },
+            0 => if (v as usize) < list.len() { a.cur = v as usize; crate::lord_react::fire(list[a.cur], "PORTRAIT") },
             1 | 15 => { self.allies = None; return; } // Exit / the HUD button again
             2 => a.view = 1,
             3 | 4 => { // Send (on the ally's own request: that good and amount) / Request
@@ -257,7 +294,7 @@ impl Ui {
             6 | 7 => { self.actions4.push([1061, if k == 6 { 10 } else { 11 }, ally, 0]); back(&mut a); } // Clear orders / Defend me
             8 => self.actions.push([1065, ally, 0]), // Ally_ConfirmOrders
             9 => self.actions.push([1066, ally, 0]), // Ally_CancelOrders
-            10 => if let Some(&e) = l.side(false).get(v as usize) { self.actions4.push([1061, v + 1, ally, e as i32]); back(&mut a); }, // attack
+            10 => if let Some(&e) = l.side(false).get(v as usize) { self.actions4.push([1061, v + 1, ally, e as i32]); back(&mut a); crate::lord_react::fire(e, "TARGET") }, // attack
             11 => a.amount = a.amount.max(0) + v,
             12 => a.goods = v,
             13 => { // ConfirmGoods: Ally_SendGoods / Ally_RequestGoods (ally, good, amount), then Exit
@@ -293,12 +330,7 @@ impl Ui {
         self.top_text(out, &title, p.at(20.0, 15.0), 22.0, 0.0, CREAM, true);
         let (x1, x2) = if a.view == 0 { ("UI-Buttons S043", "UI-Buttons S044") } else { ("UI-Buttons L005", "UI-Buttons L006") };
         self.button(out, p.r(661.0, 10.0, 29.0, 29.0), x1, x2, false, cursor, Some(Hit::Ally(if a.view == 0 { 1 } else { 5 }, 0)));
-        let face = |ui: &mut Self, out: &mut Vec<HudTri>, r: [f32; 4], q: usize, bg: bool, alpha: f32| {
-            if bg { ui.img(out, face_bg(q), r, [1.0, 1.0, 1.0, alpha]); }
-            if let Some(c) = crate::custom_lords::by_kind(l.ai[q] as i32) { if !crate::custom_lords::draw_face(out, &c, r, [1.0, 1.0, 1.0, alpha]) { ui.img_fit(out, ai_face(crate::custom_lords::parent(&c) as i16 + 1), r, [1.0, 1.0, 1.0, alpha]); } }
-            else if l.ai[q] != -1 { ui.img_fit(out, ai_face(l.ai[q]), r, [1.0, 1.0, 1.0, alpha]); }
-            else { ui.img(out, "Face Background Generic", r, [1.0, 1.0, 1.0, alpha]); ui.img(out, "Face Border", r, [1.0, 1.0, 1.0, alpha]); } // ponytail: no Steam avatars
-        };
+        let face = |ui: &mut Self, out: &mut Vec<HudTri>, r: [f32; 4], q: usize, bg: bool, alpha: f32| ui.lord_face(out, r, q, l.ai[q] as i32, bg, alpha);
         let name = |ui: &Self, q: usize| if let Some(c) = crate::custom_lords::by_kind(l.ai[q] as i32) { c.name } else if l.ai[q] != -1 { ui.text_of(&crate::endgame::name(l.ai[q] as i32, l.names[q] as i32)) } else { crate::endgame::name(0, 0) };
         let mut roll = String::new();
         match a.view {
@@ -402,6 +434,75 @@ impl Ui {
             }
         }
     }
+
+    // ---- standings
+
+    /// HUD_Main's ButtonMerit (588, bottom, 30×35; skirmish / multiplayer, "Order of Merit"): opens / closes the panel.
+    pub(super) fn merit_tab(&mut self, st: &HudState, out: &mut Vec<HudTri>, cursor: [f32; 2], at: [f32; 2]) -> Option<&'static str> {
+        if !st.lords.merit_button { return None; }
+        let p = [at[0], at[1], at[0] + 30.0 * self.s, at[1] + 35.0 * self.s];
+        self.button(out, p, "UI-Buttons A056", "UI-Buttons A057", self.merit.is_some(), cursor, Some(Hit::Merit(9, 0)));
+        Self::inside(p, cursor).then_some("TEXT_BUBBLE_HELP_TEXT_343") // its Tag, hover-text place (as allies_tab)
+    }
+
+    /// HUD_MeritPanel.ButtonClicked: `k` 0..2 = the Lord / Gold / Troops header (the same one again reverses), 3 = a
+    /// row's keep (HomeKeep for that player), 8 = Exit, 9 = the HUD button (Open: sort 0, closes the allies panel,
+    /// GenieDE121). ponytail: the rank comment 10 s after opening (GenieDE129..144) is not played.
+    pub(super) fn merit_click(&mut self, k: u8, v: i32) {
+        match (k, self.merit) {
+            (9, None) => {
+                crate::audio::speech(3, "GenieDE121.wav");
+                self.allies = None;
+                self.merit = Some(Merit::default());
+            }
+            (8 | 9, _) => self.merit = None,
+            (3, _) => self.actions.push([6, v, 0]), // EngineInterface.GameAction(KeyFunctions.HomeKeep, player)
+            (0..=2, Some(m)) => self.merit = Some(Merit { sort: k, rev: m.sort == k && !m.rev }),
+            _ => {}
+        }
+    }
+
+    /// HUD_MeritPanel (640×370, top centre, margin 0,100; BDR_SH1DE60): the sort's title ("Greatest Lord", "Sorted by
+    /// gold / troops"), Exit, the Lord / Gold / Troops headers over a BDR_SH1DEe box, and a 20 px row per player:
+    /// team shield (a fallen lord's S054), name in the lord's colour lightened 0.3, gold and troops right-aligned, and
+    /// the colour keep button that centres on that keep while the lord stands.
+    fn merit_panel(&mut self, st: &HudState, out: &mut Vec<HudTri>, cursor: [f32; 2]) {
+        let Some(m) = self.merit else { return };
+        let l = &st.lords;
+        let p = Pane { o: [self.w / 2.0 - 320.0 * self.s, 100.0 * self.s], s: self.s };
+        self.hits.push((p.r(0.0, 0.0, 640.0, 370.0), Hit::Panel));
+        self.frame2(out, p, 640.0, 370.0, 0xaa);
+        self.frame2(out, p.sub(25.0, 75.0), 590.0, 270.0, 0x88);
+        let title = self.text_of(&format!("TEXT_MP_RANK_{:03}", m.sort + 2)); // lookUpText(TEXT_MP_RANK, 1 + sort)
+        self.top_text(out, &title, p.at(40.0, 20.0), 28.0, 0.0, CREAM, true);
+        self.button(out, p.r(591.0, 20.0, 29.0, 29.0), "UI-Buttons S043", "UI-Buttons S044", false, cursor, Some(Hit::Merit(8, 0)));
+        // the headers: BTN_RADIO_Image (Sprite1 normal, 2 over, 3 checked)
+        for (k, s0, x, w) in [(0u8, 45, 40.0, 243.0), (1, 48, 370.0, 45.0), (2, 51, 500.0, 45.0)] {
+            let r = p.r(x, 85.0, w, 70.0);
+            let s = if m.sort == k { s0 + 2 } else if Self::inside(r, cursor) { s0 + 1 } else { s0 };
+            self.img_fit(out, &format!("UI-Buttons S{s:03}"), r, [1.0; 4]);
+            self.hits.push((r, Hit::Merit(k, 0)));
+        }
+        for (i, q) in ranking(&l.merit, m.sort, m.rev).into_iter().enumerate() {
+            let (row, y) = (l.merit[q], 165.0 + 20.0 * i as f32);
+            let c = crate::endgame::colour(&l.colours, q as u8);
+            let shield = if row[1] < 0 { Some("UI-Buttons S054".to_string()) } else { (1..=4).contains(&row[4]).then(|| format!("Team Allies Shield {} Small", row[4])) };
+            if let Some(k) = shield { self.img_fit(out, &k, p.r(40.0, y, 20.0, 20.0), [1.0; 4]); }
+            let lit = crate::endgame::rgb(c).map(|v| v + (1.0 - v) * 0.3); // GameMap.Lighten(colour, 0.3)
+            let name = self.text_of(&l.who[q]);
+            self.top_text(out, &name, p.at(60.0, y), 18.0, 0.0, lit, true);
+            self.top_text(out, &row[2].to_string(), p.at(410.0, y), 18.0, 1.0, CREAM, true);
+            self.top_text(out, &row[3].to_string(), p.at(540.0, y), 18.0, 1.0, CREAM, true);
+            if row[1] >= 0 { // MeritKeepVis: getTeamKeepImage / getTeamKeepOverImage by the player's colour
+                const KEEP: [&str; 9] = ["Red", "Red", "Blue", "Orange", "Yellow", "Purple", "Black", "Light Blue", "Green"];
+                let k = KEEP[c.min(8) as usize];
+                self.button(out, p.r(578.0, y, 22.0, 22.0), &format!("Keep Up {k}"), &format!("Keep Over {k}"), false, cursor, Some(Hit::Merit(3, q as i32)));
+            }
+        }
+    }
+
+    /// KeyManager's Escape: an open allies or standings panel closes first (true), before the in-game menu.
+    pub(crate) fn escape_panel(&mut self) -> bool { self.allies.take().is_some() | self.merit.take().is_some() }
 
     // ---- Free Build
 
@@ -587,6 +688,46 @@ mod tests {
         press(&mut u, &st, Hit::Ally(11, 25));
         press(&mut u, &st, Hit::Ally(11, 5));
         assert_eq!(press(&mut u, &st, Hit::Ally(13, 0)).1, vec![[1064, 3, 4, 30]]);
+    }
+
+    /// HUD_MeritPanel.populateList: Greatest Lord by rank key (ties: gold), gold (ties: troops), troops (ties: gold);
+    /// a fallen lord (key -1) last on the first; the same header again reverses; empty slots are left out.
+    #[test]
+    fn merit_ranking() {
+        let mut d = [[0; 5]; 9];
+        d[1] = [1, 500, 100, 10, 1];
+        d[2] = [2, 900, 50, 30, 2];
+        d[3] = [3, 500, 300, 30, 2];
+        d[4] = [-1, 0, 0, 0, 0]; // no one
+        d[5] = [5, -1, 0, 0, 0]; // fallen
+        assert_eq!(ranking(&d, 0, false), [2, 3, 1, 5]);
+        assert_eq!(ranking(&d, 0, true), [5, 1, 3, 2]);
+        assert_eq!(ranking(&d, 1, false), [3, 1, 2, 5]);
+        assert_eq!(ranking(&d, 2, false), [3, 2, 1, 5], "30 troops each: more gold first");
+        d[3][2] = 50;
+        assert_eq!(ranking(&d, 2, false), [2, 3, 1, 5], "a full tie keeps player order");
+    }
+
+    /// The standings: the HUD button opens it (and closes the allies panel), a header sorts and reverses, a row's keep
+    /// sends HomeKeep for that player, a fallen lord has no keep button, Exit closes.
+    #[test]
+    fn merit_panel_clicks() {
+        let Some(mut u) = ui() else { return };
+        let mut st = skirmish();
+        st.lords.merit_button = true;
+        st.lords.merit[1] = [1, 100, 10, 0, 1];
+        st.lords.merit[2] = [2, -1, 0, 0, 0];
+        st.lords.merit[3] = [3, 300, 5, 4, 1];
+        press(&mut u, &st, Hit::Ally(15, 0));
+        press(&mut u, &st, Hit::Merit(9, 0));
+        assert_eq!((u.merit, u.allies.is_none()), (Some(Merit::default()), true));
+        assert_eq!(press(&mut u, &st, Hit::Merit(3, 3)).0, vec![[6, 3, 0]]);
+        assert!(!u.hits.iter().any(|(_, h)| *h == Hit::Merit(3, 2)), "fallen: no keep");
+        press(&mut u, &st, Hit::Merit(1, 0));
+        press(&mut u, &st, Hit::Merit(1, 0));
+        assert_eq!(u.merit, Some(Merit { sort: 1, rev: true }));
+        press(&mut u, &st, Hit::Merit(8, 0));
+        assert!(u.merit.is_none());
     }
 
     /// Extreme powers: hidden unless enabled; power k only from 636 · (k + 1) charge; a click is ExtremePower (1068, k).

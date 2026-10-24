@@ -16,11 +16,12 @@ pub mod custom_trails;
 
 /// Trail screens. `Map(trail, sel)`: the trail map of front-end trail id 0..2 / 11..17 / 21..23 (co-op) with mission
 /// `sel` (1-based) selected; `options` = the Classic Trails options popup over `Trails`; `Coop` = the co-op trails;
-/// `Brief(trail, id, difficulty)`: the briefing over the loaded, paused mission `id` (0-based); `Board(trail, sel)`: the
+/// `Brief(trail, id, difficulty, mid)`: the briefing over the loaded, paused mission `id` (0-based), `mid` = reopened
+/// from the HUD's side tab (Start resumes; trail -1 = a custom skirmish, `skirmish_brief`); `Board(trail, sel)`: the
 /// Sands leaderboard of mission `sel` (1-based); `Masters`: Skirmish Masters (masters.rs) opened from trail `tr`'s map;
 /// `Custom`: the custom trails (custom_trails.rs), whose maps are trail ids 90..92.
 #[derive(Clone, Copy, PartialEq)]
-pub enum T { Skirmish, Trails { options: bool }, Sands, Coop, Map(i32, i32), Brief(i32, i32, i32), Board(i32, i32), Masters { tr: i32, sort: u8, flags: u8, del: i64 }, Custom }
+pub enum T { Skirmish, Trails { options: bool }, Sands, Coop, Map(i32, i32), Brief(i32, i32, i32, bool), Board(i32, i32), Masters { tr: i32, sort: u8, flags: u8, del: i64 }, Custom }
 
 /// Trail clicks (menu.rs `Act::Trail`).
 #[derive(Clone, Copy, PartialEq)]
@@ -322,7 +323,7 @@ fn coop_lobby(net: &crate::lan::Net, tr: i32, n: i32, swapped: bool) -> crate::l
     #[cfg(not(feature = "live"))]
     let map = String::new();
     let humans = net.lobby.humans.iter().map(|h| crate::lan::Human { team: 1, ..h.clone() }).collect();
-    crate::lan::Lobby { map, humans, ais: vec![], coop: Some((tr - 20, n - 1, swapped)), ..net.lobby.clone() }
+    crate::lan::Lobby { map, map_sum: 0, humans, ais: vec![], coop: Some((tr - 20, n - 1, swapped)), ..net.lobby.clone() }
 }
 
 /// Options > Player Settings ("Name"), else the Mac user (as the LAN screen names you).
@@ -394,12 +395,28 @@ impl Menu {
     pub fn trail_map(trail: i32) -> Self { Menu { screen: Screen::Trail(map(trail)), ..Self::main() } }
 
     /// ButtonGotoBriefing("FromStory") after a trail start: the briefing over the paused mission, its map's radar
-    /// preview for main.rs to upload. None for the co-op trails (a multiplayer start).
+    /// preview for main.rs to upload. None for the co-op trails (a multiplayer start). `mid`: ButtonGotoBriefing from
+    /// the HUD's side tab during the mission (Start / Escape just resume).
     #[cfg(feature = "live")]
-    pub fn trail_brief(trail: i32, id: i32, difficulty: i32) -> Option<Self> {
+    pub fn trail_brief(trail: i32, id: i32, difficulty: i32, mid: bool) -> Option<Self> {
         if COOPS.contains(&trail) { return None; }
         let b = brief(trail, id)?;
-        Some(Menu { screen: Screen::Trail(T::Brief(trail, id, difficulty)), in_game: true, preview: skirmish::map_preview(&b.path), ..Self::main() })
+        Some(Menu { screen: Screen::Trail(T::Brief(trail, id, difficulty, mid)), in_game: true, preview: skirmish::map_preview(&b.path), ..Self::main() })
+    }
+
+    /// The HUD's side tab in a custom skirmish (ButtonGotoBriefing, BriefingSkirmishVis): the same overlay from the
+    /// lobby it started from: the map's name, the lords in their slots, start positions, fairness and starting goods.
+    #[cfg(feature = "live")]
+    pub fn skirmish_brief(l: &skirmish::Lobby) -> Self {
+        let order = l.keeps.unwrap_or_else(|| std::array::from_fn(|k| if k <= l.ais.len().min(7) { k as i32 } else { -10 })); // skirmish::start's
+        let mut m = shc_sim::trail::Mission { map: String::new(), fairness: l.fairness, starting_level: l.goods, players: 1 + l.ais.len().min(7) as i32,
+            lords: [0; 8], locations: [0; 8], teams: [0; 8], aiv: l.aivs, barracks: 0, merc_post: 0, stockade: 0 };
+        m.teams[0] = l.team;
+        for (k, &(lord, team)) in l.ais.iter().take(7).enumerate() { (m.lords[k + 1], m.teams[k + 1]) = (lord as i32 + 1, team); }
+        for (pos, &member) in order.iter().enumerate() { if let Some(v) = m.locations.get_mut(member.max(0) as usize).filter(|_| member >= 0) { *v = pos as i32 + 1; } }
+        let b = Brief { info: skirmish::map_info(&l.map), m, path: l.map.clone(), x3: l.extreme_trail };
+        *LAST.lock().unwrap() = Some(((-1, 0), b));
+        Menu { screen: Screen::Trail(T::Brief(-1, 0, 0, true)), in_game: true, preview: skirmish::map_preview(&l.map), ..Self::main() }
     }
 
     /// Back (Escape / the Back button): map → its menu, the menus → the Skirmish menu → the main menu.
@@ -415,6 +432,7 @@ impl Menu {
         }
         let up = match t {
             T::Skirmish => { *self = Self::main(); return None }
+            T::Brief(.., true) => return Some(Go::Resume), // ButtonBriefingResume(fromEscape) when not from the story
             T::Brief(..) => return None, // Escape doesn't leave the briefing (Quit / Start do)
             T::Board(tr, n) => T::Map(tr, n),
             T::Masters { tr, .. } => map(tr),
@@ -444,7 +462,8 @@ impl Menu {
         let Screen::Trail(t) = self.screen else { return None };
         match (t, a) {
             // ButtonBriefingResume: main.rs's Go::Brief unpauses, HideObjectiveProgress(0, 0), ResetTime
-            (T::Brief(_, _, d), A::Start) => return Some(Go::Brief(d)),
+            (T::Brief(.., true), A::Start) => return Some(Go::Resume), // reopened mid-game: no ResetTime
+            (T::Brief(_, _, d, _), A::Start) => return Some(Go::Brief(d)),
             // Quit Mission: back to the trail map (main.rs Go::ToMenu with the trail set)
             (T::Brief(..), A::Quit) => return Some(Go::ToMenu),
             (T::Custom, A::CustomPick(k)) => {
@@ -615,7 +634,7 @@ impl Menu {
 
     /// Draw trail screen `t` (1920×1080 design grid): the screen image, then the screen.
     pub(super) fn trail_draw(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, t: T, w: f32, h: f32, cursor: [f32; 2]) {
-        if let T::Brief(tr, id, _) = t { return self.brief_screen(ui, out, tr, id, w, h, cursor); }
+        if let T::Brief(tr, id, ..) = t { return self.brief_screen(ui, out, tr, id, w, h, cursor); }
         let k = (w / 1920.0).max(h / 1080.0);
         Ui::fill(out, [0.0, 0.0, w, h], [0.0, 0.0, 0.0, 1.0]);
         // Image Stretch=UniformToFill (the maps: the mapgrid's 1920×1080 in the Viewbox, so the map scales with the grid)
@@ -1346,17 +1365,20 @@ impl Menu {
 /// What a trail briefing shows of mission `id`: the engine's record (DLL_GetTrailMissionInfo) and its map file.
 #[cfg(feature = "live")]
 #[derive(Clone)]
-struct Brief { m: shc_sim::trail::Mission, path: PathBuf, info: Option<skirmish::MapInfo> }
+struct Brief { m: shc_sim::trail::Mission, path: PathBuf, info: Option<skirmish::MapInfo>, x3: bool } // x3: triple start gold (Extreme)
+
+/// The last briefing read, by (trail, mission); (-1, 0) = the custom skirmish's (`skirmish_brief`).
+#[cfg(feature = "live")]
+static LAST: std::sync::Mutex<Option<((i32, i32), Brief)>> = std::sync::Mutex::new(None);
 
 /// The briefing data of mission `id` of `trail` (cached: the record reads the DLL image).
 #[cfg(feature = "live")]
 fn brief(trail: i32, id: i32) -> Option<Brief> {
-    static LAST: std::sync::Mutex<Option<((i32, i32), Brief)>> = std::sync::Mutex::new(None);
     let mut last = LAST.lock().unwrap();
     if let Some((k, b)) = last.as_ref() { if *k == (trail, id) { return Some(b.clone()); } }
     let m = shc_sim::trail::Mission::read(&shc_sim::mem::Mem::default(), trail, id)?;
     let path = skirmish::maps_dir().join(format!("{}.map", m.map));
-    let b = Brief { info: skirmish::map_info(&path), m, path };
+    let b = Brief { info: skirmish::map_info(&path), m, path, x3: trail == 2 };
     *last = Some(((trail, id), b.clone()));
     Some(b)
 }
@@ -1415,7 +1437,7 @@ impl Menu {
         let Some(b) = brief(tr, id) else { return };
         let m = &b.m;
         // SkirmishBriefingMapName (WGT_Heading2, 32 px): the Warchest trail numbers from 51
-        let title = if tr == 1 { format!("{}. {}", id + 51, ui.text_of(&format!("TEXT_TRAIL_NAMES_CRU_{:03}", id + 51))) } else { mission_name(ui, tr, id + 1) };
+        let title = if tr == -1 { map_name(ui, &b.path) } else if tr == 1 { format!("{}. {}", id + 51, ui.text_of(&format!("TEXT_TRAIL_NAMES_CRU_{:03}", id + 51))) } else { mission_name(ui, tr, id + 1) };
         self.frame(out, 325.0, 25.0, 715.0, 60.0, true);
         self.label(ui, out, &title, 682.5, 55.0, 32.0, 0.5, INK);
         // the lords: player slots in order, your team first (SkirmishBriefingAlly / AllyFight)
@@ -1423,7 +1445,7 @@ impl Menu {
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by_key(|&k| (m.teams[k] == 0 || m.teams[k] != m.teams[0], m.teams[k], k));
         order.retain(|&k| k == 0 || m.lords[k] > 0);
-        let mult = if tr == 2 { 3 } else { 1 };
+        let mult = if b.x3 { 3 } else { 1 };
         let cases = order.len() as f32;
         let row_w = cases * 144.0 + 16.0 + (cases - 1.0) * 16.0;
         let mut x = 682.5 - row_w / 2.0;
@@ -1744,6 +1766,28 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// The HUD's side tab in a custom skirmish (ButtonGotoBriefing): the lobby's lords, teams and start positions on the
+    /// skirmish overlay; Start and Escape resume the game (no ResetTime), Quit Mission leaves.
+    #[test]
+    #[cfg(feature = "live")]
+    fn skirmish_briefing_mid() {
+        let dir = std::env::temp_dir().join(format!("shc-skirmish-brief-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.cfg"), "||SETTINGS||\n||SETTINGS||\n").unwrap();
+        crate::skirmish::set_test_profile(&dir);
+        let l = skirmish::Lobby { ais: vec![(6, 2), (3, 1)], team: 1, fairness: 3, goods: 2, extreme_trail: true, keeps: Some([2, 0, 1, -10, -10, -10, -10, -10]),
+            ..skirmish::Lobby::from_settings(PathBuf::from("Nowhere.map")) };
+        let mut m = Menu::skirmish_brief(&l);
+        assert!(m.in_game && matches!(m.screen, Screen::Trail(T::Brief(-1, 0, _, true))));
+        let b = brief(-1, 0).expect("the lobby's briefing");
+        assert_eq!((b.m.players, b.m.fairness, b.m.starting_level, b.x3), (3, 3, 2, true));
+        assert_eq!((&b.m.lords[..3], &b.m.teams[..3], &b.m.locations[..4]), (&[0, 7, 4][..], &[1, 2, 1][..], &[2, 3, 1, 0][..]), "slot k: lord + 1, team, start position");
+        assert!(matches!(m.back(), Some(Go::Resume)), "Escape resumes");
+        let mut press = |a: A| { m.hits = vec![([0.0, 0.0, 1.0, 1.0], Act::Trail(a))]; m.click([0.5, 0.5]) };
+        assert!(matches!(press(A::Start), Some(Go::Resume)), "Start resumes");
+        assert!(matches!(press(A::Quit), Some(Go::ToMenu)));
+    }
+
     /// The trail briefing (HUD_Briefing's skirmish overlay): opens over the mission paused (in_game) with its map's radar
     /// preview; Start = Go::Brief (main.rs: unpause, HideObjectiveProgress(0, 0), ResetTime), Quit Mission = back to
     /// the trail map, Escape stays; none for the co-op trails. Sands: targets, rank times, relaxed SandsCheatAllowed.
@@ -1756,17 +1800,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("settings.cfg"), "||SETTINGS||\n||SETTINGS||\n").unwrap();
         crate::skirmish::set_test_profile(&dir);
-        assert!(Menu::trail_brief(21, 0, 1).is_none(), "co-op: no briefing");
+        assert!(Menu::trail_brief(21, 0, 1, false).is_none(), "co-op: no briefing");
         let press = |m: &mut Menu, u: &mut Ui, a: Act| {
             m.draw(u, 1920.0, 1080.0, [0.0; 2]);
             let p = m.hits.iter().find(|h| h.1 == a).expect("button on screen").0;
             m.click([(p[0] + p[2]) / 2.0, (p[1] + p[3]) / 2.0])
         };
-        let mut m = Menu::trail_brief(0, 0, 2).expect("briefing");
+        let mut m = Menu::trail_brief(0, 0, 2, false).expect("briefing");
         assert!(m.in_game && m.preview.as_ref().is_some_and(|p| p.len() == 200 * 200 * 4));
-        assert!(matches!(m.back(), None) && matches!(m.screen, Screen::Trail(T::Brief(0, 0, 2))), "Escape stays");
+        assert!(matches!(m.back(), None) && matches!(m.screen, Screen::Trail(T::Brief(0, 0, 2, false))), "Escape stays");
         assert!(matches!(press(&mut m, &mut u, Act::Trail(A::Start)), Some(Go::Brief(2))));
-        let mut m = Menu::trail_brief(0, 0, 2).unwrap();
+        let mut m = Menu::trail_brief(0, 0, 2, false).unwrap();
         assert!(matches!(press(&mut m, &mut u, Act::Trail(A::Quit)), Some(Go::ToMenu)));
         // Sands 1 #1: target 50 min; the rank times T/2, 3T/4, T, 2T as GameData formats them
         assert_eq!(sands_target(11, 0), Some(3000));

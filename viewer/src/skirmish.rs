@@ -147,11 +147,13 @@ thread_local! { static TEST_PROFILE: std::cell::RefCell<Option<PathBuf>> = const
 /// Campaign progress like ConfigSettings / missions.cfg: `unlocked[c]` = highest unlocked mission of campaign c + 1
 /// (settings.cfg `Campaign1`..`Campaign7`, 1..5, default 1); `done` = mission id -> best difficulty won (missions.cfg
 /// `mission<id>:<d>`). The original keeps "campaign complete" as a Steam achievement; here = mission 5 of it won.
+/// `maps`: missions.cfg's other lines (ConfigSettings.ManageScores at a victory with currentMapName = a map file's
+/// lower-case stem -> best difficulty), what Custom Scenarios' Show Completed reads (ConfigSettings.MapCompleted).
 #[derive(Clone, Debug, PartialEq)]
-pub struct Progress { pub unlocked: [i32; 7], pub done: std::collections::BTreeMap<i32, i32> }
+pub struct Progress { pub unlocked: [i32; 7], pub done: std::collections::BTreeMap<i32, i32>, pub maps: std::collections::BTreeMap<String, i32> }
 
 impl Default for Progress {
-    fn default() -> Self { Progress { unlocked: [1; 7], done: Default::default() } }
+    fn default() -> Self { Progress { unlocked: [1; 7], done: Default::default(), maps: Default::default() } }
 }
 
 /// settings.cfg like ConfigSettings.SaveSettings / loadSettingsFromString: the `||SETTINGS||` block's `Key:Value`
@@ -212,7 +214,11 @@ impl Progress {
             if let Some(c) = c.filter(|c| (1..=7).contains(c)) { p.unlocked[c - 1] = v.parse::<i32>().unwrap_or(1).clamp(1, 5); }
         }
         for (k, v) in std::fs::read_to_string(dir.join("missions.cfg")).unwrap_or_default().lines().filter_map(|l| l.split_once(':')) {
-            if let (Some(id), Ok(d)) = (k.trim().strip_prefix("mission").and_then(|i| i.parse().ok()), v.trim().parse()) { p.done.insert(id, d); }
+            match (k.trim().strip_prefix("mission").and_then(|i| i.parse().ok()), v.trim().parse()) {
+                (Some(id), Ok(d)) => { p.done.insert(id, d); }
+                (None, d) => { p.maps.insert(k.trim().to_lowercase(), d.unwrap_or(1000)); } // loadScores: unreadable = 1000
+                _ => {}
+            }
         }
         Some(p)
     }
@@ -225,7 +231,8 @@ impl Progress {
         let mut cfg = Settings::load();
         for (c, v) in self.unlocked.iter().enumerate() { cfg.set(&format!("Campaign{}", c + 1), v); }
         cfg.save()?;
-        crate::paths::write_atomic(&profile_dir().join("missions.cfg"), self.done.iter().map(|(id, d)| format!("mission{id}:{d}\n")).collect::<String>())
+        crate::paths::write_atomic(&profile_dir().join("missions.cfg"), self.done.iter().map(|(id, d)| format!("mission{id}:{d}\n"))
+            .chain(self.maps.iter().map(|(m, d)| format!("{m}:{d}\n"))).collect::<String>())
     }
     /// GameData's victory rule: winning the highest unlocked mission of a campaign unlocks the next (1..4); the best
     /// difficulty per mission is kept.
@@ -235,6 +242,13 @@ impl Progress {
         let d = self.done.entry(id).or_insert(difficulty);
         *d = (*d).max(difficulty);
     }
+    /// ManageScores for a map won (a Custom Scenario): its best difficulty kept (1000 = none recorded).
+    pub fn won_map(&mut self, map: &Path, difficulty: i32) {
+        let d = self.maps.entry(map.file_stem().unwrap_or_default().to_string_lossy().to_lowercase()).or_insert(difficulty);
+        if *d == 1000 || difficulty > *d { *d = difficulty; }
+    }
+    /// ConfigSettings.MapCompleted: `map` won before.
+    pub fn map_done(&self, map: &Path) -> bool { self.maps.contains_key(&map.file_stem().unwrap_or_default().to_string_lossy().to_lowercase()) }
     /// Campaign c (0..7) finished: its fifth mission won.
     pub fn complete(&self, c: usize) -> bool { self.done.contains_key(&(5 * c as i32 + 5)) }
 }
@@ -339,6 +353,10 @@ pub struct Lobby {
     pub extreme_trail: bool,
     /// The game mode (ours): 0 = conquest, else King of the Hill to this many points (koth.rs; the sim never sees it)
     pub hill: i32,
+    /// Extended rules (ours, shc_sim::ext): the Sassanid Stable and Knight
+    pub extended: bool,
+    /// The competitive start (ours, `competitive_start`): the humans' keeps hold 100 wood and 100 bread, speed 50
+    pub competitive: bool,
 }
 
 /// The Advanced Settings rows (FRONT_Multiplayer.xaml, left column then right): MultiplayerSetupTransferData word,
@@ -357,7 +375,7 @@ impl Lobby {
     pub fn new(map: PathBuf) -> Self {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_secs() as i32);
         Lobby { map, lord_kind: -1, team: 0, ais: vec![(0, 0)], fairness: 3, goods: 1, outposts: true, seed, colour: 0, extreme: [false; 3],
-            advanced: false, adv: ADV_DEFAULT, buildings: [1; 13], keeps: None, aivs: [-1; 8], extreme_trail: false, hill: 0 }
+            advanced: false, adv: ADV_DEFAULT, buildings: [1; 13], keeps: None, aivs: [-1; 8], extreme_trail: false, hill: 0, extended: false, competitive: false }
     }
     /// FRONT_Multiplayer.doOpen(skirmishSetup): your colour from Options, the Advanced Settings remembered
     /// (Settings_SkirmishPresets, the popup's Remember).
@@ -417,7 +435,7 @@ pub fn setup(l: &Lobby) -> shc_sim::setup::Setup { setup_at(l, 2) }
 #[cfg(feature = "live")]
 pub fn setup_at(l: &Lobby, first: i32) -> shc_sim::setup::Setup {
     let cs = shc_sim::data::aivs(); // aiv.tsv, from the first-run setup
-    let mut s = shc_sim::setup::Setup { preinit: [1, 0, 0, 0, 0, 0, l.extreme_trail as i32], positions: [-10; 8], aiv_choice: [-1; 8], seed: l.seed, ..Default::default() };
+    let mut s = shc_sim::setup::Setup { preinit: [1, 0, 0, 0, 0, 0, l.extreme_trail as i32], positions: [-10; 8], aiv_choice: [-1; 8], seed: l.seed, extended: l.extended, ..Default::default() };
     s.humans.push((1, l.team, true, l.lord_kind));
     let mut rotation = [0; 8];
     for (k, &(lord, team)) in l.ais.iter().enumerate().take(9 - first.clamp(2, 8) as usize) {
@@ -450,7 +468,8 @@ pub fn setup_at(l: &Lobby, first: i32) -> shc_sim::setup::Setup {
     // advanced_skirmish_options (0x17), the advopt_* (0x18..=0x24, 0x73), the 70 option switches 0x25.. (buildings
     // 0x25..=0x31, goods, troops) and preferredAIVs0..7 (0x6b..); the rest as recorded
     let mut w = [0i32; 116];
-    (w[0], w[1], w[2], w[4], w[6], w[0x15]) = (l.fairness, 40, l.goods, 1, 10, l.outposts as i32);
+    let speed = if l.competitive { COMPETITIVE_SPEED } else { 40 };
+    (w[0], w[1], w[2], w[4], w[6], w[0x15]) = (l.fairness, speed, l.goods, 1, 10, l.outposts as i32);
     for (k, &on) in l.extreme.iter().enumerate() { w[0x12 + k] = on as i32; }
     w[0x14] &= w[0x13]; // around the lord only with the powers on
     w[0x17] = l.advanced as i32;
@@ -521,12 +540,47 @@ pub fn start(l: &Lobby) -> Result<shc_sim::mem::Mem, String> {
     // remap = your colour id (EngineInterface.loadMultiplayerMap: DLL_GetColourMapping(.., PlayerColour + 1); 1 in
     // every recording) and the seed (DLL_SetMPRandSeed)
     shc_sim::setup::new_skirmish(&mut m, &setup(l), &file, l.colour.clamp(0, 7) + 1, Some(l.seed));
+    if l.competitive { competitive_start(&mut m, [1]); }
     // BuildMultiPlayerColourMapping: player p gets the table's colour of its member's colour id -> SetMPRadarColours
     let table: Vec<i32> = (0..9u64).map(|c| m.i32(0x1802c1ce0 + c * 4)).collect();
     for (k, &c) in l.colour_ids().iter().enumerate().take(8) {
         m.set_i32(RADAR_COLOURS + (k as u64 + 1) * 4, table[c as usize]);
     }
     Ok(m)
+}
+
+/// The competitive start's game speed (the Ascension setup's default, its changelog: "what most players prefer").
+pub const COMPETITIVE_SPEED: i32 = 50;
+
+/// The competitive start (ours; docs/BEYOND_DE.md): instead of the lobby's starting goods, each of `humans` has
+/// 100 wood and 100 bread in its keep and no gold, as the competitive Ascension setup starts. Only the keep's store
+/// (player record +0x46c, 25 goods, filled by the map load) changes, right after the setup: the game carts it out
+/// as it does every start (bread waits for a granary), so the sim runs unchanged and replays, saves and LAN carry
+/// it like any start state.
+#[cfg(feature = "live")]
+pub fn competitive_start(m: &mut shc_sim::mem::Mem, humans: impl IntoIterator<Item = i32>) {
+    for p in humans {
+        let store = 0x183798d60 + p as u64 * 0x583c + 0x46c;
+        for k in 0..25u64 { m.set_i32(store + k * 4, match k { 2 | 10 => 100, _ => 0 }); } // wood, bread
+    }
+}
+
+/// The competitive start delivers exactly its goods: 100 wood in the stockpile and no gold after the carts ran
+/// (bread stays in the keep without a granary); the AI keeps its usual start.
+#[cfg(feature = "live")]
+#[test]
+fn competitive_start_goods() {
+    let map = maps_dir().join("Crater Lake.map");
+    if !map.exists() { return; } // needs the game install
+    let lobby = Lobby { ais: vec![(0, 0)], seed: 1234, competitive: true, ..Lobby::new(map) };
+    let mut l = crate::live::Live::from_mem(start(&lobby).unwrap());
+    for _ in 0..800 { l.step(); }
+    let m = l.mem();
+    let rec = |p: u64, o: u64| m.i32(0x183798d60 + p * 0x583c + o);
+    let (stock, keep): (Vec<i32>, Vec<i32>) = ((0..25).map(|k| rec(1, 0x4d0 + k * 4)).collect(), (0..25).map(|k| rec(1, 0x46c + k * 4)).collect());
+    assert_eq!((stock[2], stock[4], stock[15], rec(1, 0x50c)), (100, 0, 0, 0), "wood, no stone, no gold: {stock:?}");
+    assert_eq!(keep[10], 100, "the bread waits in the keep: {keep:?}");
+    assert!(rec(2, 0x50c) > 0, "the AI's start is the lobby's");
 }
 
 #[test]

@@ -44,8 +44,9 @@ fn player_name() -> String { super::coa::player_name() }
 
 /// The skirmish lobby's view of a LAN lobby (map path, AIs, options; your team = the host's).
 fn to_skirmish(l: &lan::Lobby, seed: i32) -> Lobby {
-    Lobby { map: skirmish::maps_dir().join(&l.map), team: l.humans.first().map_or(0, |h| h.team), ais: crate::lord_share::from_wire(&l.ais, &l.customs), fairness: l.fairness,
-        goods: l.goods, outposts: l.outposts, seed, hill: l.hill, ..Lobby::new(skirmish::maps_dir().join(&l.map)) }
+    let map = crate::map_share::find(&l.map, l.map_sum).unwrap_or_else(|| skirmish::maps_dir().join(&l.map));
+    Lobby { map: map.clone(), team: l.humans.first().map_or(0, |h| h.team), ais: crate::lord_share::from_wire(&l.ais, &l.customs), fairness: l.fairness,
+        goods: l.goods, outposts: l.outposts, seed, hill: l.hill, extended: l.extended, competitive: l.competitive, ..Lobby::new(map) }
 }
 
 impl Menu {
@@ -144,6 +145,8 @@ impl Menu {
                 Some(None)
             }
             Act::LoadList => Some(None),
+            // a client reads the game mode picker (read-only: its picks stop below)
+            Act::Lobby(lobby::A::ModeOpen | lobby::A::ModeClose) => None,
             _ if !net.is_host() => Some(None),
             _ => None,
         }
@@ -254,15 +257,15 @@ impl Menu {
     fn mp_push(&mut self) {
         let (Some(net), Screen::Lobby(l)) = (self.mp.net.as_mut(), &self.screen) else { return };
         if !net.is_host() { return; }
-        let speed = skirmish::Settings::load().game_speed() as i32;
+        let speed = if l.competitive { skirmish::COMPETITIVE_SPEED } else { skirmish::Settings::load().game_speed() as i32 };
         let mut humans = net.lobby.humans.clone();
         if let Some(h) = humans.first_mut() { h.team = l.team; }
-        let map = l.map.file_name().map_or(String::new(), |f| f.to_string_lossy().into_owned());
+        let (map, map_sum) = crate::map_share::to_wire(&l.map);
         let ais: Vec<(usize, i32)> = l.ais.iter().take(8usize.saturating_sub(humans.len())).copied().collect();
         let (ais, customs) = crate::lord_share::to_wire(&ais);
-        let new = lan::Lobby { map, humans, ais, customs, fairness: l.fairness, goods: l.goods, outposts: l.outposts, speed, coop: net.lobby.coop,
+        let new = lan::Lobby { map, map_sum, humans, ais, customs, fairness: l.fairness, goods: l.goods, outposts: l.outposts, speed, coop: net.lobby.coop,
             slots: self.mp.save_slots.iter().copied().take(net.lobby.humans.len()).collect(), spectators: net.lobby.spectators.clone(),
-            loaded: self.mp.save.is_some(), hill: l.hill };
+            loaded: self.mp.save.is_some(), hill: l.hill, extended: l.extended, competitive: l.competitive };
         if self.mp.pushed.as_ref() != Some(&new) || new != net.lobby {
             net.set_lobby(new.clone());
             self.mp.pushed = Some(new);
@@ -299,7 +302,7 @@ impl Menu {
         let want = to_skirmish(&net.lobby, 0);
         if let Screen::Lobby(l) = &mut self.screen {
             let new_map = l.map != want.map;
-            (l.map, l.team, l.ais, l.fairness, l.goods, l.outposts, l.hill) = (want.map.clone(), want.team, want.ais.clone(), want.fairness, want.goods, want.outposts, want.hill);
+            (l.map, l.team, l.ais, l.fairness, l.goods, l.outposts, l.hill, l.extended, l.competitive) = (want.map.clone(), want.team, want.ais.clone(), want.fairness, want.goods, want.outposts, want.hill, want.extended, want.competitive);
             if new_map {
                 if let Some(i) = self.files.iter().position(|f| *f == want.map) { self.select(i); }
             }
@@ -325,8 +328,10 @@ impl Menu {
                 None if f.running => "watch".to_string(),
                 None => format!("{} players", f.players),
             };
-            let label = format!("{}  -  {}  ({what})  -  {}", f.name, f.map, f.addr.ip());
-            self.button(ui, out, &label, 520.0, 420.0 + 72.0 * i as f32, 880.0, 60.0, Act::Mp(A::Join(i)), cursor);
+            // the game mode (ours; an older host's answer doesn't say)
+            let mode = f.hill.map_or(String::new(), |h| format!(" - {}", crate::koth::mode_name(h)));
+            let label = format!("{} - {}{mode} ({what}) - {}", f.name, f.map, f.addr.ip());
+            self.button(ui, out, &label, 490.0, 420.0 + 72.0 * i as f32, 940.0, 60.0, Act::Mp(A::Join(i)), cursor);
         }
         // join by address (another network segment, or the broadcast is blocked)
         self.text(ui, out, "Or join by address", 960.0, 790.0, 28.0, 0.5, GOLD);
@@ -355,13 +360,17 @@ fn lan_lobby_menus() {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], net.port()));
     let mut client = Menu::main();
     client.mp_click(A::Open);
-    client.mp.found = vec![lan::Found { addr, name: "Host".into(), map: "Crater Lake".into(), players: 1, running: false, lost: vec![] }];
+    client.mp.found = vec![lan::Found { addr, name: "Host".into(), map: "Crater Lake".into(), players: 1, running: false, lost: vec![], hill: Some(0) }];
     let join = std::thread::spawn(move || { client.mp_click(A::Join(0)); client });
     let t0 = Instant::now();
     while t0.elapsed() < Duration::from_millis(500) { host.mp_poll(); std::thread::sleep(Duration::from_millis(16)); }
     let mut client = join.join().unwrap();
     assert!(client.mp.net.is_some(), "client: {:?}", client.error);
     if let Screen::Lobby(l) = &mut host.screen { l.ais.push((4, 0)); } // the host adds Saladin
+    // the host picks King of the Hill, Long in the mode picker
+    let act = |m: &mut Menu, a: Act| { m.hits = vec![([0.0, 0.0, 1.0, 1.0], a)]; m.click([0.5, 0.5]) };
+    act(&mut host, Act::Lobby(lobby::A::ModeOpen));
+    act(&mut host, Act::Lobby(lobby::A::ModePick(crate::koth::TARGETS[2])));
     let t0 = Instant::now();
     while t0.elapsed() < Duration::from_secs(6) {
         assert!(host.mp_poll().is_none());
@@ -372,6 +381,12 @@ fn lan_lobby_menus() {
     assert_eq!(client.error, None, "client lost the host");
     let Screen::Lobby(cl) = &client.screen else { panic!("client left the lobby") };
     assert_eq!(cl.ais, vec![(4, 0)], "client mirrors the host's AI");
+    assert_eq!(cl.hill, 600, "and its mode");
+    // a client opens the picker to read the rules, but can't pick
+    act(&mut client, Act::Lobby(lobby::A::ModeOpen));
+    act(&mut client, Act::Lobby(lobby::A::ModePick(0)));
+    assert!(client.lst.mode && matches!(&client.screen, Screen::Lobby(l) if l.hill == 600), "client: read-only picker");
+    assert!(client.back().is_none() && !client.lst.mode, "Esc closes it");
     assert_eq!(client.mp_humans(), 2);
     let go = host.mp_click_first(Act::Start).flatten();
     assert!(matches!(go, Some(Go::Lan(_))), "host Play");

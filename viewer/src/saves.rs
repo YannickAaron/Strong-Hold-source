@@ -41,7 +41,8 @@ pub fn save_async(m: &shc_sim::mem::Mem, path: PathBuf, elapsed_ms: u32, done: i
     let mut c = m.clone();
     PENDING.lock().unwrap().push(path.clone());
     std::thread::spawn(move || {
-        let r = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| crate::paths::write_atomic(&path, shc_sim::save::save_game(&mut c, elapsed_ms)));
+        let r = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| crate::paths::write_atomic(&path, shc_sim::save::save_game(&mut c, elapsed_ms)))
+            .and_then(|_| crate::extended::write_beside(&path, shc_sim::ext::on(&c))); // the rules are not in the save (extended.rs)
         PENDING.lock().unwrap().retain(|p| *p != path);
         match &r { Ok(()) => println!("saved {}", path.display()), Err(e) => eprintln!("save {}: {e}", path.display()) }
         done(r);

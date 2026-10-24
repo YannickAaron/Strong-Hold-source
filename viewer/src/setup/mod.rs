@@ -46,7 +46,7 @@ pub fn ensure() {
     #[cfg(target_os = "macos")]
     std::thread::spawn(|| { let _ = PENDING.set(update_todo()); });
     // SHC_CACHE: a developer's own export folder (re/scripts/export_*.py or `extract`): never re-exported
-    if std::env::var_os("SHC_CACHE").is_some() || ready(&d) { more(&d); drop_sc2(&d); return; }
+    if std::env::var_os("SHC_CACHE").is_some() || ready(&d) { colour_atlases(&d); more(&d); drop_sc2(&d); return; }
     if std::env::var_os("SHC_SETUP_DONE").is_some() {
         eprintln!("setup: finished but the data still isn't complete ({}); giving up", d.cache.display());
         std::process::exit(1);
@@ -151,6 +151,18 @@ pub fn more(d: &Dirs) -> Option<std::thread::JoinHandle<()>> {
         let r = shc_extract::video::export_more(&data, &out, &mut |k, n| if k < n { eprintln!("setup: more videos {}/{n}", k + 1) });
         match r { Ok(()) => eprintln!("setup: more videos done in {:.0} s", t.elapsed().as_secs_f32()), Err(e) => eprintln!("setup: more videos: {e}") }
     }))
+}
+
+/// Exports made before the player-colour UI atlases (shc_extract::ui::ATLASES[1..], MainViewModel.UpdateUITroopSprites'
+/// sprites) lack them: added here once (~0.5 s), before the HUD loads. A failure only logs: the HUD then draws the default colour.
+fn colour_atlases(d: &Dirs) {
+    let (ui, names) = (d.cache.join("ui"), &shc_extract::ui::ATLASES[1..]);
+    if !ui.join("rects.tsv").is_file() || names.iter().all(|a| ui.join(format!("{a}.tsv")).is_file()) { return; }
+    let Some(data) = find_game().map(|g| g.join(shc_extract::GAME_DATA)) else { return };
+    match shc_extract::ui::noesis(&data).and_then(|x| shc_extract::ui::atlases(&data, &x, &ui, names)) {
+        Ok(()) => eprintln!("setup: added the player-colour UI atlases"),
+        Err(e) => eprintln!("setup: player-colour UI atlases: {e}"),
+    }
 }
 
 /// Up to 0.11 the app rendered Crusader 2's Sassanid Knight from the player's SC2 install into the export; it no longer

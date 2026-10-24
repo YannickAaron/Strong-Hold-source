@@ -163,7 +163,7 @@ mod tests {
         assert!(matches!(menu.screen, Screen::Trail(T::Map(92, 1))), "two missions: the Extreme map, mission 1");
         assert_eq!(menu.screen_image().as_deref(), Some("trail-map-2"));
         let Some(Go::Trail(92, 0, 1)) = press(&mut menu, &mut u, Act::Trail(A::Start)) else { panic!("Start") };
-        assert!(Menu::trail_brief(92, 0, 1).is_none(), "no briefing data for custom trails");
+        assert!(Menu::trail_brief(92, 0, 1, false).is_none(), "no briefing data for custom trails");
         let mut l = crate::live::Live::from_mem(super::super::start(92, 0, 1).expect("custom mission starts"));
         assert_eq!((l.mem().i32(0x188571b80), l.mem().i32(0x183666fd0), l.mem().i32(0x188571c34 + 8)), (99, 2, 7), "skirmish, custom trail, the Sultan in slot 2");
         let t0 = l.tick();

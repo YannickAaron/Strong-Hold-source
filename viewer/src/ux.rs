@@ -92,13 +92,24 @@ pub fn ui_scale_pct() -> u32 { UI_PCT.load(Relaxed) }
 pub fn ui_scale() -> f32 { ui_scale_pct() as f32 / 100.0 }
 /// The in-game UI's logical px per design px for a `w`×`h` logical-px window: MainViewModel.ScaleIngameUI at its
 /// default Settings_UIScale 1 makes the UI a W/k × H/k grid (W, H in device px), k = min(W/1360, H/768), or 1 on
-/// screens up to 1366×768; that's k / dpr logical px. Times the player's UI size (⌘= / ⌘-), but never wider than the
-/// window: the HUD's two corner blocks span about 1200 design px.
-pub fn hud_scale(w: f32, h: f32) -> f32 {
-    let d = dpr();
+/// screens up to 1366×768; that's k / dpr logical px. Times the player's UI size (⌘= / ⌘-), but the grid never
+/// narrower than the original's narrowest, 1360 design px: the HUD's two bottom blocks (goods bar 400 + building
+/// panel 800) keep a gap.
+pub fn hud_scale(w: f32, h: f32) -> f32 { scale(w, h, dpr(), ui_scale()) }
+fn scale(w: f32, h: f32, d: f32, ui: f32) -> f32 {
     let (wd, hd) = (w * d, h * d);
     let k = if wd <= 1366.0 || hd <= 768.0 { 1.0 } else { (wd / 1360.0).min(hd / 768.0) };
-    (k / d * ui_scale()).min(w / 1200.0)
+    (k / d * ui).min(w / 1360.0)
+}
+
+/// UI size 150 % on the playtest's 1684×784 window (Retina): capped at the 1360 grid, the goods bar and the building
+/// panel no longer touch; 100 % is the original's scale, unchanged.
+#[test]
+fn ui_size_cap() {
+    let (w, h) = (1684.0, 784.0);
+    let s = scale(w, h, 2.0, 1.5);
+    assert!(w - (400.0 + 800.0) * s >= 150.0, "gap {}", w - 1200.0 * s);
+    assert_eq!(scale(w, h, 2.0, 1.0), (1684.0f32 * 2.0 / 1360.0).min(784.0 * 2.0 / 768.0) / 2.0);
 }
 /// Device px per logical px (2 on Retina): glyphs are rasterised at this density.
 pub fn dpr() -> f32 { f32::from_bits(DPR.load(Relaxed)) }
@@ -171,7 +182,7 @@ impl App {
                 (SCREEN_W.store(s.width as u32, Relaxed), SCREEN_H.store(s.height as u32, Relaxed));
             }
             // Borderless is a full-screen window that main.rs opens as fullscreen: switch it over
-            if cfg.num("FullscreenType", 1.0) as i32 == 1 && !scripted() && std::env::var_os("SHC_WINDOW").is_none() && !self.sheet { set_mode(&g.window, 1); }
+            if cfg.num("FullscreenType", 1.0) as i32 == 1 && (!scripted() || std::env::var_os("SHC_FULL").is_some()) && std::env::var_os("SHC_WINDOW").is_none() && !self.sheet { set_mode(&g.window, 1); }
         }
         self.apply_options();
         #[cfg(target_os = "macos")]
@@ -428,7 +439,7 @@ fn sheet(ui: &mut Ui, out: &mut Vec<HudTri>, keys: &Keys, w: f32, h: f32, s: f32
         ("Bigger / smaller UI", "Ctrl+= / Ctrl+-"), ("This sheet", "F1 / Ctrl+/")]);
     let mac: Vec<(String, String)> = mac.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     let pad: Vec<(String, String)> = [("Zoom", "Pinch / wheel"), ("Pan", "Two-finger scroll"), ("Pan", "Middle-drag / edges"),
-        ("Turn the map", "Rotate two fingers"), ("Cancel tool", "Right click")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        ("Turn the map", "Rotate two fingers"), ("Cancel tool", "Right click"), ("Rally point", "Right click, barracks open")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     // (title, rows, label width, key width) in design px
     let cols = [("Game", game, 250.0, 190.0), (os, mac, 220.0, 180.0), ("Trackpad & mouse", pad, 160.0, 200.0)];
     let gap = 60.0;

@@ -170,9 +170,10 @@ enum Act { Skirmish, LoadList, Quit, Back, Pick(usize), Fair(i32), Goods(i32), O
 /// `Load`: the save browser; `Save`: the Save Game dialog (the same list, own saves only, and a name box).
 enum Screen { Main, Load, Save, Lobby(Lobby), Pause, Campaigns, Missions(usize, i32), Briefing(Brief), Story(Story), Sandbox, Solo(Solo), Options(Opt), Trail(trail_menu::T), Mp(mp_menu::T), Credits(credits::Credits), Help(Box<help::Help>), Editor(editor::T), Lord(Box<lord_info::Page>), Extras }
 
-/// The save browser's popup: overwrite this file / delete this file?
+/// The save browser's popup: overwrite this file / delete this file? `Leave`: the pause menu's Quit Mission (false) /
+/// Exit Crusader (true), HUD_IngameMenu cases 6 / 7.
 #[derive(Clone, PartialEq)]
-enum Confirm { Overwrite(PathBuf), Delete(PathBuf) }
+enum Confirm { Overwrite(PathBuf), Delete(PathBuf), Leave(bool) }
 
 /// HUD_Options (its 800×600 grid, options-ui-spec.md): `page` 0 Video, 1 Sound, 2 Controls, 3 Hotkeys, 4 Player;
 /// `in_game` = from the pause menu (back to it, `can_restart` kept for it); `mode` the screen mode picked (0
@@ -352,9 +353,10 @@ impl Menu {
     }
     /// HUD_Briefing for a Custom Scenario (FRONT_StandaloneMission.StartMap -> PostStartMapMission ->
     /// ButtonGotoBriefing): the map's name, its objectives, the difficulty it was started at (shown, not changeable),
-    /// no Hints / Help tabs, no narration.
-    pub fn scenario_briefing(map: PathBuf, d: i32) -> Self {
-        Menu { screen: Screen::Briefing(Brief { id: 0, d, tab: 0, hints: 0, scroll: 0.0, mid: false }), in_game: true, brief_map: Some(map), ..Self::main() }
+    /// no Hints / Help tabs, no narration. `mid`: reopened from the HUD's side tab (Free Build too, `d` 0: no
+    /// difficulty row); Start resumes.
+    pub fn scenario_briefing(map: PathBuf, d: i32, mid: bool) -> Self {
+        Menu { screen: Screen::Briefing(Brief { id: 0, d, tab: 0, hints: 0, scroll: 0.0, mid }), in_game: true, brief_map: Some(map), ..Self::main() }
     }
     /// FRONT_Story.OpenStory(id, aftermath): the campaign's intro page first when `id` opens a campaign, then the
     /// mission's page; `aftermath`: the campaign's closing page (after its 5th mission), then the campaign list.
@@ -390,8 +392,9 @@ impl Menu {
 
     /// Escape: back one screen. None = close the menu (in-game) / nothing (main menu).
     pub fn back(&mut self) -> Option<Go> {
-        if matches!(self.screen, Screen::Lobby(_)) && self.lobby_back() { return None; } // the search box, the Advanced popup
+        if matches!(self.screen, Screen::Lobby(_) | Screen::Solo(_)) && self.lobby_back() { return None; } // the search box, the Advanced popup, the mode picker
         match self.screen {
+            Screen::Pause if self.confirm.is_some() => { self.confirm = None; None } // Esc = No: back to Game Options
             Screen::Pause => Some(Go::Resume),
             Screen::Main => None,
             Screen::Lobby(_) if self.add_ai || self.teams_open => { (self.add_ai, self.teams_open, self.team_pick) = (false, false, None); None }
@@ -496,14 +499,17 @@ impl Menu {
         if let Screen::Solo(so) = &mut self.screen { cycle(&mut so.fb, f, true); }
     }
 
-    /// FRONT_StandaloneMission.doOpen: the mode's map list, its first map selected (Update auto-selects row 0).
-    fn open_solo(&mut self, so: Solo) {
-        let maps = skirmish::solo_maps(if so.invasion { 1 } else { 3 }, so.user, so.builtin);
-        let (files, solo): (Vec<_>, Vec<_>) = maps.into_iter().unzip();
-        let sel = (!files.is_empty()).then_some(0);
-        (self.screen, self.files, self.solo, self.scroll, self.error) = (Screen::Solo(Solo { sel, ..so }), files, solo, 0, None);
-        (self.preview, self.brief) = (None, None);
-        if sel.is_some() { self.select_solo(0); }
+    /// FRONT_StandaloneMission.doOpen: the mode's map list (`fresh` = fromNew: search, sort and Show Completed reset;
+    /// the carousel and the include boxes keep them; Free Build hides Show Completed), the selected map kept, else the
+    /// first (Update auto-selects row 0). lobby.rs filters and sorts it.
+    fn open_solo(&mut self, so: Solo, fresh: bool) {
+        if fresh { self.lst = Default::default(); }
+        self.lst.completed &= so.invasion;
+        self.lst.solo = skirmish::solo_maps(if so.invasion { 1 } else { 3 }, so.user, so.builtin);
+        self.progress = skirmish::Progress::load(); // the won maps, for Show Completed
+        (self.screen, self.scroll, self.error, self.preview, self.brief) = (Screen::Solo(so), 0, None, None, None);
+        self.lst.dirty = true; // again by the shown names at the draw
+        self.solo_rebuild(None);
     }
     fn select_solo(&mut self, i: usize) {
         self.preview = skirmish::map_preview(&self.files[i]);
@@ -540,10 +546,13 @@ impl Menu {
         if let Act::Lobby(a) = a { return self.lobby_click(a); }
         if let Some(r) = self.ed_click_first(a) { return r; } // the map editor's setup (editor.rs)
         match (&mut self.screen, a) {
+            // HUD_IngameMenu cases 6 / 7: Quit Mission / Exit Crusader ask first; the advisor's line comes with the popup
+            (Screen::Pause, Act::ToMenu | Act::Quit) => {
+                crate::audio::speech(1, "General_Quitgame.wav");
+                self.confirm = Some(Confirm::Leave(a == Act::Quit));
+            }
             (_, Act::Quit) => return Some(Go::Quit),
             (_, Act::Resume) => return Some(Go::Resume),
-            // the advisor's lines (UI-sounds session's audio::speech): Quit Mission (said at the original's confirm), Save
-            (_, Act::ToMenu) => { crate::audio::speech(1, "General_Quitgame.wav"); return Some(Go::ToMenu) }
             (_, Act::Save) => self.open_save(),
             (_, Act::SaveGo) => return self.save_go(),
             (Screen::Save, Act::Pick(i)) => self.name = self.files[i].file_stem().unwrap_or_default().to_string_lossy().into_owned(),
@@ -551,6 +560,7 @@ impl Menu {
             (_, Act::No) => self.confirm = None,
             (_, Act::Yes) => match self.confirm.clone() {
                 Some(Confirm::Overwrite(_)) => return self.save_go(),
+                Some(Confirm::Leave(exit)) => { self.confirm = None; return Some(if exit { Go::Quit } else { Go::ToMenu }) }
                 Some(Confirm::Delete(p)) => {
                     self.confirm = None;
                     let _ = std::fs::remove_file(crate::koth::Hill::sidecar(&p)); // a King of the Hill save's score
@@ -673,9 +683,9 @@ impl Menu {
                 1 => for (k, v) in [("MasterVolume", 80), ("MusicVolume", 100), ("SpeechVolume", 100), ("UnitSpeechVolume", 100), ("SFXVolume", 100)] { self.set_slider(k, v) },
                 _ => self.set_slider("GameSpeed", 8),
             },
-            (_, Act::SoloOpen(invasion)) => self.open_solo(Solo { invasion, sel: None, fb: Default::default(), difficulty: 1, user: true, builtin: true }),
+            (_, Act::SoloOpen(invasion)) => self.open_solo(Solo { invasion, sel: None, fb: Default::default(), difficulty: 1, user: true, builtin: true }, true),
             // Next: the other mode, keeping the options (its Advanced flag too: the original's quirk) and the include boxes
-            (Screen::Solo(so), Act::SoloNext) => { let so = Solo { invasion: !so.invasion, difficulty: 1, ..*so }; self.open_solo(so) }
+            (Screen::Solo(so), Act::SoloNext) => { let so = Solo { invasion: !so.invasion, difficulty: 1, ..*so }; self.open_solo(so, false) }
             (Screen::Solo(so), Act::Pick(i)) => { so.sel = Some(i); self.select_solo(i) }
             (Screen::Solo(so), Act::SoloDifficulty) => so.difficulty = (so.difficulty + 1) % 4,
             (Screen::Solo(so), Act::Advanced) => so.fb.advanced = !so.fb.advanced,
@@ -686,7 +696,7 @@ impl Menu {
                 let v = match f { 0 => &mut fb.remove_animals, 1 => &mut fb.extreme_troops, 2 => &mut fb.extreme_powers, _ => &mut fb.defeat_on_death };
                 *v = !*v;
             }
-            (Screen::Solo(so), Act::Include(k)) => { if k == 0 { so.user = !so.user } else { so.builtin = !so.builtin }; let so = Solo { sel: None, ..*so }; self.open_solo(so) }
+            (Screen::Solo(so), Act::Include(k)) => { if k == 0 { so.user = !so.user } else { so.builtin = !so.builtin }; let so = Solo { sel: None, ..*so }; self.open_solo(so, false) }
             (Screen::Solo(so), Act::SoloPlay) => if let Some(i) = so.sel {
                 let map = self.files[i].clone();
                 // the Remove Hostile Animals box only counts while it shows (a Free Build map with hostile animals)
@@ -877,7 +887,7 @@ impl Menu {
         Ui::fill(out, all, [0.0, 0.0, 0.0, 0.5]);
         self.hits.push((all, Act::Nop));
         self.panel(ui, out, 610.0, 400.0, 700.0, 240.0);
-        let (q, p) = match c { Confirm::Overwrite(p) => (ui.text_of("TEXT_GAME_OPTIONS_031"), p), Confirm::Delete(p) => (format!("{}?", ui.text_of("TEXT_SCENARIO_020")), p) };
+        let (q, p) = match c { Confirm::Overwrite(p) => (ui.text_of("TEXT_GAME_OPTIONS_031"), p), Confirm::Delete(p) => (format!("{}?", ui.text_of("TEXT_SCENARIO_020")), p), Confirm::Leave(_) => return }; // Leave: leave_popup
         self.text(ui, out, &q, 960.0, 470.0, 36.0, 0.5, GOLD);
         self.text(ui, out, &p.file_stem().unwrap_or_default().to_string_lossy(), 960.0, 520.0, 26.0, 0.5, CREAM);
         self.button(ui, out, &ui.text_of("TEXT_GAME_OPTIONS_023"), 700.0, 560.0, 220.0, 52.0, Act::Yes, cursor);
@@ -913,7 +923,7 @@ impl Menu {
         let mut out = vec![];
         let out = &mut out;
         match self.screen {
-            Screen::Main | Screen::Load | Screen::Save | Screen::Lobby(_) | Screen::Sandbox | Screen::Mp(_) | Screen::Editor(_) | Screen::Extras => backdrop(out, w, h),
+            Screen::Main | Screen::Load | Screen::Save | Screen::Lobby(_) | Screen::Solo(_) | Screen::Sandbox | Screen::Mp(_) | Screen::Editor(_) | Screen::Extras => backdrop(out, w, h),
             Screen::Campaigns | Screen::Missions(..) | Screen::Story(_) | Screen::Lord(_) => {
                 // the screen's 16:9 image, UniformToFill
                 let k = (w / 1920.0).max(h / 1080.0);
@@ -928,7 +938,8 @@ impl Menu {
             }
             Screen::Pause => {
                 self.screen = Screen::Pause;
-                self.game_options(ui, out, cursor);
+                // the original hides Game Options while its popup asks (No shows it again)
+                match self.confirm { Some(Confirm::Leave(exit)) => self.leave_popup(ui, out, exit, cursor), _ => self.game_options(ui, out, cursor) }
             }
             Screen::Campaigns => {
                 self.screen = Screen::Campaigns;
@@ -952,6 +963,8 @@ impl Menu {
             }
             Screen::Solo(so) => {
                 self.screen = Screen::Solo(so);
+                if std::mem::take(&mut self.lst.dirty) { self.solo_rebuild(Some(&*ui)); } // the search / sort changed (lobby.rs)
+                let Screen::Solo(so) = self.screen else { unreachable!() };
                 self.solo_screen(ui, out, &so, cursor);
             }
             Screen::Trail(t) => {
@@ -1022,6 +1035,19 @@ impl Menu {
         for (k, (key, a)) in buttons.into_iter().enumerate() {
             self.glow(ui, out, &ui.text_of(key), x + 100.0, y + 82.0 + 38.0 * k as f32, 300.0, None, a, cursor);
         }
+    }
+
+    /// HUD_ConfirmationPopup.ShowConfirmation: a 450×170 BDR_SH1DEa panel in the middle, WGT_Heading with the title
+    /// (TEXT_GAME_OPTIONS_008 Quit Mission / _010 Exit Crusader), Yes / No (BTN_SH_GlowS 100 wide, bottom 42).
+    fn leave_popup(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, exit: bool, cursor: [f32; 2]) {
+        let (x, y, w, h) = (735.0, 455.0, 450.0, 170.0);
+        self.frame_with(out, x, y, w, h, true, "Panel_Corner_");
+        for kx in [x + 25.0, x + w - 45.0] { ui.img(out, "Panel_CelticKnot", self.r(kx, y + 11.0, 20.0, 40.0), [1.0; 4]); }
+        tiled(out, 0, "Panel_Divider", self.r(x + 3.0, y + 56.0, w - 6.0, 8.0), 250.0 * self.s, 7.5 * self.s, [1.0; 4]);
+        let title = ui.text_of(if exit { "TEXT_GAME_OPTIONS_010" } else { "TEXT_GAME_OPTIONS_008" });
+        self.label(ui, out, &title, x + w / 2.0, y + 34.0, 30.0, 0.5, [0.0, 0.0, 0.0, 1.0]);
+        self.glow(ui, out, &ui.text_of("TEXT_GAME_OPTIONS_023"), x + 80.0, y + h - 70.0, 100.0, None, Some(Act::Yes), cursor);
+        self.glow(ui, out, &ui.text_of("TEXT_GAME_OPTIONS_024"), x + w - 180.0, y + h - 70.0, 100.0, None, Some(Act::No), cursor);
     }
 
     // ---- Historical Campaigns (FrontendMenus.xaml Show_Frontend_Historical, FRONT_Extra<c>Campaign.xaml, HUD_Briefing;
@@ -1136,7 +1162,7 @@ impl Menu {
                     self.para(ui, out, &brief, 282.5, 134.0 + 25.0 * rows as f32, 560.0, 16.0, CREAM); // BriefingTextWidth 560
                 }
                 // difficulty: campaign missions but 1, 2, 31-33 (changeable); a scenario shows the one it started at
-                if id == 0 || ![1, 2, 31, 32, 33].contains(&id) {
+                if (id == 0 && b.d > 0) || (id > 0 && ![1, 2, 31, 32, 33].contains(&id)) {
                     self.glow(ui, out, "", 382.5, 519.0, 300.0, None, (id > 0 && !mid).then_some(Act::Difficulty), cursor);
                     self.label(ui, out, &ui.text_of("TEXT_MAINOPTIONS_025"), 394.5, 534.0, 16.0, 0.0, [0.905, 0.73, 0.402, 1.0]);
                     self.label(ui, out, &ui.text_of(&format!("TEXT_MAINOPTIONS_{:03}", 20 + b.d)), 670.5, 534.0, 16.0, 1.0, [1.0, 0.68, 0.0, 1.0]); // #FFD700
@@ -1290,7 +1316,8 @@ impl Menu {
 
     /// FRONT_StandaloneMission (1366×768 grid, sandbox-ui-spec.md): title + Next carousel, the map list, map info and
     /// radar, Difficulty (Custom Scenarios) or Advanced / Remove Hostile Animals and the options panel (Free Build),
-    /// Back / Play. ponytail: no search box, sorting, Workshop or Show Completed.
+    /// Back / Play; the list's search box, sortable Size / Name / Date headers and (Custom Scenarios) Show Completed.
+    /// ponytail: no Workshop maps.
     fn solo_screen(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, so: &Solo, cursor: [f32; 2]) {
         const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
         const ACCENT7: [f32; 4] = [0.905, 0.73, 0.402, 1.0]; // #F4DEAA
@@ -1317,6 +1344,9 @@ impl Menu {
         Ui::fill(out, self.r(x0, y0, 463.0, 29.0), [0.125, 0.006, 0.0, 1.0]); // #631200
         self.label(ui, out, &tx(ui, "TEXT_GAME_OPTIONS_028"), x0 + 80.0 + 152.0, y0 + 14.5, 15.0, 0.5, ACCENT7);
         self.label(ui, out, &tx(ui, "TEXT_GAME_OPTIONS_029"), x0 + 384.0 + 40.0, y0 + 14.5, 15.0, 0.5, ACCENT7);
+        // FileListHeaderClickedHandler: Size, Name, Date (the Type column sorts nothing)
+        for (x, w, c) in [(40.0, 40.0, 3), (80.0, 304.0, 0), (384.0, 80.0, 1)] { self.hits.push((self.r(x0 + x, y0, w, 29.0), Act::Lobby(lobby::A::Sort(c)))); }
+        let completed = so.invasion && self.lst.completed;
         for (k, j) in (self.scroll..self.files.len()).take(SOLO_ROWS).enumerate() {
             let y = y0 + 29.0 + 34.0 * k as f32;
             let p = self.r(x0, y, 463.0, 34.0);
@@ -1324,7 +1354,9 @@ impl Menu {
                 Ui::fill(out, p, if so.sel == Some(j) { [0.356, 0.014, 0.002, 1.0] } else { [0.462, 0.027, 0.004, 1.0] }); // #A11F08 / #B52E0C
             }
             let i = self.solo[j];
-            ui.img_fit(out, if i.user { "user" } else { "ff" }, self.r(x0 + 3.0, y + 2.0, 30.0, 30.0), [1.0; 4]);
+            // the type, or with Show Completed won / not won (GameSprites 368 / 369)
+            let icon = match (completed, i.user) { (true, _) if self.progress.map_done(&self.files[j]) => "Slider_Thumb", (true, _) => "notcompleted", (_, true) => "user", _ => "ff" };
+            ui.img_fit(out, icon, self.r(x0 + 3.0, y + 2.0, 30.0, 30.0), [1.0; 4]);
             if i.size >= 0 { self.label(ui, out, &i.size.to_string(), x0 + 40.0, y + 17.0, 16.0, 0.0, BLACK); }
             self.label(ui, out, &map_name(ui, &self.files[j]), x0 + 80.0, y + 17.0, 16.0, 0.0, BLACK);
             if let Some(d) = std::fs::metadata(&self.files[j]).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) {
@@ -1336,6 +1368,13 @@ impl Menu {
         for (k, (x, icon, on)) in [(46.0, "user", so.user), (104.0, "ff", so.builtin), (164.0, "steam", true)].into_iter().enumerate() {
             self.checkbox(out, x, 630.0, on, (k < 2).then_some(Act::Include(k as u8)));
             ui.img_fit(out, icon, self.r(x + 22.0, 625.0, 30.0, 30.0), [1.0; 4]);
+        }
+        self.search_box(ui, out, 230.0, 624.0, true, cursor);
+        if so.invasion {
+            // Show Completed: a 450×23 CheckBox_Template with its 20 px text (TEXT_NEW_TEXT2_181)
+            self.checkbox(out, 46.0, 671.5, self.lst.completed, Some(Act::Lobby(lobby::A::Completed)));
+            self.label(ui, out, &tx(ui, "TEXT_NEW_TEXT2_181"), 72.0, 682.0, 20.0, 0.0, BLACK);
+            self.hits.push((self.r(46.0, 670.0, 450.0, 23.0), Act::Lobby(lobby::A::Completed)));
         }
 
         // map info + radar
@@ -1994,6 +2033,7 @@ impl Menu {
         if self.add_ai { self.add_ai_popup(ui, out, cursor); } // over the bottom row (z-order), it covers Back
         if self.teams_open { self.teams_popup(ui, out, l, cursor); }
         if self.lst.adv { self.lobby_advanced(ui, out, l, cursor); } // lobby.rs
+        if self.lst.mode { self.lobby_modes(ui, out, l, cursor); } // lobby.rs
     }
 
     /// The map ListView: header (#631200, 15 px #F4DEAA), 34 px rows (selected #A11F08, hover #B52E0C); columns
@@ -2060,7 +2100,7 @@ impl Menu {
         // updateSkirmishStartingGoldLevels: the Extreme trail's ×3, none for you with No Starting Gold
         let (you, ai) = START_GOLD[(l.goods - 1).clamp(0, 2) as usize][(l.fairness - 1).clamp(0, 4) as usize];
         let k = if l.extreme_trail { 3 } else { 1 };
-        let (you, ai) = (if l.advanced && l.adv[12] > 0 { 0 } else { you * k }, ai * k);
+        let (you, ai) = (if l.advanced && l.adv[12] > 0 || l.competitive { 0 } else { you * k }, ai * k); // competitive: wood and bread, no gold
         self.label(ui, out, &you.to_string(), 797.0, 590.0, 22.0, 1.0, BLACK);
         ui.img_fit(out, "SkirmishSetup 040", self.r(807.0, 572.0, 44.0, 33.0), [1.0; 4]);
         self.label(ui, out, &ai.to_string(), 862.0, 590.0, 22.0, 0.0, BLACK);
@@ -2328,21 +2368,42 @@ fn notes_lines(md: &str) -> Vec<(u8, String)> {
     }).collect()
 }
 
+/// Game Options › Quit Mission / Exit Crusader ask first (HUD_IngameMenu cases 6 / 7): No and Escape go back to the
+/// menu, Yes leaves.
+#[test]
+fn leave_asks_first() {
+    let mut m = Menu::pause(false);
+    let mut press = |m: &mut Menu, a: Act| { m.hits = vec![([0.0, 0.0, 1.0, 1.0], a)]; m.click([0.5, 0.5]) };
+    assert!(press(&mut m, Act::Quit).is_none() && m.confirm == Some(Confirm::Leave(true)), "Exit asks");
+    assert!(press(&mut m, Act::No).is_none() && m.confirm.is_none() && m.is_pause(), "No");
+    assert!(press(&mut m, Act::ToMenu).is_none() && m.confirm == Some(Confirm::Leave(false)), "Quit Mission asks");
+    assert!(m.back().is_none() && m.confirm.is_none() && m.is_pause(), "Esc = No");
+    press(&mut m, Act::ToMenu);
+    assert!(matches!(press(&mut m, Act::Yes), Some(Go::ToMenu)) && m.confirm.is_none());
+    press(&mut m, Act::Quit);
+    assert!(matches!(press(&mut m, Act::Yes), Some(Go::Quit)));
+}
+
 #[test]
 fn release_notes_markdown() {
     let l = notes_lines("## What's new\n\n- **Save** dialog with `names`\n* see [the page](https://x.y/z) now\nPlain line\n");
     assert_eq!(l, vec![(0, "What's new".into()), (1, "Save dialog with names".into()), (1, "see the page now".into()), (2, "Plain line".into())]);
 }
 
-/// dd/mm/yyyy of a Unix time (civil-from-days, H. Hinnant).
+/// dd/mm/yyyy of a Unix time.
 fn date(secs: i64) -> String {
+    let (d, m, y) = civil(secs);
+    format!("{d:02}/{m:02}/{y}")
+}
+/// Day, month, year of a Unix time (civil-from-days, H. Hinnant).
+pub(crate) fn civil(secs: i64) -> (i64, i64, i64) {
     let z = secs.div_euclid(86400) + 719468;
     let (era, doe) = (z.div_euclid(146097), z.rem_euclid(146097));
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let (d, m) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
-    format!("{d:02}/{m:02}/{}", yoe + era * 400 + (m <= 2) as i64)
+    (d, m, yoe + era * 400 + (m <= 2) as i64)
 }
 
 
@@ -2658,7 +2719,7 @@ fn completed_mission_label() {
 #[test]
 fn scenario_briefing_controls() {
     let Some(mut u) = Ui::load(&crate::cache_dir().join("ui")) else { return }; // needs the exported UI
-    let mut m = Menu::scenario_briefing(PathBuf::from("Central Defense.map"), 2);
+    let mut m = Menu::scenario_briefing(PathBuf::from("Central Defense.map"), 2, false);
     m.draw(&mut u, 1920.0, 1080.0, [0.0; 2]);
     let has = |m: &Menu, f: fn(&Act) -> bool| m.hits.iter().any(|h| f(&h.1));
     assert!(!has(&m, |a| matches!(a, Act::BriefTab(_))) && !has(&m, |a| *a == Act::Difficulty));

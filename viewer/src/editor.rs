@@ -461,7 +461,7 @@ impl Hud {
             for i in 0..ui.build.len() {
                 let b = &ui.build[i];
                 if b.screen != self.screen || b.name.ends_with('b') && b.name.contains("RuinsPageToggle") { continue; }
-                let (s1, s2) = (bound(&b.s1), bound(&b.s2));
+                let (s1, s2) = (b.s1.clone(), b.s2.clone());
                 let r = ui.rects.get(&s1).copied().unwrap_or([0.0, 0.0, 1.0, 1.0]);
                 let (bw, bh) = match (b.w, b.h) { (0.0, h) => (h * r[2] / r[3], h), (w, 0.0) => (w, w * r[3] / r[2]), wh => wh };
                 let p = br(ox + 150.0 + b.x, oy + 55.0 + b.y, bw, bh);
@@ -603,10 +603,20 @@ impl Hud {
     }
 }
 
-/// "{Binding UIBuildingsO001}" (a troop button's view-model sprite) → "UI-Buildings O001"; other keys as they are.
-fn bound(k: &str) -> String {
-    k.strip_prefix("{Binding UIBuildings").and_then(|r| r.strip_suffix('}')).map_or(k.to_string(), |r| format!("UI-Buildings {r}"))
+/// The editor's "Saved X" / "Can't save X: why" line for a `Cmd::SaveMap` result.
+fn save_note(r: Result<std::path::PathBuf, String>) -> String {
+    let name = |p: &std::path::Path| p.file_name().map_or(String::new(), |f| f.to_string_lossy().into_owned());
+    match r { Ok(p) => format!("Saved {}", name(&p)), Err(e) => format!("Can't save: {e}") }
 }
+
+/// A map file into `m` for editing. On the UI thread: a sim panic on a bad map is an error, not the app's end.
+#[cfg(feature = "live")]
+pub(crate) fn load_map(m: &mut shc_sim::mem::Mem, f: &std::path::Path) -> Result<(), String> {
+    let b = std::fs::read(f).map_err(|e| e.to_string())?;
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shc_sim::editor::load(m, &b).map_err(|e| format!("{e:?}"))))
+        .unwrap_or_else(|e| Err(crate::skirmish::panic_text(e)))
+}
+
 
 // ---- main.rs's side: start the editor, its clicks and strokes ----
 
@@ -622,11 +632,7 @@ impl crate::App {
                 shc_sim::editor::new_map(&mut m, *size, ty, mp);
                 Ok(())
             }
-            // on the UI thread: a sim panic on a bad map must not take the app down
-            Start::Load(f) => std::fs::read(f).map_err(|e| e.to_string()).and_then(|b| {
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shc_sim::editor::load(&mut m, &b).map_err(|e| format!("{e:?}"))))
-                    .unwrap_or_else(|e| Err(crate::skirmish::panic_text(e)))
-            }),
+            Start::Load(f) => load_map(&mut m, f),
         };
         if let Err(e) = r {
             if let Some(mm) = &mut self.menu { mm.error = Some(format!("Can't open the map: {e}")); }
@@ -649,8 +655,7 @@ impl crate::App {
             let l = self.play.as_ref().and_then(|p| p.live.as_ref());
             match hit {
                 Some(Some(Out::Save(path))) => {
-                    if let Some(l) = l { l.send(crate::live::Cmd::SaveMap(path.clone())); }
-                    e.note(format!("Saved {}", path.file_name().map_or(String::new(), |f| f.to_string_lossy().into_owned())));
+                    if let Some(l) = l { l.send(crate::live::Cmd::SaveMap(path)); } // the note comes with the result (editor_frame)
                 }
                 Some(Some(Out::Exit)) => e.exit = true,
                 Some(Some(Out::Tool(t))) => if let Some(l) = l { l.send(crate::live::Cmd::Tool(t)) },
@@ -689,6 +694,7 @@ impl crate::App {
         if self.editor.as_ref().is_some_and(|e| e.exit) { return self.menu_go(Go::ToMenu, el); }
         let (Some(e), Some(l)) = (self.editor.as_mut(), self.play.as_mut().and_then(|p| p.live.as_mut())) else { return };
         if let Some(i) = *l.ed.lock().unwrap() { e.info = i; }
+        if let Some(r) = l.saved.lock().unwrap().take() { e.note(save_note(r)); }
         let t = (!e.over(self.cam.cursor) && self.menu.is_none()).then(|| self.cam.tile_at(l.rot));
         let n = if self.mods.shift_key() { 5 } else if self.mods.control_key() { 20 } else if self.mods.alt_key() { 50 } else { 1 };
         let down = e.down;
@@ -720,7 +726,6 @@ fn stroke_states() {
     assert_eq!(goods_step(15, 0, true), 10); // gold: GoodsCurve5000 × 10
     assert_eq!(goods_step(2, 40, true), 50);
     assert_eq!(goods_step(2, 40, false), 35);
-    assert_eq!(bound("{Binding UIBuildingsO001}"), "UI-Buildings O001");
     assert_eq!(sprite("G025 a", 1), "UI-Buttons G026 a");
     assert_eq!(Start::map_type(1), (3, false));
     assert_eq!(Start::map_type(4), (0, true));
@@ -735,5 +740,26 @@ fn stroke_states() {
     assert_eq!(h.save_to(), Some(dir.join("Maps/New Map.map")));
     let mut h = Hud::new(&Start::Load(dir.join("Maps/New Map.map")));
     assert_eq!(h.save_to(), Some(dir.join("Maps/New Map.map")));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(save_note(Ok(dir.join("Maps/A.map"))), "Saved A.map");
+    assert_eq!(save_note(Err("disk full".into())), "Can't save: disk full");
+}
+
+/// A bad map file (garbage, a truncated one) is an error line, never a panic on the UI thread.
+#[cfg(feature = "live")]
+#[test]
+fn bad_map_is_an_error() {
+    let dir = std::env::temp_dir().join(format!("shc-editor-bad-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    for (name, bytes) in [("garbage.map", vec![0x5au8; 4096]), ("short.map", vec![0u8; 12]), ("empty.map", vec![])] {
+        let f = dir.join(name);
+        std::fs::write(&f, bytes).unwrap();
+        let mut m = shc_sim::mem::Mem::default();
+        assert!(load_map(&mut m, &f).is_err(), "{name}");
+    }
+    std::panic::set_hook(hook);
+    assert!(load_map(&mut shc_sim::mem::Mem::default(), &dir.join("missing.map")).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }

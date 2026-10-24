@@ -1,12 +1,13 @@
 //! Extras (ours, the main menu's sixth shield): this build (version, platform, folders), the update check on request
 //! (update.rs, which also installs the new version) and the custom lords: the ones installed and the published ones
 //! (Get / Update), and importing a lord's .zip (lord_share.rs; a .zip dropped on the window lands here too). Imported lords simply join the skirmish's Add-AI faces. Load Game's dark panel and
-//! text buttons. A child module of menu.rs.
+//! text buttons. A switch over the right column shows the published maps instead (map_share.rs; a dropped .map lands
+//! in the player folder's Maps). A child module of menu.rs.
 use super::*;
 
 /// The screen's own clicks.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum A { Open, Folder, Check, Notes, Import, Replace(bool), Lord(u8) }
+pub enum A { Open, Folder, Check, Notes, Import, Replace(bool), Lord(u8), Maps(bool), Map(u8), MapsFolder }
 
 /// Lords listed (more: "+n more").
 const SHOWN: usize = 6;
@@ -33,6 +34,7 @@ impl Menu {
             A::Open => {
                 crate::custom_lords::rescan();
                 crate::lord_share::fetch_online();
+                crate::map_share::fetch_online();
                 *crate::lord_share::MESSAGE.lock().unwrap() = None;
                 *self = Menu { screen: Screen::Extras, ..Self::main() };
             }
@@ -45,6 +47,13 @@ impl Menu {
             A::Notes => { self.open_options(); if let Screen::Options(op) = &mut self.screen { op.page = 5; } }
             A::Import => if let Some(f) = crate::lord_share::pick_zip() { crate::lord_share::import_ui(&f, false) },
             A::Lord(k) => if let Some((name, _)) = lord_rows().get(k as usize) { crate::lord_share::get(name) },
+            A::Maps(on) => crate::map_share::SHOW_MAPS.store(on, std::sync::atomic::Ordering::Relaxed),
+            A::Map(k) => if let Some(o) = crate::map_share::online().get(k as usize) { crate::map_share::get(&o.name) },
+            A::MapsFolder => {
+                let dir = skirmish::user_map_dirs()[0].clone();
+                let _ = std::fs::create_dir_all(&dir);
+                let _ = std::process::Command::new("open").arg(&dir).spawn();
+            }
             A::Replace(yes) => {
                 let p = crate::lord_share::PENDING.lock().unwrap().take();
                 if let (true, Some((f, _))) = (yes, p) { crate::lord_share::import_ui(&f, true); }
@@ -86,9 +95,16 @@ impl Menu {
             if let crate::update::Install::Failed(e) = crate::update::install_state() { self.para(ui, out, &e, x, 800.0, 540.0, 18.0, BAD); }
         }
 
-        // ---- custom lords
+        // ---- custom lords / maps: the column's two titles switch it
         let x = 1000.0;
-        self.text(ui, out, "Custom lords", x, 270.0, 34.0, 0.0, GOLD);
+        let maps = crate::map_share::SHOW_MAPS.load(std::sync::atomic::Ordering::Relaxed);
+        self.text(ui, out, "Custom lords", x, 270.0, 34.0, 0.0, if maps { DIM } else { GOLD });
+        self.text(ui, out, "Maps", x + 300.0, 270.0, 34.0, 0.0, if maps { GOLD } else { DIM });
+        let (ux, uw) = if maps { (x + 296.0, 90.0) } else { (x - 4.0, 196.0) }; // the open one underlined
+        ui.img(out, "Panel_Divider", self.r(ux, 280.0, uw, 8.0), [1.0; 4]);
+        self.hits.push((self.r(x, 236.0, 280.0, 44.0), Act::Extras(A::Maps(false))));
+        self.hits.push((self.r(x + 300.0, 236.0, 120.0, 44.0), Act::Extras(A::Maps(true))));
+        if maps { return self.extras_maps(ui, out, x, cursor); }
         let rows = lord_rows();
         if rows.is_empty() { self.para(ui, out, "None installed yet.", x, 296.0, 540.0, 20.0, DIM); }
         let getting = crate::lord_share::GETTING.lock().unwrap().clone();
@@ -128,6 +144,33 @@ impl Menu {
             }
         }
 
+        self.button(ui, out, "Back", 840.0, 910.0, 240.0, 56.0, Act::Back, cursor);
+    }
+
+    /// The right column's maps: the published ones with Get / Update (map_share.rs), the maps folder, the last result.
+    fn extras_maps(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, x: f32, cursor: [f32; 2]) {
+        let rows = crate::map_share::online();
+        if rows.is_empty() { self.para(ui, out, "No maps published yet (or offline).", x, 296.0, 540.0, 20.0, DIM); }
+        let getting = crate::map_share::GETTING.lock().unwrap().clone();
+        for (k, o) in rows.iter().enumerate().take(SHOWN + 1) {
+            let ry = 300.0 + 58.0 * k as f32;
+            self.label(ui, out, &o.name, x, ry + 20.0, 22.0, 0.0, CREAM);
+            self.label(ui, out, &format!("{:.1} MB", o.file.size as f32 / 1048576.0), x, ry + 42.0, 15.0, 0.0, DIM);
+            let (bx, by) = (x + 410.0, ry + 4.0);
+            match (getting.as_ref().filter(|g| g.0 == o.name), crate::map_share::state(o)) {
+                (Some((_, f)), _) => { self.label(ui, out, &format!("{:.0} %", f * 100.0), bx + 65.0, by + 20.0, 20.0, 0.5, GOLD); }
+                (None, crate::map_share::State::Get) => self.button(ui, out, "Get", bx, by, 130.0, 40.0, Act::Extras(A::Map(k as u8)), cursor),
+                (None, crate::map_share::State::Update) => self.button(ui, out, "Update", bx, by, 130.0, 40.0, Act::Extras(A::Map(k as u8)), cursor),
+                (None, crate::map_share::State::Current) => { self.label(ui, out, "Up to date", bx + 65.0, by + 20.0, 17.0, 0.5, OK); }
+            }
+        }
+        if rows.len() > SHOWN + 1 { self.label(ui, out, &format!("+{} more", rows.len() - SHOWN - 1), x, 300.0 + 58.0 * (SHOWN + 1) as f32 + 10.0, 18.0, 0.0, DIM); }
+        let y = 720.0;
+        self.button(ui, out, "Open maps folder", x, y, 540.0, 48.0, Act::Extras(A::MapsFolder), cursor);
+        match crate::map_share::MESSAGE.lock().unwrap().clone() {
+            Some((m, ok)) => { self.para(ui, out, &m, x, y + 60.0, 540.0, 18.0, if ok { OK } else { BAD }); }
+            None => { self.para(ui, out, "Maps there, or a .map dropped on the window, show in the skirmish's map list. In a LAN game the host sends its map to players who lack it.", x, y + 60.0, 540.0, 18.0, DIM); }
+        }
         self.button(ui, out, "Back", 840.0, 910.0, 240.0, 56.0, Act::Back, cursor);
     }
 }

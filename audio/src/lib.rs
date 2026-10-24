@@ -50,6 +50,16 @@ pub struct Audio {
     speech_vol: [(f32, bool); 3],
     video_vol: f32,
     ducked: bool,
+    // our extensions: the video's soundtrack plays alone (a custom lord's trailer); the speech channel holds a custom
+    // lord's line (play_speech_file), which music and effects make room for
+    video_solo: bool,
+    speech_lord: [bool; 3],
+}
+
+/// (music, effects + ambient) factors: a solo video silences both; a custom lord talking ducks the music (whatever
+/// the Options toggle says) and halves the effects; else MyAudioManager's speech duck on the music.
+fn levels(solo: bool, lord: bool, ducked: bool) -> (f32, f32) {
+    if solo { (0.0, 0.0) } else if lord { (0.3, 0.5) } else if ducked { (0.3, 1.0) } else { (1.0, 1.0) }
 }
 
 fn tsv(path: &Path) -> Vec<Vec<String>> {
@@ -128,6 +138,8 @@ impl Audio {
             speech_vol: [(1.0, false); 3],
             video_vol: 1.0,
             ducked: false,
+            video_solo: false,
+            speech_lord: [false; 3],
             music_vol: (1.0, 1.0),
             music_next: None,
             music_keep: Arc::new(AtomicBool::new(false)),
@@ -155,7 +167,7 @@ impl Audio {
 
     /// One-shot: `clip` is the clip name (`chop1 22k`) or a resource path (`fx\chop1 22k`); pan −1..1.
     pub fn play(&mut self, clip: &str, volume: f32, pan: f32) {
-        let v = volume * self.clip_volume(clip) * self.vols.sfx * self.vols.master;
+        let v = volume * self.clip_volume(clip) * self.vols.sfx * self.vols.master * self.levels().1;
         if v <= 0.0 { return; }
         let Some(src) = self.decode(&self.dir.join("fx").join(clip_file(clip) + ".wav")) else { return };
         let (l, r) = ((1.0 - pan).min(1.0) * v, (1.0 + pan).min(1.0) * v);
@@ -195,7 +207,7 @@ impl Audio {
         self.ambient_vol[ch] = v;
         let sink = &self.ambient_sinks[ch];
         sink.stop();
-        sink.set_volume(v * self.vols.sfx * self.vols.master);
+        sink.set_volume(self.ambient_gain(ch));
         if loop_ { sink.append(src.repeat_infinite()) } else { sink.append(src) }
         sink.play();
     }
@@ -203,7 +215,7 @@ impl Audio {
     pub fn set_ambient_volume(&mut self, channel: i32, volume: f32) {
         let ch = channel.clamp(1, 2) as usize - 1;
         self.ambient_vol[ch] = volume;
-        self.ambient_sinks[ch].set_volume(volume * self.vols.sfx * self.vols.master);
+        self.ambient_sinks[ch].set_volume(self.ambient_gain(ch));
     }
 
     /// `name` as the engine gives it (`fx\speech\abow_s3.wav`) or a bare file name; looked up in EnglishSpeech/**.
@@ -211,8 +223,10 @@ impl Audio {
         let base = clip_file(name).to_lowercase();
         if base.contains("null.") { return; }
         let Some(path) = self.speech.get(&base).cloned() else { eprintln!("audio: no speech {base}"); return };
+        if self.solo() { return; }
         let Some(src) = self.decode(&path) else { return };
         let ch = channel.clamp(1, 3) as usize - 1;
+        self.speech_lord[ch] = false;
         // SFXManager.playSpeech: lines from the "troops" folder are unit speech (their own slider)
         let unit = path.parent().and_then(|p| p.file_name()).map_or(false, |f| f.eq_ignore_ascii_case("troops"));
         self.speech_vol[ch] = (volume, unit);
@@ -221,9 +235,11 @@ impl Audio {
     }
     /// A speech file by path (a custom lord's CustomMedia wav: MyAudioManager.PlaySpeech(ch, "*", path)).
     pub fn play_speech_file(&mut self, channel: i32, path: &Path, volume: f32) {
+        if self.solo() { return; }
         let Some(src) = self.decode(path) else { return };
         let ch = channel.clamp(1, 3) as usize - 1;
         self.speech_vol[ch] = (volume, false);
+        self.speech_lord[ch] = true;
         let sink = &self.speech_sinks[ch];
         sink.stop(); sink.set_volume(self.speech_gain(ch)); sink.append(src); sink.play();
     }
@@ -235,14 +251,16 @@ impl Audio {
         let (v, unit) = self.speech_vol[ch];
         v * if unit { self.vols.unit_speech } else { self.vols.speech } * self.vols.master
     }
-    fn music_gain(&self) -> f32 {
-        self.music_vol.0 * self.music_vol.1 * self.vols.music * self.vols.master * if self.ducked { 0.3 } else { 1.0 }
-    }
+    fn music_gain(&self) -> f32 { self.music_vol.0 * self.music_vol.1 * self.vols.music * self.vols.master * self.levels().0 }
+    fn ambient_gain(&self, ch: usize) -> f32 { self.ambient_vol[ch] * self.vols.sfx * self.vols.master * self.levels().1 }
+    fn solo(&self) -> bool { self.video_solo && !self.video.empty() }
+    fn lord_talking(&self) -> bool { (0..3).any(|c| self.speech_lord[c] && !self.speech_sinks[c].empty()) }
+    fn levels(&self) -> (f32, f32) { levels(self.solo(), self.lord_talking(), self.ducked) }
     /// Options sliders: applies to new sounds and to the playing music, ambient, speech and video channels.
     pub fn set_volumes(&mut self, v: Volumes) {
         self.vols = v;
         self.music.set_volume(self.music_gain());
-        for ch in 0..2 { self.ambient_sinks[ch].set_volume(self.ambient_vol[ch] * v.sfx * v.master); }
+        for ch in 0..2 { self.ambient_sinks[ch].set_volume(self.ambient_gain(ch)); }
         for ch in 0..3 { self.speech_sinks[ch].set_volume(self.speech_gain(ch)); }
         self.video.set_volume(self.video_vol * v.speech * v.master);
     }
@@ -294,9 +312,12 @@ impl Audio {
         (!self.music.empty(), self.music_about)
     }
     /// A video's soundtrack (a WAV file, e.g. re/scripts/export_video.py's intro.wav) on its own channel, streamed;
-    /// None stops it.
-    pub fn play_video(&mut self, wav: Option<&Path>, volume: f32) {
+    /// None stops it. `solo`: nothing else plays while it does (the speech channels stop, music, effects and ambient go
+    /// silent, new speech is dropped); call `mix` every frame so they come back after it.
+    pub fn play_video(&mut self, wav: Option<&Path>, volume: f32, solo: bool) {
         self.video.stop();
+        self.video_solo = solo;
+        if solo && wav.is_some() { self.speech_sinks.iter().for_each(Sink::stop) }
         let Some(src) = wav.and_then(|p| std::fs::File::open(p).ok()).and_then(|f| Decoder::new_wav(std::io::BufReader::new(f)).ok()) else { return };
         self.video_vol = volume;
         self.video.set_volume(volume * self.vols.speech * self.vols.master); // IntroSequence.StartVideo: speech volume
@@ -306,11 +327,13 @@ impl Audio {
     /// Nothing playing or queued on the music channel.
     pub fn music_idle(&self) -> bool { self.music.empty() }
     pub fn set_music_volume(&mut self, volume: f32) { self.music_vol.0 = volume; self.music.set_volume(self.music_gain()); }
+    /// Once per frame: the music, ambient levels for what plays now (`levels`). `duck_speech` =
     /// MyAudioManager.setMusicFadedState (ReduceMusicVolumeForSpeech, on by default): music at 0.3× while a speech
-    /// channel plays. Call once per frame.
-    pub fn duck_for_speech(&mut self) {
-        self.ducked = self.vols.reduce_music_for_speech && self.speech_sinks.iter().any(|s| !s.empty());
+    /// channel plays; in game only (the front end doesn't duck).
+    pub fn mix(&mut self, duck_speech: bool) {
+        self.ducked = duck_speech && self.vols.reduce_music_for_speech && self.speech_sinks.iter().any(|s| !s.empty());
         self.music.set_volume(self.music_gain());
+        for ch in 0..2 { self.ambient_sinks[ch].set_volume(self.ambient_gain(ch)); }
     }
 
     /// Handle one draw-list record of type 16/17/18/19/21 (GameMap.processTestMap). `ret_data` is the
@@ -367,5 +390,14 @@ mod tests {
         let m = super::parse_volume("-------Group 01 -- volume = -10 ----\n\"fx\\chop1 22k.wav\"\t\t127\n-------Group 02 -- volume = +30 ----\n\"fx\\music\\oud_07.raw\"\t\t97\n");
         assert_eq!(m["fx\\chop1 22k"], 117.0 / 127.0);
         assert_eq!(m["fx\\music\\oud_07.raw"], 1.0);
+    }
+
+    #[test]
+    fn solo_and_lord_levels() {
+        use super::levels;
+        assert_eq!(levels(true, true, true), (0.0, 0.0)); // a trailer silences everything
+        assert_eq!(levels(false, true, false), (0.3, 0.5)); // a custom lord's line ducks even with the toggle off
+        assert_eq!(levels(false, false, true), (0.3, 1.0)); // the game's own speech duck
+        assert_eq!(levels(false, false, false), (1.0, 1.0));
     }
 }

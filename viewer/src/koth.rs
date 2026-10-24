@@ -32,6 +32,22 @@ pub const TAKE: i32 = 20;
 pub const TARGETS: [i32; 3] = [180, 300, 600];
 /// The lobby's names for them.
 pub const LENGTHS: [&str; 3] = ["Short", "Normal", "Long"];
+/// The lobby's game modes (lobby.rs picker): name, how you win, picture, the targets to pick from (`Lobby::hill`; none:
+/// conquest, 0). A new mode = a row here plus its rules code.
+pub const MODES: [(&str, &str, &str, &[i32]); 2] = [
+    ("Conquest", "Last lord standing wins, together with his allies.", "shield_gauntlet", &[]),
+    ("King of the Hill", "Hold the hill in the map's middle with soldiers: 1 point per second while nobody else is on it. \
+        Hold it alone for 20 seconds to take its fort. The first side to the target wins.", "shield_crown", &TARGETS),
+];
+
+/// Game mode `hill`'s name: "Conquest", "King of the Hill · Normal".
+pub fn mode_name(hill: i32) -> String {
+    match TARGETS.iter().position(|&t| t == hill) {
+        Some(k) => format!("{} · {}", MODES[1].0, LENGTHS[k]),
+        None if hill > 0 => format!("{} · {hill} points", MODES[1].0),
+        None => MODES[0].0.to_string(),
+    }
+}
 /// `Hill::holder` while only the hill's guards are on it.
 pub const GUARDS: i32 = 9;
 /// Ticks between the AI lords' orders to their hill forces, and between the waves they send (`lords`).
@@ -430,16 +446,7 @@ mod sim {
     /// (0 = in ruins / none) and guards left, the tick.
     pub fn board(h: &Hill, m: &Mem, me: i32, names: &[(i32, String)]) -> Board {
         let team = sides(m);
-        let names = std::array::from_fn(|p| {
-            let kind = m.i32(0x188571c34 + p as u64 * 4);
-            match names.iter().find(|n| n.0 == p as i32) {
-                _ if p == 0 => String::new(),
-                _ if kind != 0 => crate::endgame::name(kind, m.i16(0x188571c58 + p as u64 * 4) as i32),
-                Some(n) => n.1.clone(),
-                None if p as i32 == me => crate::menu::coa::player_name(),
-                None => format!("Player {p}"),
-            }
-        });
+        let names = crate::endgame::player_names(m, me, names);
         let guards = (1..m.i32(UN).clamp(0, 10_000)).filter(|&i| {
             let r = UN + i as u64 * 0x490;
             m.i16(r + 0x6e4) == 2 && m.i16(r + 0x8f8) == 0 && h.keeper > 0 && m.i16(r + 0x6ee) as i32 == h.keeper
