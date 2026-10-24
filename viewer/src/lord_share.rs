@@ -125,21 +125,22 @@ fn read_zip(d: &[u8]) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
-// ---- the Add-AI panel's import state (the lobby draws it; lobby.rs)
+// ---- the Extras screen's import state (extras.rs draws it)
 
 /// A zip waiting for "replace?" (path, the names already there), and the last import's message (text, ok).
 pub static PENDING: Mutex<Option<(PathBuf, Vec<String>)>> = Mutex::new(None);
 pub static MESSAGE: Mutex<Option<(String, bool)>> = Mutex::new(None);
-/// The lord just imported: the menu opens his backstory page and plays his trailer (Menu::draw → open_after_import).
-pub static OPEN: Mutex<Option<String>> = Mutex::new(None);
+/// An import happened outside the Extras screen (a .zip dropped on the window): the menu opens it to show the result.
+pub static SHOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Import `file` from the Add-AI panel or a drop on the window: the result as MESSAGE, or PENDING when lords of the
-/// same name are there.
+/// Import `file` from the Extras screen or a drop on the window: the result as MESSAGE, or PENDING when lords of the
+/// same name are there. A lord imported joins the custom lords list (the skirmish's Add-AI faces) at once.
 pub fn import_ui(file: &Path, replace: bool) {
     *PENDING.lock().unwrap() = None;
+    SHOW.store(true, std::sync::atomic::Ordering::Relaxed);
     let msg = match import(file, replace) {
-        Ok(n) => { *OPEN.lock().unwrap() = n.first().cloned(); (format!("Imported {}", n.join(", ")), true) }
-        Err(ImportErr::Exists(n)) => { *PENDING.lock().unwrap() = Some((file.to_path_buf(), n)); return; }
+        Ok(n) => { custom_lords::rescan(); (format!("Imported {}", n.join(", ")), true) }
+        Err(ImportErr::Exists(n)) => { *PENDING.lock().unwrap() = Some((file.to_path_buf(), n)); *MESSAGE.lock().unwrap() = None; return; }
         Err(ImportErr::Bad(e)) => (format!("Not imported: {e}"), false),
     };
     *MESSAGE.lock().unwrap() = Some(msg);
@@ -289,10 +290,12 @@ mod tests {
         assert_eq!(import_into(&f, &root, true), Ok(vec!["Lord T".into()]));
         assert!(!root.join("CustomMedia/Lord T/old.wav").exists(), "replace swaps the whole folder");
         assert!(std::fs::read_dir(&root).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".lord-import")));
-        // the game's path (Import tile / a dropped zip): the result line, and his page to open with his trailer
+        // the game's path (Extras' Import / a dropped zip): the result line, the Extras screen to show it, and he is in
+        // the custom lords list (the Add-AI faces) at once
         crate::skirmish::set_test_profile(root.clone());
         import_ui(&f, true);
-        assert_eq!((OPEN.lock().unwrap().take(), MESSAGE.lock().unwrap().clone().map(|m| m.1)), (Some("Lord T".into()), Some(true)));
+        assert_eq!(MESSAGE.lock().unwrap().clone().map(|m| m.1), Some(true));
+        assert!(SHOW.swap(false, std::sync::atomic::Ordering::Relaxed) && custom_lords::find("Lord T").is_some());
         let _ = std::fs::remove_dir_all(&d);
     }
 

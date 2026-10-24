@@ -1667,7 +1667,7 @@ impl App {
         if let (WindowEvent::MouseInput { button: MouseButton::Left, state, .. }, Some(u), false) = (&ev, self.ui.as_mut(), scripted()) { u.down = state.is_pressed(); }
         match ev {
             WindowEvent::CloseRequested => el.exit(),
-            // a custom lord's .zip dropped on the window: imported (lord_share.rs); the Add-AI book's list shows the result
+            // a custom lord's .zip dropped on the window: imported (lord_share.rs); the menu's Extras screen shows the result
             WindowEvent::DroppedFile(p) if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) => {
                 lord_share::import_ui(&p, false);
                 eprintln!("lord import {}: {:?}", p.display(), lord_share::MESSAGE.lock().unwrap());

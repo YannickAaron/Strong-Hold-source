@@ -3,8 +3,8 @@
 //! FRONT_Story's pages on the same book (HistoricalCampaign-Background, the SCREEN image): in the drawing's place the
 //! lord himself (his neutral video, faded to an oval; portrait.png until it is exported), name and title above, the
 //! help rows below; the story typed onto the scroll (turned with the paper), the arms as a seal on its roll. One of his
-//! lines greets you. With a trailer.webm, "Watch his story" plays it full screen with its sound (also straight away
-//! after his zip is imported: `Menu::open_after_import`). A child module of menu.rs.
+//! lines greets you. With a trailer.webm, "Watch his story" plays it full screen with its sound. A child module of
+//! menu.rs.
 use super::*;
 
 /// The open page: the lobby to go back to, the lord (by name), opened at `t0`, `all` = the story shown whole, `live` =
@@ -21,27 +21,16 @@ const INK: [f32; 4] = [0.0, 0.0, 0.0, 0.85];
 const RED: [f32; 4] = [0.0865, 0.007, 0.007, 0.85]; // FRONT_Story's subtitle red (linear)
 
 impl Menu {
-    /// The page of `c`, back to `lobby`; `watch` = start his trailer (when he has one) instead of greeting.
-    pub(super) fn lord_open(&mut self, c: crate::custom_lords::Custom, lobby: Lobby, watch: bool) {
+    /// The page of `c`, back to `lobby`; one of his lines greets you.
+    pub(super) fn lord_open(&mut self, c: crate::custom_lords::Custom, lobby: Lobby) {
         crate::custom_lords::export_videos(&c);
-        let watch = watch && crate::custom_lords::has_trailer(&c);
-        if !watch { crate::audio::custom_line(&c, "TAUNT1"); }
-        self.screen = Screen::Lord(Box::new(Page { lobby, name: c.name, t0: Instant::now(), all: false, live: None, watch }));
+        crate::audio::custom_line(&c, "TAUNT1");
+        self.screen = Screen::Lord(Box::new(Page { lobby, name: c.name, t0: Instant::now(), all: false, live: None, watch: false }));
     }
     /// Escape / Back: the trailer first, then the page.
     pub(super) fn lord_close(&mut self) {
         if let Screen::Lord(p) = &mut self.screen { if p.watch { p.watch = false; return; } }
         if let Screen::Lord(p) = std::mem::replace(&mut self.screen, Screen::Main) { self.screen = Screen::Lobby(p.lobby); }
-    }
-
-    /// lord_share.rs, after a lord's zip was imported: his page (back to the skirmish lobby, or the one open), his
-    /// trailer playing when he has one. False = no such custom lord (the import didn't land).
-    pub fn open_after_import(&mut self, name: &str) -> bool {
-        crate::custom_lords::rescan();
-        let Some(c) = crate::custom_lords::find(name) else { return false };
-        let lobby = match &self.screen { Screen::Lobby(l) => l.clone(), Screen::Lord(p) => p.lobby.clone(), _ => Lobby::from_settings(PathBuf::new()) };
-        self.lord_open(c, lobby, true);
-        true
     }
 
     pub(super) fn lord_draw(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, p: &mut Page, w: f32, h: f32, cursor: [f32; 2]) {

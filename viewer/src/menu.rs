@@ -29,6 +29,8 @@ mod lobby; // the skirmish lobby's map list search / sort and its options popup 
 pub mod editor; // the map editor: FRONT_EditorSetup and its in-game panel (editor.rs)
 #[path = "lord_info.rs"]
 mod lord_info; // a custom lord's backstory page, opened from the lobby (lord_info.rs)
+#[path = "extras.rs"]
+mod extras; // the main menu's Extras: this build, updates, importing custom lords (extras.rs)
 #[path = "coa.rs"]
 pub mod coa; // the coat of arms: compositing, the faces, Options > Coat of Arms (coa.rs)
 
@@ -141,12 +143,14 @@ fn backdrop(out: &mut Vec<HudTri>, w: f32, h: f32) {
 /// Main-menu column (FrontendMenus.xaml, Grid Margin 1082,40,220,0, one button every 150 px): label key, shield
 /// sprite, help text key (Show_FrontEndCombat_*_Help), action (None = mode not in the native port yet).
 /// The original's sixth, Roadmap (Firefly's DLC store page), is left out: nothing to sell here.
-const MAIN: [(&str, &str, &str, Option<Act>); 5] = [
+const MAIN: [(&str, &str, &str, Option<Act>); 6] = [
     ("TEXT_NEW_CTEXT_198", "shield_campaign", "TEXT_NEW_CTEXT_290", Some(Act::Trail(trail_menu::A::Open(trail_menu::T::Skirmish)))),
     ("TEXT_SKIRMISH_CHOOSE2_002", "shield_castle", "TEXT_NEW_CTEXT_291", Some(Act::Campaigns)),
     ("TEXT_NEW_CTEXT_199", "shield_economic_gmaes", "TEXT_NEW_CTEXT_292", Some(Act::Sandbox)),
     ("TEXT_PREVIEW_014", "shield_combat_games", "TEXT_NEW_CTEXT_293", Some(Act::Mp(mp_menu::A::Open))),
     ("TEXT_MAPEDIT_001", "shield_mapeditor", "TEXT_NEW_CTEXT_294", Some(Act::Ed(editor::A::Open))),
+    // ours (extras.rs): the original's sixth slot was the Workshop; not a text key, Ui::text_of keeps it as it is
+    ("Extras", "shield_crusader", "Check for updates, see this build's details and import custom lords.", Some(Act::Extras(extras::A::Open))),
 ];
 const NOT_YET: &str = "Not in the native port yet.";
 
@@ -159,12 +163,12 @@ const NOT_YET: &str = "Not in the native port yet.";
 pub enum Go { Load(PathBuf), Replay(PathBuf), Start(Lobby), Quit, Resume, ToMenu, Save(PathBuf), Restart, Mission(i32), Brief(i32), QuitMission(usize), FreeBuild(PathBuf, skirmish::FreeBuild), Scenario(PathBuf, i32), Settings(Option<u8>), Tutorial, Trail(i32, i32, i32), Lan(Box<mp_menu::Started>), Editor(editor::Start) }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Act { Skirmish, LoadList, Quit, Back, Pick(usize), Fair(i32), Goods(i32), Outposts, AddAiOpen, AddAiClose, AddLord(usize), DelAi(usize), LordInfo(usize), LordInfoClose, LordTrailer, TeamsOpen, TeamsClose, TeamFace(usize), TeamCancel, Restart, Campaigns, Campaign(usize), ToCampaigns, Mission(i32), PlayMission, Difficulty, BriefStart, BriefQuit, BriefTab(u8), Hint(usize), HelpBack, StoryAdvance, Sandbox, SoloOpen(bool), SoloNext, SoloPlay, SoloDifficulty, Advanced, Cycle(u8), Faction(i32), Flag(u8), Include(u8), Options, OptPage(u8), OptBack, OptFolder, ScreenMode, ApplyMode, Check(u8), Slider(u8), Group(u8, bool), Reset(u8), Colour(i32), HkRow(u16), HkSlot(u8), HkClose, HkApply, HkClear, HkCancel, HkPreset(bool), Nop, Tutorial, Start, Resume, ToMenu, Save, Trail(trail_menu::A), Mp(mp_menu::A), Help(help::A), Lobby(lobby::A), Update, GameFiles,
+enum Act { Skirmish, LoadList, Quit, Back, Pick(usize), Fair(i32), Goods(i32), Outposts, AddAiOpen, AddAiClose, AddLord(usize), DelAi(usize), LordInfo(usize), LordInfoClose, LordTrailer, TeamsOpen, TeamsClose, TeamFace(usize), TeamCancel, Restart, Campaigns, Campaign(usize), ToCampaigns, Mission(i32), PlayMission, Difficulty, BriefStart, BriefQuit, BriefTab(u8), Hint(usize), HelpBack, StoryAdvance, Sandbox, SoloOpen(bool), SoloNext, SoloPlay, SoloDifficulty, Advanced, Cycle(u8), Faction(i32), Flag(u8), Include(u8), Options, OptPage(u8), OptBack, OptFolder, ScreenMode, ApplyMode, Check(u8), Slider(u8), Group(u8, bool), Reset(u8), Colour(i32), HkRow(u16), HkSlot(u8), HkClose, HkApply, HkClear, HkCancel, HkPreset(bool), Nop, Tutorial, Start, Resume, ToMenu, Save, Trail(trail_menu::A), Mp(mp_menu::A), Help(help::A), Lobby(lobby::A), Update, GameFiles, Extras(extras::A),
     WinSize, SaveGo, Delete(usize), Yes, No, Sort(u8), Credits, Ed(editor::A), Coa(coa::A), NameBox }
 
 /// `Missions(c, m)`: campaign c (0..7) with mission m selected.
 /// `Load`: the save browser; `Save`: the Save Game dialog (the same list, own saves only, and a name box).
-enum Screen { Main, Load, Save, Lobby(Lobby), Pause, Campaigns, Missions(usize, i32), Briefing(Brief), Story(Story), Sandbox, Solo(Solo), Options(Opt), Trail(trail_menu::T), Mp(mp_menu::T), Credits(credits::Credits), Help(Box<help::Help>), Editor(editor::T), Lord(Box<lord_info::Page>) }
+enum Screen { Main, Load, Save, Lobby(Lobby), Pause, Campaigns, Missions(usize, i32), Briefing(Brief), Story(Story), Sandbox, Solo(Solo), Options(Opt), Trail(trail_menu::T), Mp(mp_menu::T), Credits(credits::Credits), Help(Box<help::Help>), Editor(editor::T), Lord(Box<lord_info::Page>), Extras }
 
 /// The save browser's popup: overwrite this file / delete this file?
 #[derive(Clone, PartialEq)]
@@ -622,6 +626,7 @@ impl Menu {
                 self.save_cfg();
             }
             (_, Act::Update) => crate::update::open_page(),
+            (_, Act::Extras(a)) => return self.extras_click(a),
             (_, Act::GameFiles) => crate::setup::start_update(),
             (Screen::Options(_), Act::OptBack) => return self.close_options(),
             (Screen::Options(_), Act::OptFolder) => {
@@ -704,10 +709,10 @@ impl Menu {
                 Act::Fair(v) => { l.fairness = v; crate::audio::ui(crate::audio::ui_id::GOLD[(v.clamp(1, 5) - 1) as usize], 1.0) }
                 Act::Goods(v) => l.goods = v,
                 Act::Outposts => l.outposts = !l.outposts,
-                Act::AddAiOpen => { self.add_ai = true; crate::custom_lords::rescan(); *crate::lord_share::MESSAGE.lock().unwrap() = None; crate::audio::speech(2, "Genie_03.wav") }
+                Act::AddAiOpen => { self.add_ai = true; crate::custom_lords::rescan(); crate::audio::speech(2, "Genie_03.wav") }
                 Act::AddAiClose => self.add_ai = false,
                 // our backstory page of custom lord `n` (lobby lord index), its neutral video exported for it
-                Act::LordInfo(n) => if let Some(c) = crate::custom_lords::of_lord(n) { let l = l.clone(); self.lord_open(c, l, false) },
+                Act::LordInfo(n) => if let Some(c) = crate::custom_lords::of_lord(n) { let l = l.clone(); self.lord_open(c, l) },
                 // FRONT_Multiplayer AddSkirmishPlayer: refused once the lobby holds the map's start positions (its
                 // maxPlayers, at most 8), as the Add AI button already is
                 Act::AddLord(n) if self.mp.net.as_ref().map_or(1, |n| n.lobby.humans.len()) + l.ais.len()
@@ -882,8 +887,11 @@ impl Menu {
     /// The menu's triangles for a `w`×`h` (logical px) window.
     pub fn draw(&mut self, ui: &mut Ui, w: f32, h: f32, cursor: [f32; 2]) -> Vec<HudTri> {
         self.mouse = (cursor, ui.down);
-        // a lord's zip just imported (lord_share.rs): his page with his trailer; not in a LAN lobby (it would stop polling)
-        if self.mp.net.is_none() { if let Some(n) = crate::lord_share::OPEN.lock().unwrap().take() { self.open_after_import(&n); } }
+        // a lord's zip dropped on the window (lord_share.rs): Extras shows the result; in the front end only, not in a
+        // LAN lobby (it would stop polling)
+        if crate::lord_share::SHOW.swap(false, std::sync::atomic::Ordering::Relaxed) && !self.in_game && self.mp.net.is_none() && !matches!(self.screen, Screen::Extras) {
+            *self = Menu { screen: Screen::Extras, ..Self::main() };
+        }
         // FRONT_Multiplayer is a 1366×768 grid in its own Viewbox; everything else 1920×1080
         let (dw, dh) = match self.screen { Screen::Lobby(_) | Screen::Solo(_) => (1366.0, 768.0), Screen::Briefing(..) => (1365.0, 768.0), _ => (1920.0, 1080.0) };
         self.s = (w / dw).min(h / dh);
@@ -905,7 +913,7 @@ impl Menu {
         let mut out = vec![];
         let out = &mut out;
         match self.screen {
-            Screen::Main | Screen::Load | Screen::Save | Screen::Lobby(_) | Screen::Sandbox | Screen::Mp(_) | Screen::Editor(_) => backdrop(out, w, h),
+            Screen::Main | Screen::Load | Screen::Save | Screen::Lobby(_) | Screen::Sandbox | Screen::Mp(_) | Screen::Editor(_) | Screen::Extras => backdrop(out, w, h),
             Screen::Campaigns | Screen::Missions(..) | Screen::Story(_) | Screen::Lord(_) => {
                 // the screen's 16:9 image, UniformToFill
                 let k = (w / 1920.0).max(h / 1080.0);
@@ -985,6 +993,10 @@ impl Menu {
             Screen::Lord(mut p) => {
                 self.lord_draw(ui, out, &mut p, w, h, cursor);
                 self.screen = Screen::Lord(p);
+            }
+            Screen::Extras => {
+                self.screen = Screen::Extras;
+                self.extras_screen(ui, out, cursor);
             }
         }
         if let Some(e) = &self.error { let e = e.clone(); self.text(ui, out, &e, dw / 2.0, dh * 0.972, dh / 41.5, 0.5, [1.0, 0.4, 0.3, 1.0]); }
@@ -2105,30 +2117,23 @@ impl Menu {
     }
 
     /// Show_AddAIPanel: the lord faces (72 px every 80 px), then the custom lords' faces (CustomLords folders, a (!)
-    /// for the backstory page), Random and the Import tile, and the rollover panel for the face under the cursor. More than
-    /// 4 rows shrink the grid to fit the panel.
+    /// for the backstory page; imported on the Extras screen), Random, and the rollover panel for the face under the
+    /// cursor. More than 4 rows shrink the grid to fit the panel.
     fn add_ai_popup(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, cursor: [f32; 2]) {
         const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-        const IMPORT: usize = usize::MAX;
         self.frame(out, 50.0, 380.0, 700.0, 360.0, true);
         self.frame(out, 780.0, 380.0, 534.0, 360.0, true);
         // the panels swallow clicks (what they cover stays inert)
         for p in [self.r(32.0, 362.0, 736.0, 396.0), self.r(762.0, 362.0, 570.0, 396.0)] { self.hits.push((p, Act::AddAiOpen)); }
         let customs = crate::custom_lords::count();
-        // the built-in lords, the custom lords, Random, Import
-        let tiles: Vec<usize> = FACES.iter().map(|f| f.1).filter(|&n| n != 99).chain((0..customs).map(|k| crate::custom_lords::BASE + k)).chain([99, IMPORT]).collect();
+        // the built-in lords, the custom lords, Random
+        let tiles: Vec<usize> = FACES.iter().map(|f| f.1).filter(|&n| n != 99).chain((0..customs).map(|k| crate::custom_lords::BASE + k)).chain([99]).collect();
         let k = (4.0 / tiles.len().div_ceil(8) as f32).min(1.0);
         let mut hover = None;
         for (c, &n) in tiles.iter().enumerate() {
             let p = self.r(70.0 + 80.0 * k * (c % 8) as f32, 400.0 + 80.0 * k * (c / 8) as f32, 72.0 * k, 72.0 * k);
-            let custom = crate::custom_lords::of_lord(n).filter(|_| n != IMPORT);
-            if n == IMPORT {
-                let (w, h) = (p[2] - p[0], p[3] - p[1]);
-                ui.img_fit(out, "shield_load", [p[0] + w * 0.2, p[1] + h * 0.06, p[2] - w * 0.2, p[3] - h * 0.3], [1.0; 4]);
-                ui.img(out, "Face Border", p, [1.0; 4]);
-                self.label(ui, out, "Import", 70.0 + 80.0 * k * (c % 8) as f32 + 36.0 * k, 400.0 + 80.0 * k * (c / 8) as f32 + 62.0 * k, 14.0 * k, 0.5, BLACK);
-                self.hits.push((p, Act::Lobby(lobby::A::ImportLord)));
-            } else if let Some(cl) = &custom {
+            let custom = crate::custom_lords::of_lord(n);
+            if let Some(cl) = &custom {
                 ui.img(out, "Face Background Generic", p, [1.0; 4]);
                 if !crate::custom_lords::draw_face(out, cl, p, [1.0; 4]) { ui.img(out, FACES.iter().find(|f| f.1 == crate::custom_lords::parent(cl)).map_or("", |f| f.0), p, [1.0; 4]); }
                 ui.img(out, "Face Border", p, [1.0; 4]);
@@ -2151,13 +2156,7 @@ impl Menu {
             if custom.is_some() { self.info_badge(ui, out, 70.0 + 80.0 * k * (c % 8) as f32 + 50.0 * k, 400.0 + 80.0 * k * (c / 8) as f32 + 2.0 * k, 20.0 * k, Act::LordInfo(n), cursor); }
         }
         self.img_button(ui, out, ["UI-Buttons S043", "UI-Buttons S044", "UI-Buttons S043"], 711.0, 390.0, 29.0, 29.0, Some(Act::AddAiClose), cursor);
-        // an import waiting on "Replace?" / the last import's result (lobby.rs) take the rollover panel's place
-        if self.lord_import_row(ui, out, cursor, hover.is_none()) { return; }
         match hover {
-            Some(IMPORT) => {
-                self.label(ui, out, "Import lord", 1047.0, 402.0, 22.0, 0.5, BLACK);
-                self.para(ui, out, "Pick a custom lord's .zip (a CustomLords/<name>/ folder inside). He joins the faces here.", 790.0, 430.0, 500.0, 16.0, BLACK);
-            }
             Some(n) if crate::custom_lords::lord_of(n).is_some() => {
                 let Some(c) = crate::custom_lords::of_lord(n) else { return };
                 self.label(ui, out, &c.name, 1047.0, 402.0, 22.0, 0.5, BLACK);

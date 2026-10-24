@@ -6,7 +6,7 @@ use crate::skirmish::{MapInfo, ADV};
 
 /// The lobby's own clicks.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum A { Extreme(u8), AdvOpen, AdvClose, AdvEnable, Adv(usize), Remember, Sort(u8), Include(u8), Search, ClearSearch, Mode, ImportLord, ImportReplace(bool) }
+pub enum A { Extreme(u8), AdvOpen, AdvClose, AdvEnable, Adv(usize), Remember, Sort(u8), Include(u8), Search, ClearSearch, Mode }
 
 /// The map list: every skirmish map found (path, info, user map), the search text (`typing`: the box has the
 /// keyboard), the sort (FileListHeaderClickedHandler: 0 name, 1 date, 2 players, 3 size, 5 balanced; ascending?),
@@ -113,18 +113,8 @@ impl Menu {
     }
 
     pub(super) fn lobby_click(&mut self, a: A) -> Option<Go> {
-        match a {
-            A::ImportLord => { if let Some(f) = crate::lord_share::pick_zip() { crate::lord_share::import_ui(&f, false); } return None; }
-            A::ImportReplace(yes) => {
-                let p = crate::lord_share::PENDING.lock().unwrap().take();
-                if let (true, Some((f, _))) = (yes, p) { crate::lord_share::import_ui(&f, true); }
-                return None;
-            }
-            _ => {}
-        }
         let Screen::Lobby(l) = &mut self.screen else { return None };
         match a {
-            A::ImportLord | A::ImportReplace(_) => {} // above
             // Settings_ExtremeTroops / Powers / PowerLord (skirmish: straight into MPsetupData); around the lord only
             // with the powers on, the powers off clear it
             A::Extreme(k) => {
@@ -311,25 +301,4 @@ fn lobby_list_and_options() {
     assert_eq!(Lobby::from_settings(PathBuf::new()).adv, l.adv, "remembered");
     assert!(m.lst.adv && m.back().is_none() && !m.lst.adv, "Esc closes the popup");
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-impl Menu {
-    /// The Add-AI rollover panel's place while an import needs it (the grid's Import tile, or a .zip dropped on the
-    /// window): the question whether to replace lords of the same name, or, with `idle` (no face under the cursor),
-    /// the last import's result. True = drawn, the rollover panel stays away.
-    pub(super) fn lord_import_row(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, cursor: [f32; 2], idle: bool) -> bool {
-        const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-        let pending = crate::lord_share::PENDING.lock().unwrap().clone();
-        if let Some((_, names)) = pending {
-            self.label(ui, out, "Import lord", 1047.0, 402.0, 22.0, 0.5, BLACK);
-            let y = self.para(ui, out, &format!("{} already installed. Replace?", names.join(", ")), 790.0, 430.0, 500.0, 16.0, BLACK);
-            self.glow(ui, out, "Yes", 790.0, y + 12.0, 120.0, None, Some(Act::Lobby(A::ImportReplace(true))), cursor);
-            self.glow(ui, out, "No", 920.0, y + 12.0, 120.0, None, Some(Act::Lobby(A::ImportReplace(false))), cursor);
-            return true;
-        }
-        let Some((m, ok)) = crate::lord_share::MESSAGE.lock().unwrap().clone().filter(|_| idle) else { return false };
-        self.label(ui, out, "Import lord", 1047.0, 402.0, 22.0, 0.5, BLACK);
-        self.para(ui, out, &m, 790.0, 430.0, 500.0, 16.0, if ok { [0.1, 0.35, 0.1, 1.0] } else { [0.6, 0.1, 0.05, 1.0] });
-        true
-    }
 }
