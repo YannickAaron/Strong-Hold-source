@@ -53,7 +53,7 @@ fn lindschied_castles_valid() {
         assert_eq!(a.steps[0].kind, 61, "castle {k}: KEEP2 first");
         let odd: Vec<i16> = a.steps.iter().map(|s| s.kind).filter(|k| !kinds.contains(k)).collect();
         assert!(odd.is_empty(), "castle {k}: kinds no shipped castle has: {odd:?}");
-        assert!(a.troops.iter().all(|t| [2, 3, 7, 11].contains(&t.slot)), "castle {k}: troop slots");
+        assert!(a.troops.iter().all(|t| [2, 3, 6, 7, 11].contains(&t.slot)), "castle {k}: troop slots"); // 6: the economy towers' archers
         let mut owner = vec![[usize::MAX; aiv::GRID]; aiv::GRID];
         for (i, s) in a.steps.iter().enumerate() {
             let one = aiv::Aiv { steps: vec![s.clone()], ..a.clone() };
@@ -86,10 +86,11 @@ fn lindschied_folder_loads() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// One lord's castle progress and army: (AIV fit, step reached, entries placed / total, failed entries' kinds,
-/// buildings, crossbowmen, swordsmen, other troops, engines, gold).
+/// One lord's castle progress and army: (wall ring, wall towers, battlements and economy towers placed / total,
+/// archers on the economy towers, AIV fit, step reached, entries placed / total, failed entries' kinds, buildings,
+/// crossbowmen, swordsmen, other troops, engines, gold).
 #[derive(Debug)]
-struct Stats { ring: (usize, usize), fit: i32, reached: i32, placed: usize, total: usize, failed: Vec<i16>, buildings: usize, xbow: usize, sword: usize, other: usize, engines: usize, gold: i32 }
+struct Stats { ring: (usize, usize), towers: (usize, usize), crenels: (usize, usize), eco: (usize, usize), on_eco: usize, fit: i32, reached: i32, placed: usize, total: usize, failed: Vec<i16>, buildings: usize, xbow: usize, sword: usize, other: usize, engines: usize, gold: i32 }
 
 fn stats(m: &Mem, p: i32) -> Stats {
     let r = (1..=8u64).map(|k| ai::D + k * 0x6d98).find(|&r| m.i32(r + 4) == p).expect("AI record");
@@ -99,7 +100,11 @@ fn stats(m: &Mem, p: i32) -> Stats {
     let stair_on = |e: u64| m.u32(shc_sim::terrain::W + 0x898400 + m.i32(e + 8) as u64 * 4) & 0x800 != 0;
     let entries: Vec<(u8, i16)> = (1..=n).map(|e| { let e = r + 0x38 + e * 0xc; (m.u8(e), m.i16(e + 2), e) })
         .filter(|&(_, k, _)| k != 0).map(|(s, k, e)| (if s == 5 && (181..=186).contains(&k) && stair_on(e) { 3 } else { s }, k)).collect();
-    let (mut xbow, mut sword, mut other, mut engines) = (0, 0, 0, 0);
+    let (mut xbow, mut sword, mut other, mut engines, mut on_eco) = (0, 0, 0, 0, 0);
+    // the economy towers (TOWER1 entries placed) by building id, for the archers standing on them
+    const BLD_AT: u64 = 0x184b689e0;
+    let eco: Vec<i16> = (1..=n).map(|e| r + 0x38 + e * 0xc).filter(|&e| m.i16(e + 2) == 110 && m.u8(e) == 3)
+        .map(|e| m.i16(BLD_AT + m.i32(e + 8) as u64 * 2)).filter(|&b| b > 0).collect();
     const U: u64 = 0x1867e5a48;
     for i in 1..m.i32(0x1867e53f0).max(1) as u64 {
         let u = U + i * 0x490;
@@ -107,6 +112,7 @@ fn stats(m: &Mem, p: i32) -> Stats {
         match m.i16(u + 0x8e) {
             23 => xbow += 1,
             27 => sword += 1,
+            22 if eco.contains(&m.i16(BLD_AT + m.i32(u + 0xd4) as u64 * 2)) => { on_eco += 1; other += 1 }
             22..=28 => other += 1,
             39..=41 | 50..=60 => engines += 1,
             _ => {}
@@ -114,6 +120,9 @@ fn stats(m: &Mem, p: i32) -> Stats {
     }
     Stats {
         ring: (entries.iter().filter(|e| e.0 == 3 && [25, 26, 113, 144, 145].contains(&e.1)).count(), entries.iter().filter(|e| [25, 26, 113, 144, 145].contains(&e.1)).count()),
+        towers: (entries.iter().filter(|e| e.0 == 3 && (111..=114).contains(&e.1)).count(), entries.iter().filter(|e| (111..=114).contains(&e.1)).count()),
+        eco: (entries.iter().filter(|e| e.0 == 3 && e.1 == 110).count(), entries.iter().filter(|e| e.1 == 110).count()), on_eco,
+        crenels: (entries.iter().filter(|e| e.0 == 3 && e.1 == 26).count(), entries.iter().filter(|e| e.1 == 26).count()),
         fit: m.i32(r + 0x14), reached: m.i32(r + 0x18), placed: entries.iter().filter(|e| e.0 == 3).count(), total: entries.len(),
         failed: entries.iter().filter(|e| e.0 == 5).map(|e| e.1).collect(),
         buildings: (1..b::SLOTS).filter(|&i| b::state(m, i) == 2 && b::owner(m, i) == p).count(),
@@ -297,7 +306,7 @@ fn first_attack(tag: &str, lord_of: impl Fn() -> usize) -> Option<Attack> {
         if t % 2500 == 2499 {
             let brain = (1..=8u64).map(|k| ai::D + k * 0x6d98).find(|&r| m.i32(r + 4) == 2).unwrap_or(ai::D);
             let st = stats(m, 2);
-            eprintln!("  {tag} t{:6}: harass {} defend {} siege {} | mode {} attack {} | gold {} | military {} army {army:?} | near your keep (most) {peak:?} | castle {} steps {}/{} failed {:?}", t + 1, m.i32(p2 + 0x30ec), m.i32(p2 + 0x30e8), m.i32(p2 + 0x30f0), m.i32(p2 + 0x30f8), m.i32(p2 + 0x2ba4), m.i32(p2 + 0x50c), mil(&army), m.i32(brain + 0x10) + 1, st.placed, st.total, st.failed);
+            eprintln!("  {tag} t{:6}: harass {} defend {} siege {} | mode {} attack {} | gold {} | military {} army {army:?} | near your keep (most) {peak:?} | castle {} steps {}/{} ring {}/{} towers {}/{} crenels {}/{} eco {}/{} archers {} failed {:?}", t + 1, m.i32(p2 + 0x30ec), m.i32(p2 + 0x30e8), m.i32(p2 + 0x30f0), m.i32(p2 + 0x30f8), m.i32(p2 + 0x2ba4), m.i32(p2 + 0x50c), mil(&army), m.i32(brain + 0x10) + 1, st.placed, st.total, st.ring.0, st.ring.1, st.towers.0, st.towers.1, st.crenels.0, st.crenels.1, st.eco.0, st.eco.1, st.on_eco, st.failed);
             peak.clear();
         }
     }

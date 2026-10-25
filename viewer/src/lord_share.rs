@@ -409,7 +409,7 @@ mod tests {
         assert_eq!(import_into(&f, &root, false), Ok(vec!["Lord David von Lindschied".into()]));
         let (l, m) = (root.join("CustomLords/Lord David von Lindschied"), root.join("CustomMedia/Lord David von Lindschied"));
         assert!(l.join("trailer.webm").exists() && l.join("face.png").exists() && l.join("sprite/sprites.tsv").exists());
-        assert_eq!(std::fs::read_dir(&m).unwrap().count(), 63, "41 wav (30 lines + lobby add / kick + 9 reactions) + 20 webm + text.txt + react.txt");
+        assert_eq!(std::fs::read_dir(&m).unwrap().count(), 66, "44 wav (30 lines + lobby add / kick + 12 reactions) + 20 webm + text.txt + react.txt");
         let c = custom_lords::load(&l).expect("loads");
         assert_eq!(c.aivs.len(), 8);
     }
@@ -424,10 +424,10 @@ mod tests {
         let config = custom_lords::lordjson(&std::fs::read_to_string(src.join("Lord David von Lindschied.lordjson")).unwrap()).unwrap();
         let aivs: Vec<Vec<i16>> = (1..9).map(|k| custom_lords::aivjson(&std::fs::read_to_string(src.join(format!("castles/lindschied_{k}.aivjson"))).unwrap()).unwrap()).collect();
         let c = Custom { config, aivs, ..Default::default() };
-        assert_eq!((c.config.len(), c.config[0], c.config[276], c.config[299]), (377, 9, 0, 1), "opponent_type, parent left to the engine, smart_raids");
+        assert_eq!((c.config.len(), c.config[0], c.config[276], c.config[299], c.config[300]), (377, 9, 0, 1, 1), "opponent_type, parent left to the engine, smart_raids, towers_first");
         assert_eq!(checksum(&c), GOLDEN, "Lord David's config + castles changed: a lord-format change?");
     }
-    const GOLDEN: u64 = 2683627979720191042;
+    const GOLDEN: u64 = 9897817160098643758;
 
     /// A lord whose `min_app` is newer than this app is refused, the message naming both versions and the app update;
     /// one that is older or has none imports.

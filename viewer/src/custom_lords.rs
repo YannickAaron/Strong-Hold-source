@@ -318,6 +318,8 @@ pub fn lordjson(text: &str) -> Option<Vec<i32>> {
     }
     // our extension, not DE's (DE skips the key): smart raids in Extended games, in the free field 299
     cfg[SMART_RAIDS_FIELD] = lord.int("smart_raids") as i32;
+    // and towers before battlements in Extended games, in the free field 300
+    cfg[TOWERS_FIRST_FIELD] = lord.int("towers_first") as i32;
     Some(cfg)
 }
 /// The AIC field of our `smart_raids` key (the sim's `ext::SMART_RAIDS`, a byte offset; the sim crate is only linked
@@ -325,6 +327,10 @@ pub fn lordjson(text: &str) -> Option<Vec<i32>> {
 const SMART_RAIDS_FIELD: usize = 299;
 #[cfg(feature = "live")]
 const _: () = assert!(SMART_RAIDS_FIELD as i64 * 4 == shc_sim::ext::SMART_RAIDS);
+/// The AIC field of our `towers_first` key (the sim's `ext::TOWERS_FIRST`).
+const TOWERS_FIRST_FIELD: usize = 300;
+#[cfg(feature = "live")]
+const _: () = assert!(TOWERS_FIRST_FIELD as i64 * 4 == shc_sim::ext::TOWERS_FIRST);
 
 /// Our `min_app` key of a .lordjson ("0.5.0": the lord uses a feature older apps lack; DE ignores the key): the app
 /// version it needs, "" when it sets none. lord_share::import refuses a lord newer than the app.
