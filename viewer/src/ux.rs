@@ -11,7 +11,7 @@ use crate::{gestures, hud::{HudTri, Ui}, keys::Keys, App};
 /// App commands: the macOS menu bar (macos.rs) and the Ctrl shortcuts elsewhere ask for these.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[allow(dead_code)] // the quit sheet's answers and some items exist on macOS only
-pub enum Cmd { Quit, Save, Load, Options, Shortcuts, UiBigger, UiSmaller, UiReset, PauseInBackground, QuitYes, QuitNo, FullScreen }
+pub enum Cmd { Quit, Save, Load, Options, Shortcuts, UiBigger, UiSmaller, UiReset, PauseInBackground, TrackpadPan, QuitYes, QuitNo, FullScreen }
 
 #[derive(Default)]
 pub struct Ux {
@@ -20,6 +20,7 @@ pub struct Ux {
     auto_paused: bool, // the game was paused because the app went to the background: resume when it's back
     asking: Option<bool>, // the quit sheet is up; Some(true) = resume the game if it's cancelled
     turn: gestures::Turn,
+    touch_scroll: bool, // inside a touch-surface scroll gesture (gestures::pans)
     pub help: bool, // the F1 sheet is shown
     toast: Option<(String, Instant)>,
 }
@@ -60,6 +61,7 @@ impl Ux {
 static UI_PCT: AtomicU32 = AtomicU32::new(100);
 static DPR: AtomicU32 = AtomicU32::new(0x4000_0000); // 2.0f32: Retina until the window says otherwise
 static PAUSE_BG: AtomicBool = AtomicBool::new(true);
+static TRACKPAD_PAN: AtomicBool = AtomicBool::new(true); // View > Trackpad Scrolling Pans (NativeTrackpadPan)
 const UI_STEPS: [u32; 7] = [75, 85, 100, 110, 125, 140, 150];
 
 // ---- Options applied outside the menu (menu::opt): VSync, Lock Cursor, the screen mode, Mute when not Focused
@@ -114,6 +116,7 @@ fn ui_size_cap() {
 /// Device px per logical px (2 on Retina): glyphs are rasterised at this density.
 pub fn dpr() -> f32 { f32::from_bits(DPR.load(Relaxed)) }
 pub fn pause_in_background() -> bool { PAUSE_BG.load(Relaxed) }
+pub fn trackpad_pan() -> bool { TRACKPAD_PAN.load(Relaxed) }
 
 fn save(key: &str, v: impl ToString) {
     let mut cfg = crate::skirmish::Settings::load();
@@ -128,7 +131,13 @@ pub fn set_pause_in_background(on: bool) {
     PAUSE_BG.store(on, Relaxed);
     save("NativePauseInBackground", on);
     #[cfg(target_os = "macos")]
-    crate::macos::set_pause_check(on);
+    crate::macos::set_check(crate::macos::Check::PauseBg, on);
+}
+pub fn set_trackpad_pan(on: bool) {
+    TRACKPAD_PAN.store(on, Relaxed);
+    save("NativeTrackpadPan", on);
+    #[cfg(target_os = "macos")]
+    crate::macos::set_check(crate::macos::Check::TrackpadPan, on);
 }
 /// The next UI step up (`dir` 1) or down (-1) from `p`.
 fn ui_step(p: u32, dir: i32) -> u32 {
@@ -172,6 +181,7 @@ impl App {
         let cfg = crate::skirmish::Settings::load();
         UI_PCT.store((cfg.num("NativeUIScale", 100.0) as u32).clamp(75, 150), Relaxed);
         PAUSE_BG.store(cfg.flag("NativePauseInBackground", true), Relaxed);
+        TRACKPAD_PAN.store(cfg.flag("NativeTrackpadPan", true), Relaxed);
         // shots: SHC_UI_SCALE=150 (percent, not saved), SHC_HELP=1 opens the F1 sheet
         if let Some(p) = std::env::var("SHC_UI_SCALE").ok().and_then(|v| v.parse::<u32>().ok()) { UI_PCT.store(p.clamp(75, 150), Relaxed); }
         self.ux.help = std::env::var_os("SHC_HELP").is_some();
@@ -186,7 +196,7 @@ impl App {
         }
         self.apply_options();
         #[cfg(target_os = "macos")]
-        crate::macos::install_menu(pause_in_background());
+        crate::macos::install_menu(pause_in_background(), trackpad_pan());
     }
 
     /// Options that act on the window / audio, after a change (main.rs Go::Settings) and at start: VSync, Lock Cursor,
@@ -259,8 +269,10 @@ impl App {
                 if let Some(left) = self.ux.turn.feed(*delta) { self.hotkey(if left { "MapRotateLeft" } else { "MapRotateRight" }); }
                 true
             }
-            // a trackpad's two-finger scroll (precise deltas, momentum included) pans; a mouse wheel's lines keep zooming
-            WindowEvent::MouseWheel { delta: MouseScrollDelta::PixelDelta(d), .. } if self.live() && self.menu.is_none() => {
+            // a trackpad's two-finger scroll (precise deltas, momentum included) pans; a mouse wheel's lines, a smoothed
+            // mouse's precise deltas (no touch phase) and, with Trackpad Scrolling Pans off, every scroll keep zooming
+            WindowEvent::MouseWheel { delta: MouseScrollDelta::PixelDelta(d), phase, .. } if self.live() && self.menu.is_none() => {
+                if !gestures::pans(*phase, trackpad_pan(), &mut self.ux.touch_scroll) { return false; }
                 let sf = self.gfx.as_ref().map_or(1.0, |g| g.window.scale_factor()) as f32;
                 self.cam.pan([d.x as f32 / sf, d.y as f32 / sf]);
                 true
@@ -316,6 +328,7 @@ impl App {
             println!("app {}: game {}", if on { "in front" } else { "in the background" }, if play { "resumed" } else { "paused" });
         }
         FOCUSED.store(on, Relaxed);
+        crate::trace(|w, t| { let _ = writeln!(w, "A {t} {}", if on { "front" } else { "background" }); }); // SHC_TRACE: focus
         self.lock_cursor();
         self.mute_in_background();
         self.wake();
@@ -389,6 +402,10 @@ impl App {
                 set_pause_in_background(!pause_in_background());
                 self.ux.note(if pause_in_background() { "Pause in background: on" } else { "Pause in background: off" });
             }
+            Cmd::TrackpadPan => {
+                set_trackpad_pan(!trackpad_pan());
+                self.ux.note(if trackpad_pan() { "Trackpad scroll: pans" } else { "Trackpad scroll: zooms" });
+            }
             #[allow(unreachable_patterns)]
             _ => {}
         }
@@ -438,7 +455,7 @@ fn sheet(ui: &mut Ui, out: &mut Vec<HudTri>, keys: &Keys, w: f32, h: f32, s: f32
     let (os, mac) = ("Shortcuts", [("Save game", "Ctrl+S"), ("Load game", "Ctrl+O"), ("Options", "Ctrl+,"), ("Full screen", "F11 / Alt+Enter"),
         ("Bigger / smaller UI", "Ctrl+= / Ctrl+-"), ("This sheet", "F1 / Ctrl+/")]);
     let mac: Vec<(String, String)> = mac.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
-    let pad: Vec<(String, String)> = [("Zoom", "Pinch / wheel"), ("Pan", "Two-finger scroll"), ("Pan", "Middle-drag / edges"),
+    let pad: Vec<(String, String)> = [("Zoom", "Pinch / wheel"), ("Pan", "Two-finger scroll (View menu: or zoom)"), ("Pan", "Middle-drag / edges"),
         ("Turn the map", "Rotate two fingers"), ("Cancel tool", "Right click"), ("Rally point", "Right click, barracks open")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     // (title, rows, label width, key width) in design px
     let cols = [("Game", game, 250.0, 190.0), (os, mac, 220.0, 180.0), ("Trackpad & mouse", pad, 160.0, 200.0)];

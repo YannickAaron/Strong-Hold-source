@@ -326,6 +326,13 @@ const SMART_RAIDS_FIELD: usize = 299;
 #[cfg(feature = "live")]
 const _: () = assert!(SMART_RAIDS_FIELD as i64 * 4 == shc_sim::ext::SMART_RAIDS);
 
+/// Our `min_app` key of a .lordjson ("0.5.0": the lord uses a feature older apps lack; DE ignores the key): the app
+/// version it needs, "" when it sets none. lord_share::import refuses a lord newer than the app.
+pub fn min_app(text: &str) -> String {
+    let Some(j) = J::parse(text) else { return String::new() };
+    j.get("lord").unwrap_or(&j).str("min_app")
+}
+
 /// An .aivjson (AIVLoader.SaveData) as the DLL_ImportAIV blob.
 pub fn aivjson(text: &str) -> Option<Vec<i16>> {
     let j = J::parse(text)?;

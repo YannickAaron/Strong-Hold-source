@@ -104,6 +104,7 @@ pub fn heard(v: &[shc_sim::sound::Sound]) {
     for s in v {
         if let shc_sim::sound::Sound::Named(n) = s {
             let Some((p, key)) = crate::custom_lords::split(n).filter(|x| (1..9).contains(&x.0)) else { continue };
+            println!("lord line {key} (player {p})");
             let t = Instant::now();
             st(|s| {
                 if key == "REQUEST_GOODS" { s.asked[p] = Some(t) }

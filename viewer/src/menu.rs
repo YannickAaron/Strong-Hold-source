@@ -226,6 +226,8 @@ fn cfg() -> std::sync::MutexGuard<'static, Option<skirmish::Settings>> {
 }
 /// An Options flag as saved (settings.cfg key, the game's default when missing).
 pub fn opt(key: &str, default: bool) -> bool { cfg().get_or_insert_with(skirmish::Settings::load).flag(key, default) }
+/// An Options number as saved (a slider's value).
+pub fn opt_num(key: &str, default: f32) -> f32 { cfg().get_or_insert_with(skirmish::Settings::load).num(key, default) }
 /// Sets a True / False option outside the options screen (the chat panel's mute boxes) and saves settings.cfg.
 pub fn set_opt(key: &str, on: bool) -> std::io::Result<()> {
     let mut c = cfg();

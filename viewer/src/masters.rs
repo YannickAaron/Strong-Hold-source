@@ -14,7 +14,7 @@ pub enum J { Num(i64), Str(String), Arr(Vec<J>), Obj(Vec<(String, J)>) }
 impl J {
     pub(crate) fn get(&self, k: &str) -> Option<&J> { if let J::Obj(v) = self { v.iter().find(|e| e.0 == k).map(|e| &e.1) } else { None } }
     pub fn int(&self, k: &str) -> i64 { if let Some(J::Num(n)) = self.get(k) { *n } else { 0 } }
-    fn str(&self, k: &str) -> String { if let Some(J::Str(s)) = self.get(k) { s.clone() } else { String::new() } }
+    pub fn str(&self, k: &str) -> String { if let Some(J::Str(s)) = self.get(k) { s.clone() } else { String::new() } }
     pub fn ints(&self, k: &str) -> Vec<i64> { if let Some(J::Arr(a)) = self.get(k) { a.iter().map(|v| if let J::Num(n) = v { *n } else { 0 }).collect() } else { vec![] } }
     fn strs(&self, k: &str) -> Vec<String> { if let Some(J::Arr(a)) = self.get(k) { a.iter().map(|v| if let J::Str(s) = v { s.clone() } else { String::new() }).collect() } else { vec![] } }
     fn set(&mut self, k: &str, v: J) { if let J::Obj(o) = self { if let Some(e) = o.iter_mut().find(|e| e.0 == k) { e.1 = v } else { o.push((k.into(), v)) } } }

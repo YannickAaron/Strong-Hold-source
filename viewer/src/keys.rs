@@ -94,7 +94,7 @@ pub fn code(f: &str) -> Option<i32> { lines(MODERN).position(|l| l.0 == f).map(|
 
 /// Whether a key on `f` does something in the port (main.rs `hotkey`); the F1 sheet leaves F1 / Shift+F1 to these.
 pub fn runs(f: &str) -> bool {
-    const RUN: [&str; 26] = ["Pause", "IncreaseEngineSpeed", "DecreaseEngineSpeed", "ZoomIn", "ZoomOut", "MapRotateLeft", "MapRotateRight",
+    const RUN: [&str; 28] = ["Pause", "IncreaseEngineSpeed", "DecreaseEngineSpeed", "ZoomIn", "ZoomOut", "MapRotateLeft", "MapRotateRight", "RadarZoomIn", "RadarZoomOut",
         "QuickSave", "QuickLoad", "ToggleStats", "Save", "Load", "FlattenLandscape", "ToggleUI", "ToggleFrameRate", "ToggleMuteSounds",
         "RotateBuilding", "Up", "Down", "Left", "Right", "OptionsMenu", "Cathedral", "SelectAllOfType", "DeleteTool", "SwitchOutput"];
     RUN.contains(&f) || PLACE.iter().any(|p| p.0 == f) || game_action(f, &Ctx { mode: 14, sub: 61, sh1_centre: true, attack_here: true, centre: None }).is_some()

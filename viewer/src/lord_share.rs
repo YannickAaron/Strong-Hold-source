@@ -4,7 +4,8 @@
 //! Import: a .zip with `CustomLords/<Name>/…` (required: a .lordjson) and optionally `CustomMedia/<Name>/…`, the
 //! same layout as the player folder (any top folder above them is fine, e.g. a zipped "Lord X/" folder). Every file
 //! is checked before anything is written: no path outside the lord's folders, no links, no encrypted entries, only
-//! the file types a lord uses, size caps, the .lordjson and every .aivjson must parse. An existing lord of the same
+//! the file types a lord uses, size caps, the .lordjson and every .aivjson must parse, and a .lordjson `min_app`
+//! (our key: the app version the lord needs) must not be newer than this app (the message points at the app update). An existing lord of the same
 //! name is replaced only when asked (`import` returns `Exists`). Files land in a temp folder first, then move in.
 //!
 //! Online: the public repo's `lords` release (scripts/publish_lord.sh) holds one zip per lord, labelled with the
@@ -32,6 +33,13 @@ pub enum ImportErr {
     Bad(String),
 }
 
+/// Our version, as a lord's `min_app` is compared to it (tests: SHC_TEST_APP_VERSION).
+fn app_version() -> &'static str {
+    #[cfg(test)]
+    if let Ok(v) = std::env::var("SHC_TEST_APP_VERSION") { return Box::leak(v.into_boxed_str()); }
+    crate::update::VERSION
+}
+
 /// One file of the zip, already placed: (CustomLords | CustomMedia, lord name, path inside the lord's folder, bytes).
 type Entry = (&'static str, String, PathBuf, Vec<u8>);
 
@@ -56,6 +64,8 @@ fn import_into(file: &Path, root: &Path, replace: bool) -> Result<Vec<String>, I
         let cfg = lords.clone().find(|e| ext(&e.2) == "lordjson").ok_or_else(|| bad(format!("{n}: no .lordjson")))?;
         let text = String::from_utf8(cfg.3.clone()).map_err(|_| bad(format!("{n}: the .lordjson is not text")))?;
         custom_lords::lordjson(&text).ok_or_else(|| bad(format!("{n}: the .lordjson does not parse")))?;
+        let need = custom_lords::min_app(&text);
+        if crate::update::newer(&need, app_version()) { return Err(bad(format!("{n} needs Strong Hold {need} (this is {}): update the app first, Options > Update", app_version()))); }
         for a in lords.by_ref().filter(|e| ext(&e.2) == "aivjson") {
             let t = String::from_utf8(a.3.clone()).ok().and_then(|t| custom_lords::aivjson(&t));
             if t.is_none_or(|b| shc_formats::aiv::parse(&b).is_err()) { return Err(bad(format!("{n}: castle {} does not parse", a.2.display()))); }
@@ -402,6 +412,41 @@ mod tests {
         assert_eq!(std::fs::read_dir(&m).unwrap().count(), 63, "41 wav (30 lines + lobby add / kick + 9 reactions) + 20 webm + text.txt + react.txt");
         let c = custom_lords::load(&l).expect("loads");
         assert_eq!(c.aivs.len(), 8);
+    }
+
+    /// Compatibility gate: Lord David's committed files (re/lindschied, what pack_zip.py ships) still read as the
+    /// same 377 fields and 8 castles (`checksum` = what a LAN peer compares). A parser or aic_fields.tsv change that
+    /// alters an installed lord fails here; a deliberate change updates the constant and is a lord-format change
+    /// (re/AI.md "Custom lord slots", free fields).
+    #[test]
+    fn lord_david_golden() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../re/lindschied");
+        let config = custom_lords::lordjson(&std::fs::read_to_string(src.join("Lord David von Lindschied.lordjson")).unwrap()).unwrap();
+        let aivs: Vec<Vec<i16>> = (1..9).map(|k| custom_lords::aivjson(&std::fs::read_to_string(src.join(format!("castles/lindschied_{k}.aivjson"))).unwrap()).unwrap()).collect();
+        let c = Custom { config, aivs, ..Default::default() };
+        assert_eq!((c.config.len(), c.config[0], c.config[276], c.config[299]), (377, 9, 0, 1), "opponent_type, parent left to the engine, smart_raids");
+        assert_eq!(checksum(&c), GOLDEN, "Lord David's config + castles changed: a lord-format change?");
+    }
+    const GOLDEN: u64 = 2683627979720191042;
+
+    /// A lord whose `min_app` is newer than this app is refused, the message naming both versions and the app update;
+    /// one that is older or has none imports.
+    #[test]
+    fn min_app_gate() {
+        let d = dir("minapp");
+        let root = d.join("profile");
+        let lj = |need: &str| String::from_utf8(lordjson()).unwrap().replacen("{\"lord\":{", &format!("{{\"lord\":{{\"min_app\":\"{need}\","), 1).into_bytes();
+        std::env::set_var("SHC_TEST_APP_VERSION", "0.4.2");
+        for (need, ok) in [("0.5.0", false), ("v0.4.3", false), ("0.4.2", true), ("0.1.0", true), ("", true), ("junk", true)] {
+            let f = d.join("l.zip");
+            std::fs::write(&f, zip(&[("CustomLords/X/X.lordjson", &lj(need))])).unwrap();
+            let r = import_into(&f, &root, true);
+            if ok { assert_eq!(r, Ok(vec!["X".into()]), "{need}"); } else {
+                match r { Err(ImportErr::Bad(e)) => assert!(e.contains(&format!("needs Strong Hold {need}")) && e.contains("this is 0.4.2") && e.contains("update the app"), "{need}: {e}"), r => panic!("{need}: {r:?}") }
+            }
+        }
+        std::env::remove_var("SHC_TEST_APP_VERSION");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The `lords` release's lords: labelled zips, named by the label; unlabelled files (a source zip) are not lords.

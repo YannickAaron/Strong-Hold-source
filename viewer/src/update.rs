@@ -1,6 +1,7 @@
-//! "New version available": once a day, off the UI thread, the public repo's latest release tag (GitHub API via the
-//! system curl); the main menu shows a Download button when it's newer than this build. Offline / any error: nothing.
-//! The Extras screen checks again on request (`check_now`) and shows `status`.
+//! "New version available": at every start, off the UI thread, the public repo's latest release tag (GitHub API via
+//! the system curl); the main menu shows a Download button when it's newer than this build. Offline / any error: the
+//! last fetched tag (`update_check.txt`), else nothing. The Extras screen checks again on request (`check_now`) and
+//! shows `status`. (Releases come several times a day: a once-a-day cache showed them a day late.)
 //!
 //! Install (macOS, `bundle()`): the button downloads the release's Strong-Hold-update.tar.gz (the .app without the
 //! pinned DepotDownloader, ~13 MB; the DMG if that fails), checks it against the SHA-256 GitHub lists for the asset,
@@ -44,15 +45,14 @@ pub fn notes() -> Option<(String, String)> {
     n.as_ref()?.1.clone()
 }
 
-/// Starts the check in the background. `update_check.txt` in app_data(): "<unix secs> <tag>" of the last fetch;
-/// younger than a day (and the notes saved) = its tag, no network.
-pub fn start() { check(false) }
-/// Extras > Check for updates: asks GitHub now, whatever the cache says (not while a check runs).
-pub fn check_now() { check(true) }
+/// Starts the check in the background. `update_check.txt` in app_data(): "<unix secs> <tag>" of the last fetch, the
+/// answer when GitHub cannot be reached (and the notes saved).
+pub fn start() { check() }
+/// Extras > Check for updates: the same check (not while one runs).
+pub fn check_now() { check() }
 
-fn check(force: bool) {
+fn check() {
     let test = std::env::var_os("SHC_UPDATE_API").is_some();
-    let force = force || test;
     {
         let mut s = STATUS.lock().unwrap();
         if *s == Status::Checking { return; }
@@ -61,14 +61,9 @@ fn check(force: bool) {
     std::thread::spawn(move || {
         let file = crate::paths::app_data().join("update_check.txt");
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let cached = std::fs::read_to_string(&file).ok().filter(|_| notes_file().exists()).and_then(|s| {
-            let (t, tag) = s.trim().split_once(' ')?;
-            (!force && now.saturating_sub(t.parse().ok()?) < 86_400).then(|| tag.to_string())
-        });
-        let tag = match cached {
-            Some(t) => t,
-            None => {
-                let Some((t, body)) = fetch() else { *STATUS.lock().unwrap() = Status::Offline; return };
+        let cached = || std::fs::read_to_string(&file).ok().filter(|_| notes_file().exists()).and_then(|s| Some(s.trim().split_once(' ')?.1.to_string()));
+        let tag = match fetch() {
+            Some((t, body)) => {
                 if !test {
                     let _ = std::fs::create_dir_all(file.parent().unwrap());
                     let _ = std::fs::write(&file, format!("{now} {t}\n"));
@@ -76,6 +71,7 @@ fn check(force: bool) {
                 }
                 t
             }
+            None => match if test { None } else { cached() } { Some(t) => t, None => { *STATUS.lock().unwrap() = Status::Offline; return } },
         };
         *STATUS.lock().unwrap() = if newer(&tag, VERSION) { Status::Newer(tag) } else { Status::Latest(tag) };
     });
@@ -122,7 +118,7 @@ fn semver(v: &str) -> Option<(u64, u64, u64)> {
 }
 
 /// Whether release `tag` is newer than `ours`; anything unparsable = no.
-fn newer(tag: &str, ours: &str) -> bool { matches!((semver(tag), semver(ours)), (Some(a), Some(b)) if a > b) }
+pub fn newer(tag: &str, ours: &str) -> bool { matches!((semver(tag), semver(ours)), (Some(a), Some(b)) if a > b) }
 
 /// The in-app install's state (the update buttons' label, `button`).
 #[derive(Clone, Debug, PartialEq)]
@@ -370,6 +366,24 @@ fn version_compare() {
 }
 
 /// GitHub's release JSON (keys in its order, an uploader object inside each asset): the assets with their SHA-256.
+/// The start check asks the release API every time (no day-old cache): a newer tag shows at once; unreachable = Offline.
+#[test]
+fn start_asks_every_time() {
+    let wait = || { for _ in 0..200 { if status() != Status::Checking { break } std::thread::sleep(std::time::Duration::from_millis(50)); } status() };
+    let f = std::env::temp_dir().join(format!("shc-update-{}.json", std::process::id()));
+    std::fs::write(&f, r#"{"tag_name":"v99.0.0","body":"notes"}"#).unwrap();
+    std::env::set_var("SHC_UPDATE_API", format!("file://{}", f.display()));
+    start();
+    assert_eq!(wait(), Status::Newer("v99.0.0".into()));
+    std::fs::write(&f, r#"{"tag_name":"v0.0.1","body":""}"#).unwrap();
+    start();
+    assert_eq!(wait(), Status::Latest("v0.0.1".into()), "the second start fetched again");
+    std::fs::remove_file(&f).unwrap();
+    start();
+    assert_eq!(wait(), Status::Offline);
+    std::env::remove_var("SHC_UPDATE_API");
+}
+
 #[test]
 fn release_assets() {
     let up = r#""uploader":{"login":"x","id":1,"url":"https://api.github.com/users/x","type":"User"}"#;

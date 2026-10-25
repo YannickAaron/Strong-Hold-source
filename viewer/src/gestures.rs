@@ -1,8 +1,33 @@
 //! Trackpad (macOS): pinch = smooth zoom about the fingers inside the original's in-game zoom range, two-finger scroll
 //! = pan (Cam::limit keeps the original's camera limits every frame), two-finger rotate = the Q / E map turn. Mouse
-//! wheels (line deltas) keep the original's stepped zoom in main.rs. Nothing here reaches the sim.
+//! wheels (line deltas, and precise deltas outside a touch gesture: `pans`) keep the original's stepped zoom in
+//! main.rs. Nothing here reaches the sim.
 
 use crate::{zoom_pos_clamp, Cam, ZOOM_LEVELS};
+use winit::event::TouchPhase;
+
+/// Does a precise-delta scroll event pan? macOS reports precise deltas for the trackpad, the Magic Mouse and mice
+/// whose driver smooths the wheel (Logitech Options+ and many Bluetooth mice). Only touch surfaces send a gesture
+/// phase (Started … Ended, momentum included): `touch` tracks one, so a smoothed mouse wheel falls through to the
+/// original's stepped zoom. `option` = View > Trackpad Scrolling Pans; off, touch scrolls zoom like the original's.
+pub fn pans(phase: TouchPhase, option: bool, touch: &mut bool) -> bool {
+    match phase { TouchPhase::Started => *touch = true, TouchPhase::Ended | TouchPhase::Cancelled => *touch = false, TouchPhase::Moved => {} }
+    option && (*touch || phase == TouchPhase::Ended)
+}
+
+#[test]
+fn touch_scrolls_pan_mouse_wheels_zoom() {
+    use TouchPhase::*;
+    let mut t = false;
+    // a trackpad gesture: pans from the first event to the last, including the momentum tail
+    assert_eq!([Started, Moved, Moved, Ended].map(|p| pans(p, true, &mut t)), [true; 4]);
+    assert!(!t);
+    // a smoothed mouse wheel: precise deltas, never a phase: zoom
+    assert_eq!([Moved, Moved].map(|p| pans(p, true, &mut t)), [false; 2]);
+    // the option off: everything zooms, the gesture is still tracked
+    assert_eq!([Started, Moved, Ended].map(|p| pans(p, false, &mut t)), [false; 3]);
+    assert!(!t);
+}
 
 /// Degrees of two-finger rotation per 90° map turn.
 pub const TURN_DEG: f32 = 45.0;

@@ -18,6 +18,9 @@ pub fn radar_size(tilemap: i32, zoomed_out: bool) -> i32 {
     let max = if tilemap <= 4 { RADAR_N } else { (tilemap - 4).min(800) };
     if zoomed_out { max } else { max.min(124) }
 }
+/// GameMap.changeRadarMapSize: the RadarZoomIn (−64) / RadarZoomOut (+64) keys step the radar's size from `n` between
+/// 124 px and the whole map.
+pub fn radar_step(n: i32, diff: i32, tilemap: i32) -> i32 { (n + diff).clamp(124, radar_size(tilemap, true)) }
 
 /// Placement footprint side of an eMappers id: FUN_180069400 (jump table at 0x1800694c0; same as sim setup::f69400,
 /// which is private). -1 = no footprint (not placeable as a building).
@@ -567,6 +570,13 @@ mod sim {
             (Verdict { tool, x, y, size: 1, ok: !bad, why, tiles }, n)
         }
 
+        /// KeyManager RadarZoomIn / RadarZoomOut: GameMap.changeRadarMapSize(`d` = ∓64); returns the new size.
+        pub fn radar_zoom(&mut self, d: i32) -> i32 {
+            self.radar_n = super::radar_step(self.radar_n, d, self.m.i32(0x1860ab524));
+            shc_sim::hudstate::set_radar_size(&mut self.m, self.radar_n);
+            self.radar_n
+        }
+
         /// Minimap (FUN_1800f4bb0, `hudstate::radar`) at this map's size, scaled (nearest) to RADAR_N² ARGB, bottom
         /// row first. `view` = game tile at the window centre + tiles wide / high (DLL_RunTick's screen_centre_pos /
         /// screen_tiles); it only moves the white camera rectangle at this zoom. Needs this tick's `draw::run_tick`.
@@ -680,6 +690,8 @@ mod sim {
     #[test]
     fn mission_radar_size() {
         assert_eq!([radar_size(200, true), radar_size(200, false), radar_size(804, true), radar_size(1000, true), radar_size(0, false)], [196, 124, 800, 800, 124]);
+        // PageUp / PageDown: 64 px steps, never under 124 or past the whole map
+        assert_eq!([radar_step(124, 64, 804), radar_step(764, 64, 804), radar_step(124, -64, 804), radar_step(188, 64, 200)], [188, 800, 124, 196]);
         let dir = std::env::temp_dir().join(format!("shc-radar-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("settings.cfg"), "||SETTINGS||\nRadarDefaultZoomedOut:True\nMoat:True\n||SETTINGS||\n").unwrap();
@@ -978,6 +990,7 @@ impl Live {
     pub fn set_tax(&mut self, _: i32) {}
     pub fn set_rations(&mut self, _: i32) {}
     pub fn radar(&mut self, _: [i32; 4]) -> Vec<u32> { vec![] }
+    pub fn radar_zoom(&mut self, _: i32) -> i32 { 0 }
     pub fn keep(&self) -> Option<(i16, i16)> { None }
     pub fn keep_of(&self, _: i32) -> Option<(i16, i16)> { None }
     pub fn save(&mut self, _: &std::path::Path) -> std::io::Result<()> { Ok(()) }
@@ -1012,7 +1025,7 @@ pub fn camera(r: [f32; 4]) -> [i32; 4] {
 /// buttons); `Troops`: mouse input for DLL_TroopSelection; `Radar(x, y)`: minimap click at radar px (top-down), the
 /// camera goes to that tile (`Frame::goto`); `Save`: write a .sav there (pause menu); `Rotate(rot, x, y)`:
 /// DLL_SetMapRotation, the camera centres on game tile (x, y) once the map has turned.
-pub enum Cmd { Run { playing: bool, rate: f32 }, View([i32; 4], [f32; 4]), Step, Tool(i32), Hover(i32, i32), Click(i32, i32), Drag(i32, i32, i32), Action([i32; 3]), Action4([i32; 4]), Mouse(i32, i32), Delete(i32), Tax(i32), Rations, Troops(TroopIn), Radar(i32, i32), Save(std::path::PathBuf), SaveReplay, Rotate(i32, i32, i32), Tutorial(i32, i32), ViewPos([i32; 2]), Flatten(bool), AppMode(i32, i32),
+pub enum Cmd { Run { playing: bool, rate: f32 }, View([i32; 4], [f32; 4]), Step, Tool(i32), Hover(i32, i32), Click(i32, i32), Drag(i32, i32, i32), Action([i32; 3]), Action4([i32; 4]), Mouse(i32, i32), Delete(i32), Tax(i32), Rations, Troops(TroopIn), Radar(i32, i32), Save(std::path::PathBuf), SaveReplay, Rotate(i32, i32, i32), Tutorial(i32, i32), ViewPos([i32; 2]), Flatten(bool), AppMode(i32, i32), RadarZoom(i32),
     /// Ours: the open panel's assembly points to a tile (`Live::rally`); every own unit of the selection's types.
     Rally(i32, i32), SelectTypes,
     /// The map editor (editor.rs): DLL_MapAction in mouse state 0..3 (`EdIn`), DLL_SetEditorPlayer, the map saved there.
@@ -1159,6 +1172,8 @@ impl Thread {
                         Ok(Cmd::View(v, r)) => { (view, rect) = (v, Some(r)); l.centre = v; }
                         Ok(Cmd::ViewPos(p)) => l.pos = Some(p),
                         Ok(Cmd::Flatten(f)) => { input = true; l.flattened = f }
+                        // KeyManager RadarZoomIn / RadarZoomOut: GameMap.changeRadarMapSize(∓64)
+                        Ok(Cmd::RadarZoom(d)) => { println!("radar: {} px", l.radar_zoom(d)); input = true; }
                         Ok(Cmd::AppMode(a, s)) => { input = true; l.set_app_mode(a, s) }
                         Ok(Cmd::Tool(t)) => { tool = (t, l.set_tool(t)); *out.lock().unwrap() = None; }
                         Ok(Cmd::Hover(x, y)) => { hover = Some((x, y)); input = true; } // only the latest one counts
@@ -1306,7 +1321,7 @@ impl Thread {
     pub fn verdict(&self) -> Option<Verdict> { self.verdict.lock().unwrap().clone() }
 
     pub fn send(&self, c: Cmd) {
-        if self.replay && !matches!(c, Cmd::Run { .. } | Cmd::View(..) | Cmd::ViewPos(..) | Cmd::Flatten(..) | Cmd::Step | Cmd::Radar(..)) { return; } // a replay plays what was recorded
+        if self.replay && !matches!(c, Cmd::Run { .. } | Cmd::View(..) | Cmd::ViewPos(..) | Cmd::Flatten(..) | Cmd::Step | Cmd::Radar(..) | Cmd::RadarZoom(..)) { return; } // a replay plays what was recorded
         if let Cmd::View(_, r) = c { self.rect.set(r); }
         let _ = self.tx.send(c);
     }

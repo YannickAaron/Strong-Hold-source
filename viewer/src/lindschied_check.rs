@@ -258,7 +258,8 @@ fn first_attack(tag: &str, lord_of: impl Fn() -> usize) -> Option<Attack> {
     let dir = folder(&format!("attack{tag}"), &[1, 2, 3, 4, 5, 6, 7, 8]);
     crate::skirmish::set_test_profile(dir.clone());
     custom_lords::rescan();
-    let lobby = crate::skirmish::Lobby { ais: vec![(lord_of(), 0)], seed: env("PROBE_SEED").unwrap_or(1234), goods: env("PROBE_GOODS").unwrap_or(1), ..crate::skirmish::Lobby::new(map) };
+    // PROBE_EXT=1: an Extended game (his smart raids / recruiting)
+    let lobby = crate::skirmish::Lobby { ais: vec![(lord_of(), 0)], seed: env("PROBE_SEED").unwrap_or(1234), goods: env("PROBE_GOODS").unwrap_or(1), extended: env("PROBE_EXT") == Some(1), ..crate::skirmish::Lobby::new(map) };
     let mut l = crate::live::Live::from_mem(crate::skirmish::start(&lobby).unwrap());
     headless(&mut l);
     let mut r = Attack::default();
@@ -691,4 +692,66 @@ fn lindschied_smart_raids() {
     // (farms that burn under his siege are no raid's: only the raid targets are checked, in `bad`)
     assert!(homes >= away, "squads stay out after their raid: home {homes}, away {away}");
     assert!(sent - back <= (sent / 10).max(1), "raids cost {} of {sent} men", sent - back);
+}
+
+/// Head to head: Lord David against a built-in lord (PROBE_LORD, lobby index, default 8 = Frederick), you idle and on
+/// his team so the two fight each other; PROBE_MAP / PROBE_SEED, PROBE_TICKS (default 120 000), PROBE_SWAP=1 gives
+/// the other lord the first AI slot. Every 10 000 ticks both armies; at the end whose lord still lives.
+#[test]
+#[ignore] // minutes: run explicitly
+fn lindschied_war() {
+    use shc_sim::game::player;
+    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<i32>().ok());
+    let map = crate::skirmish::maps_dir().join(std::env::var("PROBE_MAP").unwrap_or("Crater Lake.map".into()));
+    if !map.exists() { return; } // needs the game install
+    let dir = folder("war", &[1, 2, 3, 4, 5, 6, 7, 8]);
+    crate::skirmish::set_test_profile(dir.clone());
+    custom_lords::rescan();
+    let lind = BASE + custom_lords::names().iter().position(|n| n == NAME).unwrap();
+    let foe = env("PROBE_LORD").unwrap_or(8) as usize;
+    let swap = env("PROBE_SWAP").unwrap_or(0) != 0;
+    let ais = if swap { vec![(foe, 2), (lind, 1)] } else { vec![(lind, 1), (foe, 2)] };
+    let (pd, pf) = if swap { (3, 2) } else { (2, 3) };
+    let lobby = crate::skirmish::Lobby { ais, team: 1, seed: env("PROBE_SEED").unwrap_or(1234), extended: env("PROBE_EXT") == Some(1), ..crate::skirmish::Lobby::new(map.clone()) };
+    let mut l = crate::live::Live::from_mem(crate::skirmish::start(&lobby).unwrap());
+    headless(&mut l);
+    let mil = |m: &Mem, p: i32| (1..m.i32(shc_sim::units::OBJ).max(1)).filter(|&i| {
+        let r = shc_sim::units::u(i);
+        m.i16(r + 0x8c) == 2 && m.i16(r + 0x96) as i32 == p && matches!(m.i16(r + 0x8e), 22..=28 | 70..=76 | 78..=85)
+    }).count();
+    let alive = |m: &Mem, p: i32| ai::build::lord_unit(m, p) != 0;
+    let mut was = [0i32; 4];
+    for t in 0..env("PROBE_TICKS").unwrap_or(120_000) {
+        l.step();
+        let m = l.mem();
+        for p in [pd, pf] {
+            let s = m.i32(player(p as u32) + 0x2ba4);
+            if was[p as usize] == 0 && s != 0 { eprintln!("  t{} {} attacks (target {})", t + 1, if p == pd { "David" } else { "foe" }, m.i32(player(p as u32) + 0x2bd8)); }
+            was[p as usize] = s;
+        }
+        if t % 10_000 == 9_999 {
+            eprintln!("  t{}: David {} soldiers{}, foe {} soldiers{}", t + 1, mil(m, pd), if alive(m, pd) { "" } else { " (lord dead)" }, mil(m, pf), if alive(m, pf) { "" } else { " (lord dead)" });
+            for (who, p) in [("David", pd), ("foe", pf)] {
+                let r = player(p as u32);
+                let g = |k: u64| m.i32(r + 0x4d0 + k * 4); // goods
+                eprintln!("    {who}: people {} housing {} idle {} | gold {} tax {} pop {} | food {} wood {} stone {} iron {} | weapons {}",
+                    m.i32(r + 0x2180), m.i32(r + 0x74), m.i32(r + 0x2b08), m.i32(r + 0x50c), m.i32(r + 0x2188), m.i32(r + 0x60) / 100,
+                    (10..=13).map(g).sum::<i32>(), g(2), g(4), g(6), (17..=24).map(g).sum::<i32>());
+            }
+        }
+        if t > 3000 && (!alive(m, pd) || !alive(m, pf)) { break; } // the lords walk in after the start
+    }
+    let m = l.mem();
+    // what an army is worth: recruit gold + its arms at market price (TEXT trade_buy for 5, /5): archer 12 + bow 31,
+    // crossbow 20 + 58 + leather 25, spear 8 + 20, pike 20 + 36 + metal 58, mace 20 + 58 + leather 25, sword 40 + 58 +
+    // 58, knight 40 + 58 + 58 + horse ~25; Arab and Bedouin troops at their mercenary price ~40..80 (60)
+    let worth = |m: &Mem, p: i32| (1..m.i32(shc_sim::units::OBJ).max(1)).map(|i| {
+        let r = shc_sim::units::u(i);
+        if m.i16(r + 0x8c) != 2 || m.i16(r + 0x96) as i32 != p { return 0; }
+        match m.i16(r + 0x8e) { 22 => 43, 23 => 103, 24 => 28, 25 => 114, 26 => 103, 27 => 156, 28 => 181, 70..=76 | 78..=85 => 60, _ => 0 }
+    }).sum::<i32>();
+    println!("war on {} (seed {}, swap {swap}): David {} ({} soldiers, worth {}), lord {foe} {} ({} soldiers, worth {})", map.display(), lobby.seed,
+        if alive(m, pd) { "alive" } else { "DEAD" }, mil(m, pd), worth(m, pd), if alive(m, pf) { "alive" } else { "DEAD" }, mil(m, pf), worth(m, pf));
+    custom_lords::set_in_game(pd as usize, None);
+    let _ = std::fs::remove_dir_all(&dir);
 }

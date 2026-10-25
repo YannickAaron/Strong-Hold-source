@@ -8,11 +8,14 @@ use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication, NSControlS
 use objc2_foundation::{MainThreadMarker, NSObject, NSString};
 
 use crate::ux::Cmd;
-const CMDS: [Cmd; 12] = [Cmd::Quit, Cmd::Save, Cmd::Load, Cmd::Options, Cmd::Shortcuts, Cmd::UiBigger, Cmd::UiSmaller, Cmd::UiReset,
-    Cmd::PauseInBackground, Cmd::QuitYes, Cmd::QuitNo, Cmd::FullScreen];
+const CMDS: [Cmd; 13] = [Cmd::Quit, Cmd::Save, Cmd::Load, Cmd::Options, Cmd::Shortcuts, Cmd::UiBigger, Cmd::UiSmaller, Cmd::UiReset,
+    Cmd::PauseInBackground, Cmd::QuitYes, Cmd::QuitNo, Cmd::FullScreen, Cmd::TrackpadPan];
 
 static PENDING: Mutex<Vec<Cmd>> = Mutex::new(Vec::new());
-thread_local! { static PAUSE_ITEM: RefCell<Option<Retained<NSMenuItem>>> = const { RefCell::new(None) }; }
+/// The check-mark items: Game > Pause in Background, View > Trackpad Scrolling Pans.
+#[derive(Clone, Copy)]
+pub enum Check { PauseBg, TrackpadPan }
+thread_local! { static CHECK_ITEMS: RefCell<[Option<Retained<NSMenuItem>>; 2]> = const { RefCell::new([None, None]) }; }
 
 fn push(c: Cmd) { PENDING.lock().unwrap().push(c); }
 /// The commands queued since the last call (main thread, about_to_wait).
@@ -38,8 +41,8 @@ const CMD: NSEventModifierFlags = NSEventModifierFlags::NSEventModifierFlagComma
 
 /// Our menu bar: app menu (About, Settings… ⌘,, Services, Hide, Quit ⌘Q), Game (Save ⌘S, Load… ⌘O, Pause in
 /// Background), View (Toggle Full Screen ⌃⌘F, UI size ⌘= / ⌘- / ⌘0, Keyboard Shortcuts ⌘/), Window (Minimize ⌘M, Zoom,
-/// Bring All to Front). `pause_bg` = the check mark's start state.
-pub fn install_menu(pause_bg: bool) {
+/// Bring All to Front). `pause_bg` / `trackpad_pan` = the check marks' start state.
+pub fn install_menu(pause_bg: bool, trackpad_pan: bool) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let app = NSApplication::sharedApplication(mtm);
     NSWindow::setAllowsAutomaticWindowTabbing(false, mtm); // one game window: no Show Tab Bar items in View
@@ -90,7 +93,7 @@ pub fn install_menu(pause_bg: bool) {
     sep(&g);
     let p = item(&g, "Pause in Background", None, "", CMD, Some(Cmd::PauseInBackground));
     unsafe { p.setState(if pause_bg { NSControlStateValueOn } else { NSControlStateValueOff }) };
-    PAUSE_ITEM.with(|c| *c.borrow_mut() = Some(p));
+    CHECK_ITEMS.with(|c| c.borrow_mut()[Check::PauseBg as usize] = Some(p));
 
     let v = submenu(&bar, "View");
     // main.rs set_windowed: native full screen (its own Space), back to an 80 % window
@@ -101,6 +104,11 @@ pub fn install_menu(pause_bg: bool) {
     unsafe { eq.setHidden(true); eq.setAllowsKeyEquivalentWhenHidden(true); }
     item(&v, "Smaller UI", None, "-", CMD, Some(Cmd::UiSmaller));
     item(&v, "Actual Size UI", None, "0", CMD, Some(Cmd::UiReset));
+    sep(&v);
+    // off: a two-finger scroll (Magic Mouse too) steps the zoom like the original's wheel (gestures::pans)
+    let t = item(&v, "Trackpad Scrolling Pans", None, "", CMD, Some(Cmd::TrackpadPan));
+    unsafe { t.setState(if trackpad_pan { NSControlStateValueOn } else { NSControlStateValueOff }) };
+    CHECK_ITEMS.with(|c| c.borrow_mut()[Check::TrackpadPan as usize] = Some(t));
     sep(&v);
     item(&v, "Keyboard Shortcuts", None, "/", CMD, Some(Cmd::Shortcuts));
 
@@ -121,9 +129,9 @@ pub fn install_menu(pause_bg: bool) {
     }
 }
 
-/// The "Pause in Background" check mark.
-pub fn set_pause_check(on: bool) {
-    PAUSE_ITEM.with(|c| if let Some(it) = &*c.borrow() { unsafe { it.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff }) } });
+/// A check-mark item's state.
+pub fn set_check(which: Check, on: bool) {
+    CHECK_ITEMS.with(|c| if let Some(it) = &c.borrow()[which as usize] { unsafe { it.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff }) } });
 }
 
 /// "Quit while a game is running?" as a sheet on the game window; the answer arrives later as Cmd::QuitYes / QuitNo.

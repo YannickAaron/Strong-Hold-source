@@ -307,16 +307,18 @@ impl Cam {
         self.edge_mask = if band > 0.0 && at[1] > y1 - band { 125.0 * ((at[1] - (y1 - band)) / band).min(1.0) } else { 0.0 };
     }
 
-    /// KeyManager.HorizontalAxis / VerticalAxis: arrow keys held, else the mouse on a window edge (PushMapScrolling,
-    /// on by default) scroll at SCROLL_PX_S device px a second for `dt` s.
-    fn scroll(&mut self, w: f32, h: f32, sf: f32, shift: bool, dt: f32) {
+    /// KeyManager.HorizontalAxis / VerticalAxis: arrow keys held, else (`edges`: Options > Push map scrolling) the
+    /// mouse on a window edge scroll at SCROLL_PX_S × `speed` (ConfigSettings.GetScrollSpeed) device px a second for
+    /// `dt` s.
+    fn scroll(&mut self, w: f32, h: f32, sf: f32, shift: bool, dt: f32, speed: f32, edges: bool) {
         let k = self.keys;
         let edge = |lo: bool, hi: bool| if lo { -1.0 } else if hi { 1.0 } else { 0.0 };
         let c = self.cursor;
         let (mut dx, mut dy) = (edge(k[0], k[1]), edge(k[2], k[3]));
-        if k[0] == k[1] { dx = if self.cursor_in { edge(c[0] <= 0.0, c[0] >= w - 1.0) } else { 0.0 } }
-        if k[2] == k[3] { dy = if self.cursor_in { edge(c[1] <= 0.0, c[1] >= h - 1.0) } else { 0.0 } }
-        let v = SCROLL_PX_S / sf * if shift { 2.0 } else { 1.0 } * dt.min(0.1);
+        let on_edge = self.cursor_in && edges;
+        if k[0] == k[1] { dx = if on_edge { edge(c[0] <= 0.0, c[0] >= w - 1.0) } else { 0.0 } }
+        if k[2] == k[3] { dy = if on_edge { edge(c[1] <= 0.0, c[1] >= h - 1.0) } else { 0.0 } }
+        let v = SCROLL_PX_S * speed / sf * if shift { 2.0 } else { 1.0 } * dt.min(0.1);
         self.off[0] -= dx * v;
         self.off[1] -= dy * v;
     }
@@ -1451,6 +1453,7 @@ impl App {
         #[cfg(feature = "live")]
         if self.lan_key(k, c, pressed) { return; } // a LAN game's chat line (lan.rs)
         let code = k.split(',').next().unwrap_or("");
+        trace(|w, t| { let _ = writeln!(w, "K {t} {k} {} {:?}", if pressed { "down" } else { "up" }, self.keys.action(k)); }); // SHC_TRACE: the key path
         for (i, f) in ["Left", "Right", "Up", "Down"].into_iter().enumerate() {
             if (pressed && self.keys.action(k) == Some(f)) || (!pressed && self.keys.on_code(f, code)) { self.cam.keys[i] = pressed; }
         }
@@ -1494,6 +1497,8 @@ impl App {
             // X / Z zoom in / out, Q / E rotate the map left / right (not while paused)
             "ZoomIn" | "ZoomOut" if p.playing => self.adjust_zoom(if f == "ZoomIn" { 0.5 } else { -0.5 }),
             "MapRotateLeft" | "MapRotateRight" if p.playing => self.rotate_map(f == "MapRotateRight"),
+            // PageDown / PageUp: the minimap closer (124 px around the camera) / wider (up to the whole map)
+            "RadarZoomIn" | "RadarZoomOut" => if let Some(l) = &p.live { l.send(live::Cmd::RadarZoom(if f == "RadarZoomIn" { -64 } else { 64 })) },
             // Space: EngineInterface.toggleFlattenedLandscapeMode (the right-click menu's flatten), not while paused
             "FlattenLandscape" if !paused => if let (Some(u), Some(l)) = (self.ui.as_mut(), &p.live) {
                 u.flat = !u.flat;
@@ -1721,12 +1726,21 @@ fn camera_scrolls_on_the_frame_clock() {
         real += if k % 2 == 0 { 0.0160 } else { 0.0007 };
         let next = frame_clock(c, &mut f, t0 + std::time::Duration::from_secs_f32(real));
         let x = cam.off[0];
-        cam.scroll(1000.0, 800.0, 2.0, false, next.saturating_duration_since(c).as_secs_f32());
+        cam.scroll(1000.0, 800.0, 2.0, false, next.saturating_duration_since(c).as_secs_f32(), 1.0, true);
         steps.push(cam.off[0] - x);
         c = next;
     }
     let m = steps[200..].iter().sum::<f32>() / 200.0;
     assert!(m > 0.0 && steps[200..].iter().all(|s| (s - m).abs() < 0.1 * m), "{:?}", &steps[200..210]);
+    // Options: Scroll speed 15 = 2×; Push map scrolling off leaves the window edges alone, the arrows still scroll
+    let mut cam = Cam { cursor: [0.0, 300.0], cursor_in: true, ..Default::default() };
+    cam.scroll(1000.0, 800.0, 1.0, false, 0.1, 2.0, true);
+    assert_eq!(cam.off, [SCROLL_PX_S * 0.2, 0.0]);
+    cam.scroll(1000.0, 800.0, 1.0, false, 0.1, 2.0, false);
+    assert_eq!(cam.off, [SCROLL_PX_S * 0.2, 0.0]);
+    cam.keys = [true, false, false, false];
+    cam.scroll(1000.0, 800.0, 1.0, false, 0.1, 0.5, false);
+    assert_eq!(cam.off, [SCROLL_PX_S * 0.25, 0.0]);
 }
 
 /// SHC_TRACE=file (dev, scored by re/scripts/judder.py): per frame `F` (timings, camera, the sim ticks taken) and `U`
@@ -1976,7 +1990,9 @@ impl App {
                     let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
                     let (sf, dt) = (g.window.scale_factor() as f32, step);
                     let before = self.cam.off;
-                    self.cam.scroll(sz.width, sz.height, sf, self.mods.shift_key(), dt);
+                    // Options > Controls: Scroll speed 0..15 = 0.5×..2× (GetScrollSpeed), Push map scrolling
+                    let speed = menu::opt_num("ScrollSpeed", 5.0) * 0.1 + 0.5;
+                    self.cam.scroll(sz.width, sz.height, sf, self.mods.shift_key(), dt, speed, menu::opt("PushMapScrolling", true));
                     if self.cam.off != before { self.tutorial_action(1, -1) } // CameraControls2D: the camera scrolled
                     self.cam.ui_hidden = self.ui.as_ref().is_some_and(|u| u.hidden);
                     self.cam.limit(sz.width, sz.height, sf, ux::hud_scale(sz.width, sz.height));
