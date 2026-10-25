@@ -328,6 +328,7 @@ impl App {
             println!("app {}: game {}", if on { "in front" } else { "in the background" }, if play { "resumed" } else { "paused" });
         }
         FOCUSED.store(on, Relaxed);
+        if !on { self.cam.cursor_in = false; } // no edge scrolling from a cursor that left with the focus
         crate::trace(|w, t| { let _ = writeln!(w, "A {t} {}", if on { "front" } else { "background" }); }); // SHC_TRACE: focus
         self.lock_cursor();
         self.mute_in_background();

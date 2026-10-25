@@ -298,6 +298,7 @@ pub struct Menu {
     infos: Vec<skirmish::MapInfo>, // Lobby: per map in `files`
     scroll: usize,
     hits: Vec<([f32; 4], Act)>,
+    quiet_hover: bool, // glow_sel's selected button: lit by a faked cursor, no hover sound (glow_at)
     pub error: Option<String>,
     in_game: bool,             // opened from a running game (Escape): Back / Load return to the pause menu
     progress: skirmish::Progress, // campaign screens: unlocked / won missions
@@ -333,7 +334,7 @@ static SORT: std::sync::Mutex<(u8, bool)> = std::sync::Mutex::new((1, false));
 static LAST_SAVE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 impl Menu {
-    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, teams_open: false, team_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default(), mouse: ([0.0; 2], false) } }
+    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], quiet_hover: false, error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, teams_open: false, team_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default(), mouse: ([0.0; 2], false) } }
     pub fn pause(can_restart: bool) -> Self { Menu { screen: Screen::Pause, in_game: true, can_restart, ..Self::main() } }
     /// Back from a sub-screen: the pause menu in game, else the main menu.
     fn home(&self) -> Self { if self.in_game { Self::pause(self.can_restart) } else { Self::main() } }
@@ -1552,7 +1553,11 @@ impl Menu {
     /// BTN_SH_GlowSB: GlowS that can be selected (the lit bar, #FFD700 text).
     fn glow_sel(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, text: &str, x: f32, y: f32, w: f32, selected: bool, a: Option<Act>, cursor: [f32; 2]) {
         let lit = if selected { [self.o[0] + (x + w / 2.0) * self.s, self.o[1] + (y + 14.0) * self.s] } else { cursor };
+        // the selected one is drawn lit by a faked cursor: no hover sound for that (it would alternate with the real
+        // hover's rect every frame and replay the click endlessly)
+        self.quiet_hover = selected && !Self::inside(self.r(x, y - 1.5, w, 31.0), cursor);
         self.glow(ui, out, "", x, y, w, None, a, lit);
+        self.quiet_hover = false;
         let color = if selected { [1.0, 0.68, 0.0, 1.0] } else { [0.905, 0.73, 0.402, if a.is_some() { 1.0 } else { 0.7 }] };
         self.label(ui, out, text, x + w / 2.0, y + 15.0, 16.0, 0.5, color);
     }
@@ -1921,7 +1926,7 @@ impl Menu {
     fn glow_at(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, text: &str, x: f32, y: f32, w: f32, tick: Option<(&str, f32)>, a: Option<Act>, alpha: f32, cursor: [f32; 2]) {
         let p = self.r(x, y - 1.5, w, 31.0);
         let hot = a.is_some() && Self::inside(p, cursor);
-        if hot { crate::audio::hover(p, crate::audio::ui_id::RED_BUTTON, 1.0); }
+        if hot && !self.quiet_hover { crate::audio::hover(p, crate::audio::ui_id::RED_BUTTON, 1.0); }
         let held = hot && ui.down;
         let c = [1.0, 1.0, 1.0, alpha];
         ui.glow_bar(out, p, hot, true, if held { [0.6, 0.6, 0.6, alpha] } else { c }); // linear: Ui::text_button's 0.8

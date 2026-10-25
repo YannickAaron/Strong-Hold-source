@@ -194,7 +194,7 @@ mod imp {
         let (rect, seen, played) = HOVER.get();
         let play = (rect != at || ago(seen, 250)) && ago(played, 200);
         HOVER.set((at, Some(now), if play { Some(now) } else { played }));
-        if play { ui(id, vol) }
+        if play { crate::trace(|w, t| { let _ = writeln!(w, "H {t} {id} {at:?}"); }); ui(id, vol) } // SHC_TRACE: hover sounds
     }
 
     /// Plays (muted: drops) the queued front-end requests.

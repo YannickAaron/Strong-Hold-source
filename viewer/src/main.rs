@@ -1714,6 +1714,26 @@ fn frame_clock_evens_out_late_frames() {
     assert_eq!(pause, t0 + std::time::Duration::from_secs_f32(real + 1.0), "a pause: back to real time");
 }
 
+/// The cursor just left a `w`×`h` window with `c` its last position inside: the position pinned to the edge it went
+/// out through (within 8 logical px of it), so Cam::scroll keeps scrolling that way; None = it went elsewhere.
+fn edge_snap(c: [f32; 2], w: f32, h: f32) -> Option<[f32; 2]> {
+    let near = |v: f32, edge: f32| (v - edge).abs() <= 8.0;
+    let x = if near(c[0], 0.0) { 0.0 } else if near(c[0], w - 1.0) { w - 1.0 } else { c[0] };
+    let y = if near(c[1], 0.0) { 0.0 } else if near(c[1], h - 1.0) { h - 1.0 } else { c[1] };
+    (x != c[0] || y != c[1]).then_some([x, y])
+}
+
+#[test]
+fn cursor_leaving_through_an_edge_keeps_scrolling() {
+    assert_eq!(edge_snap([500.0, 2.5], 1200.0, 800.0), Some([500.0, 0.0])); // out through the top (notch band)
+    assert_eq!(edge_snap([1195.0, 300.0], 1200.0, 800.0), Some([1199.0, 300.0]));
+    assert_eq!(edge_snap([3.0, 797.0], 1200.0, 800.0), Some([0.0, 799.0])); // a corner: both
+    assert_eq!(edge_snap([500.0, 300.0], 1200.0, 800.0), None); // alt-tab, another window on top
+    let mut cam = Cam { cursor: edge_snap([500.0, 2.5], 1200.0, 800.0).unwrap(), cursor_in: true, ..Default::default() };
+    cam.scroll(1200.0, 800.0, 1.0, false, 0.1, 1.0, true);
+    assert!(cam.off[1] > 0.0, "scrolls up");
+}
+
 /// Edge / arrow scrolling by the clock's steps (RedrawRequested): even camera steps while the CPU's frames alternate
 /// 16 / 0.7 ms; by the CPU's own times they were 2 steps, then nearly none.
 #[test]
@@ -1878,6 +1898,17 @@ impl App {
                 if c.drag { c.off[0] += p.x - c.cursor[0]; c.off[1] += p.y - c.cursor[1]; }
                 c.cursor = [p.x, p.y];
                 c.cursor_in = true;
+                trace(|w, t| { let _ = writeln!(w, "C {t} {:.1} {:.1}", p.x, p.y); }); // SHC_TRACE: the cursor
+            }
+            // the cursor left through a window edge (a notch MacBook's camera band above a full-screen game, the menu
+            // bar, a window's title bar): edge scrolling goes on in that direction until it is back (edge_snap)
+            WindowEvent::CursorLeft { .. } => {
+                let sz = self.gfx.as_ref().map(|g| g.window.inner_size().to_logical::<f32>(g.window.scale_factor()));
+                match sz.and_then(|s| edge_snap(self.cam.cursor, s.width, s.height)) {
+                    Some(c) => self.cam.cursor = c,
+                    None => self.cam.cursor_in = false,
+                }
+                trace(|w, t| { let _ = writeln!(w, "C {t} left {:?} in={}", self.cam.cursor, self.cam.cursor_in); });
             }
             WindowEvent::MouseInput { button: MouseButton::Left, state, .. } if self.menu.is_some() => {
                 if state == ElementState::Pressed { if let Some(go) = self.menu.as_mut().unwrap().click(self.cam.cursor) { self.menu_go(go, el) } }
