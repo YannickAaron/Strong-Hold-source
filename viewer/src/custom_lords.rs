@@ -324,6 +324,8 @@ pub fn lordjson(text: &str) -> Option<Vec<i32>> {
     cfg[KEEPS_BUILDINGS_FIELD] = lord.int("keeps_buildings") as i32;
     // and storming once his waiting siege army takes losses, in the free field 302
     cfg[STORMS_WHEN_HIT_FIELD] = lord.int("storms_when_hit") as i32;
+    // and houses while his peasants wait for arms, in the free field 303
+    cfg[MORE_HOUSES_FIELD] = lord.int("more_houses") as i32;
     Some(cfg)
 }
 /// The AIC field of our `smart_raids` key (the sim's `ext::SMART_RAIDS`, a byte offset; the sim crate is only linked
@@ -343,6 +345,10 @@ const _: () = assert!(KEEPS_BUILDINGS_FIELD as i64 * 4 == shc_sim::ext::KEEPS_BU
 const STORMS_WHEN_HIT_FIELD: usize = 302;
 #[cfg(feature = "live")]
 const _: () = assert!(STORMS_WHEN_HIT_FIELD as i64 * 4 == shc_sim::ext::STORMS_WHEN_HIT);
+/// The AIC field of our `more_houses` key (the sim's `ext::MORE_HOUSES`).
+const MORE_HOUSES_FIELD: usize = 303;
+#[cfg(feature = "live")]
+const _: () = assert!(MORE_HOUSES_FIELD as i64 * 4 == shc_sim::ext::MORE_HOUSES);
 
 /// Our `min_app` key of a .lordjson ("0.5.0": the lord uses a feature older apps lack; DE ignores the key): the app
 /// version it needs, "" when it sets none. lord_share::import refuses a lord newer than the app.
