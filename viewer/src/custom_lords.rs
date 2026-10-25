@@ -320,6 +320,10 @@ pub fn lordjson(text: &str) -> Option<Vec<i32>> {
     cfg[SMART_RAIDS_FIELD] = lord.int("smart_raids") as i32;
     // and towers before battlements in Extended games, in the free field 300
     cfg[TOWERS_FIRST_FIELD] = lord.int("towers_first") as i32;
+    // and no selling of his own buildings in Extended games, in the free field 301
+    cfg[KEEPS_BUILDINGS_FIELD] = lord.int("keeps_buildings") as i32;
+    // and storming once his waiting siege army takes losses, in the free field 302
+    cfg[STORMS_WHEN_HIT_FIELD] = lord.int("storms_when_hit") as i32;
     Some(cfg)
 }
 /// The AIC field of our `smart_raids` key (the sim's `ext::SMART_RAIDS`, a byte offset; the sim crate is only linked
@@ -331,6 +335,14 @@ const _: () = assert!(SMART_RAIDS_FIELD as i64 * 4 == shc_sim::ext::SMART_RAIDS)
 const TOWERS_FIRST_FIELD: usize = 300;
 #[cfg(feature = "live")]
 const _: () = assert!(TOWERS_FIRST_FIELD as i64 * 4 == shc_sim::ext::TOWERS_FIRST);
+/// The AIC field of our `keeps_buildings` key (the sim's `ext::KEEPS_BUILDINGS`).
+const KEEPS_BUILDINGS_FIELD: usize = 301;
+#[cfg(feature = "live")]
+const _: () = assert!(KEEPS_BUILDINGS_FIELD as i64 * 4 == shc_sim::ext::KEEPS_BUILDINGS);
+/// The AIC field of our `storms_when_hit` key (the sim's `ext::STORMS_WHEN_HIT`).
+const STORMS_WHEN_HIT_FIELD: usize = 302;
+#[cfg(feature = "live")]
+const _: () = assert!(STORMS_WHEN_HIT_FIELD as i64 * 4 == shc_sim::ext::STORMS_WHEN_HIT);
 
 /// Our `min_app` key of a .lordjson ("0.5.0": the lord uses a feature older apps lack; DE ignores the key): the app
 /// version it needs, "" when it sets none. lord_share::import refuses a lord newer than the app.

@@ -274,6 +274,9 @@ fn first_attack(tag: &str, lord_of: impl Fn() -> usize) -> Option<Attack> {
     let mut r = Attack::default();
     const UB: u64 = 0x1867e53f0;
     let (mut was, mut peak) = (0, std::collections::BTreeMap::<i16, usize>::new());
+    // his buildings by slot (kind), for what he takes down himself: you idle, so nobody else does
+    let (mut mine, mut gone) = (std::collections::BTreeMap::<i32, i32>::new(), std::collections::BTreeMap::<i32, usize>::new());
+    let mut collapse = (0, 0);
     for t in 0..env("PROBE_TICKS").unwrap_or(15_000) {
         l.step();
         let m = l.mem();
@@ -303,7 +306,28 @@ fn first_attack(tag: &str, lord_of: impl Fn() -> usize) -> Option<Attack> {
             r.launches.push((t, m.i32(p2 + 0x30f0), m.i32(p2 + 0x30e8), mil(&army), army.clone()));
         }
         was = s;
+        // his collapse countdowns (ai::build::stance): economy P+0x38ec sells categories in stages, military P+0x38f0
+        // sells decor and workshops while gold < 501
+        let (eco, milc) = (m.i32(p2 + 0x38ec), m.i32(p2 + 0x38f0));
+        if (eco, milc) != collapse {
+            eprintln!("  {tag} t{:6}: collapse economy {eco} military {milc} | strength {}% (P+0x3920 {} / P+0x38e0 {}) | gold {} popularity {} food {} wood {} | P+0x1ac {} P+0xe4 {} P+0x2b1c {}",
+                t + 1, m.i16(p2 + 0x39c0), m.i32(p2 + 0x3920), m.i32(p2 + 0x38e0), m.i32(p2 + 0x50c), m.i32(p2 + 0x60), m.i32(p2 + 0x209c), m.i32(p2 + 0x4d8), m.i32(p2 + 0x1ac), m.i32(p2 + 0xe4), m.i32(p2 + 0x2b1c));
+            collapse = (eco, milc);
+        }
+        if t % 250 == 249 {
+            let now: std::collections::BTreeMap<i32, i32> = (1..b::SLOTS).filter(|&i| b::state(m, i) == 2 && b::owner(m, i) == 2).map(|i| (i, b::kind(m, i))).collect();
+            for (i, k) in &mine { if now.get(i) != Some(k) { *gone.entry(*k).or_default() += 1; } }
+            mine = now;
+        }
         if t % 2500 == 2499 {
+            if !gone.is_empty() { eprintln!("  {tag} t{:6}: his own demolitions so far (building kind: count) {gone:?}", t + 1); }
+            // what his knights need: a stable (kind 35, horses), swords (good 22), metal armour (24)
+            let stables = (1..b::SLOTS).filter(|&i| b::state(m, i) == 2 && b::owner(m, i) == 2 && b::kind(m, i) == 35).count();
+            eprintln!("  {tag} t{:6}: people {} housing {} idle {} tax {} popularity {} houses {}", t + 1, m.i32(p2 + 0x2180), m.i32(p2 + 0x74), m.i32(p2 + 0x2b08), m.i32(p2 + 0x2188), m.i32(p2 + 0x60) / 100,
+                (1..b::SLOTS).filter(|&i| b::state(m, i) == 2 && b::owner(m, i) == 2 && b::kind(m, i) == 1).count());
+            eprintln!("  {tag} t{:6}: knights {} | stables {stables} swords {} metal armour {} crossbows {} leather {} | barracks {}", t + 1, army.get(&28).copied().unwrap_or(0),
+                m.i32(p2 + 0x4d0 + 22 * 4), m.i32(p2 + 0x4d0 + 24 * 4), m.i32(p2 + 0x4d0 + 18 * 4), m.i32(p2 + 0x4d0 + 23 * 4),
+                (1..b::SLOTS).filter(|&i| b::state(m, i) == 2 && b::owner(m, i) == 2 && b::kind(m, i) == 9).count());
             let brain = (1..=8u64).map(|k| ai::D + k * 0x6d98).find(|&r| m.i32(r + 4) == 2).unwrap_or(ai::D);
             let st = stats(m, 2);
             eprintln!("  {tag} t{:6}: harass {} defend {} siege {} | mode {} attack {} | gold {} | military {} army {army:?} | near your keep (most) {peak:?} | castle {} steps {}/{} ring {}/{} towers {}/{} crenels {}/{} eco {}/{} archers {} failed {:?}", t + 1, m.i32(p2 + 0x30ec), m.i32(p2 + 0x30e8), m.i32(p2 + 0x30f0), m.i32(p2 + 0x30f8), m.i32(p2 + 0x2ba4), m.i32(p2 + 0x50c), mil(&army), m.i32(brain + 0x10) + 1, st.placed, st.total, st.ring.0, st.ring.1, st.towers.0, st.towers.1, st.crenels.0, st.crenels.1, st.eco.0, st.eco.1, st.on_eco, st.failed);
@@ -730,9 +754,18 @@ fn lindschied_war() {
     }).count();
     let alive = |m: &Mem, p: i32| ai::build::lord_unit(m, p) != 0;
     let mut was = [0i32; 4];
+    // David's soldiers lost, by his attack state at the time (0 home, 2..4 marching / gathering / bombarding, 5..6
+    // assault, 7..9 retreat)
+    let (mut last, mut lost) = (0usize, [0usize; 10]);
     for t in 0..env("PROBE_TICKS").unwrap_or(120_000) {
         l.step();
         let m = l.mem();
+        if t % 50 == 49 {
+            let n = mil(m, pd);
+            let s = m.i32(player(pd as u32) + 0x2ba4).clamp(0, 9) as usize;
+            if n < last { lost[s] += last - n; }
+            last = n;
+        }
         for p in [pd, pf] {
             let s = m.i32(player(p as u32) + 0x2ba4);
             if was[p as usize] == 0 && s != 0 { eprintln!("  t{} {} attacks (target {})", t + 1, if p == pd { "David" } else { "foe" }, m.i32(player(p as u32) + 0x2bd8)); }
@@ -759,6 +792,7 @@ fn lindschied_war() {
         if m.i16(r + 0x8c) != 2 || m.i16(r + 0x96) as i32 != p { return 0; }
         match m.i16(r + 0x8e) { 22 => 43, 23 => 103, 24 => 28, 25 => 114, 26 => 103, 27 => 156, 28 => 181, 70..=76 | 78..=85 => 60, _ => 0 }
     }).sum::<i32>();
+    println!("David's losses by attack state (0 home, 1..4 out and waiting, 5..6 assault, 7..9 back): {lost:?}");
     println!("war on {} (seed {}, swap {swap}): David {} ({} soldiers, worth {}), lord {foe} {} ({} soldiers, worth {})", map.display(), lobby.seed,
         if alive(m, pd) { "alive" } else { "DEAD" }, mil(m, pd), worth(m, pd), if alive(m, pf) { "alive" } else { "DEAD" }, mil(m, pf), worth(m, pf));
     custom_lords::set_in_game(pd as usize, None);

@@ -424,10 +424,10 @@ mod tests {
         let config = custom_lords::lordjson(&std::fs::read_to_string(src.join("Lord David von Lindschied.lordjson")).unwrap()).unwrap();
         let aivs: Vec<Vec<i16>> = (1..9).map(|k| custom_lords::aivjson(&std::fs::read_to_string(src.join(format!("castles/lindschied_{k}.aivjson"))).unwrap()).unwrap()).collect();
         let c = Custom { config, aivs, ..Default::default() };
-        assert_eq!((c.config.len(), c.config[0], c.config[276], c.config[299], c.config[300]), (377, 9, 0, 1, 1), "opponent_type, parent left to the engine, smart_raids, towers_first");
+        assert_eq!((c.config.len(), c.config[0], c.config[276], c.config[299], c.config[300], c.config[301], c.config[302]), (377, 9, 0, 1, 1, 1, 1), "opponent_type, parent left to the engine, smart_raids, towers_first, keeps_buildings, storms_when_hit");
         assert_eq!(checksum(&c), GOLDEN, "Lord David's config + castles changed: a lord-format change?");
     }
-    const GOLDEN: u64 = 9897817160098643758;
+    const GOLDEN: u64 = 10606923936090149263;
 
     /// A lord whose `min_app` is newer than this app is refused, the message naming both versions and the app update;
     /// one that is older or has none imports.
