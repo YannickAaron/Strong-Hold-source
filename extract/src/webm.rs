@@ -3,7 +3,7 @@
 use crate::Result;
 
 #[derive(Default)]
-pub struct Track { pub number: u64, pub kind: u64, pub codec: String, pub private: Vec<u8>, pub w: u32, pub h: u32, pub rate: f64, pub channels: u32 }
+pub struct Track { pub number: u64, pub kind: u64, pub codec: String, pub private: Vec<u8>, pub w: u32, pub h: u32, pub rate: f64, pub channels: u32, pub frame_ns: u64 }
 
 #[derive(Default)]
 pub struct Webm { pub video: Track, pub audio: Option<Track>, pub frames: Vec<(Vec<u8>, Option<Vec<u8>>)>, pub audio_packets: Vec<Vec<u8>>, raw: Vec<(u64, Vec<u8>, Option<Vec<u8>>)> }
@@ -105,6 +105,7 @@ fn walk(b: &[u8], mut p: usize, end: usize, w: &mut Webm, tracks: &mut Vec<Track
             0xB0 => t.w = uint(body) as u32,
             0xBA => t.h = uint(body) as u32,
             0x9F => t.channels = uint(body) as u32,
+            0x23E383 => t.frame_ns = uint(body), // DefaultDuration: ns per frame (0 = not given)
             0xB5 => t.rate = if body.len() == 4 { f32::from_be_bytes(body.try_into()?) as f64 } else { f64::from_be_bytes(body.try_into()?) },
             0xA3 => push(w, body, None)?,
             BLOCK_GROUP => {

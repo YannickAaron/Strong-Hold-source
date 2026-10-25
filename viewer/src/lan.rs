@@ -966,6 +966,7 @@ pub fn load_game(file: &[u8], lobby: &Lobby, me: i32) -> Result<shc_sim::mem::Me
     local_bytes(&mut m, me, me == lobby.player_of(0));
     shc_sim::mp::start_multiplayer_game(&mut m, true, 0);
     shc_sim::mp::start_synced(&mut m, 0);
+    crate::custom_lords::restore(&m);
     Ok(m)
 }
 

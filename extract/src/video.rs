@@ -10,14 +10,16 @@ const H: usize = 1080;
 const FPS: u32 = 30;
 
 /// Decoded frames of a .webm (RGBA, alpha from the VP8 alpha stream when present).
-pub struct Frames { pub w: usize, pub h: usize, frames: std::vec::IntoIter<(Vec<u8>, Option<Vec<u8>>)>, d: vpx::Decoder, da: Option<vpx::Decoder> }
+pub struct Frames { pub w: usize, pub h: usize, pub fps: u32, frames: std::vec::IntoIter<(Vec<u8>, Option<Vec<u8>>)>, d: vpx::Decoder, da: Option<vpx::Decoder> }
 
 pub fn frames(path: &Path) -> Result<(Frames, Option<(webm::Track, Vec<Vec<u8>>)>)> {
     let m = webm::parse(&fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?)?;
     if m.video.codec != "V_VP8" { return Err(format!("{}: codec {}", path.display(), m.video.codec).into()); }
     let alpha = m.frames.iter().any(|f| f.1.is_some());
     let audio = m.audio.map(|a| (a, m.audio_packets));
-    Ok((Frames { w: m.video.w as usize, h: m.video.h as usize, frames: m.frames.into_iter(), d: vpx::Decoder::vp8()?, da: if alpha { Some(vpx::Decoder::vp8()?) } else { None } }, audio))
+    // the track's DefaultDuration, else 30 (29.97 stored as 30, like DE's own clips)
+    let fps = if m.video.frame_ns > 0 { (1e9 / m.video.frame_ns as f64).round().max(1.0) as u32 } else { FPS };
+    Ok((Frames { w: m.video.w as usize, h: m.video.h as usize, fps, frames: m.frames.into_iter(), d: vpx::Decoder::vp8()?, da: if alpha { Some(vpx::Decoder::vp8()?) } else { None } }, audio))
 }
 
 impl Frames {
@@ -240,35 +242,45 @@ pub fn export_more(data: &Path, out: &Path, progress: &mut dyn FnMut(usize, usiz
     Ok(())
 }
 
+/// `<out>/<name>.vid` is there and not older than its source `webm` (a lord's zip imported again brings new clips).
+fn current(webm: &Path, out: &Path, name: &str) -> bool {
+    let t = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    matches!((t(&out.join(format!("{name}.vid"))), t(webm)), (Some(v), Some(w)) if v >= w)
+}
+
 /// A custom lord's reaction video (CustomMedia/<lord>/angry.webm, 348x348 VP8 + Vorbis) as `<out>/<name>.vid` +
-/// `<name>.wav`, the minimap clip format of `export_more`. Existing files are kept.
+/// `<name>.wav`, the minimap clip format of `export_more`, at the clip's own frame rate. Kept while current.
 pub fn export_custom(webm: &Path, out: &Path, name: &str) -> Result<()> {
-    if out.join(format!("{name}.vid")).exists() { return Ok(()); }
+    if current(webm, out, name) { return Ok(()); }
     fs::create_dir_all(out)?;
     let (fr, audio) = frames(webm)?;
-    write_vid(out, &format!("{name}.vid"), fit(fr, 176, 176, 176), &[0], 0, (176, 176), FPS, true)?;
+    let fps = fr.fps;
+    write_vid(out, &format!("{name}.vid"), fit(fr, 176, 176, 176), &[0], 0, (176, 176), fps, true)?;
     bink_wav(out, name, audio)
 }
 
 /// `webm`'s frames through `f` (each must come out `w`×`h`) as `<out>/<name>.vid`, BC3 with its alpha, no sound: the
-/// viewer's own clips of a custom lord's video (the backstory page's living portrait). Existing files are kept.
+/// viewer's own clips of a custom lord's video (the backstory page's living portrait). Kept while current.
 pub fn export_custom_as(webm: &Path, out: &Path, name: &str, (w, h): (usize, usize), f: impl Fn(Rgba) -> Rgba) -> Result<()> {
-    if out.join(format!("{name}.vid")).exists() { return Ok(()); }
+    if current(webm, out, name) { return Ok(()); }
     fs::create_dir_all(out)?;
     let (fr, _) = frames(webm)?;
-    write_vid(out, &format!("{name}.vid"), fr.map(|r| r.map(&f)), &[0], 0, (w, h), FPS, true)
+    let fps = fr.fps;
+    write_vid(out, &format!("{name}.vid"), fr.map(|r| r.map(&f)), &[0], 0, (w, h), fps, true)
 }
 
 /// A custom lord's story trailer (CustomLords/<lord>/trailer.webm, our extension, 30 fps like DE's media) as a
 /// `<out>/<name>.vid` for the full-screen slot at its own size (at most W×H, cut to whole 4×4 blocks; the viewer
-/// scales it up: a 720p trailer stays ~half the size of a W×H one) + `<name>.wav`. Existing files are kept.
+/// scales it up: a 720p trailer stays ~half the size of a W×H one) + `<name>.wav`, at its own frame rate. Kept while
+/// current.
 pub fn export_custom_full(webm: &Path, out: &Path, name: &str) -> Result<()> {
-    if out.join(format!("{name}.vid")).exists() { return Ok(()); }
+    if current(webm, out, name) { return Ok(()); }
     fs::create_dir_all(out)?;
     let (fr, audio) = frames(webm)?;
     let k = (W as f32 / fr.w as f32).min(H as f32 / fr.h as f32).min(1.0);
     let (w, h) = (((fr.w as f32 * k) as usize) / 4 * 4, ((fr.h as f32 * k) as usize) / 4 * 4);
-    write_vid(out, &format!("{name}.vid"), fit(fr, w, h, h), &[0], 0, (w, h), FPS, false)?;
+    let fps = fr.fps;
+    write_vid(out, &format!("{name}.vid"), fit(fr, w, h, h), &[0], 0, (w, h), fps, false)?;
     bink_wav(out, name, audio)
 }
 
@@ -351,4 +363,24 @@ pub fn export(data: &Path, font: &Path, out: &Path, progress: &mut dyn FnMut(usi
     // 5. the minimap's character / event / lord videos, the mission-over videos
     let at = total - more;
     export_more(data, out, &mut |d, _| progress(at + d, total))
+}
+
+#[test]
+fn custom_clip_keeps_its_rate_and_follows_its_source() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../re/lindschied/video/react_hit.webm"); // 24 fps
+    if !src.exists() { return; }
+    let dir = std::env::temp_dir().join(format!("shc-clip-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let webm = dir.join("react_hit.webm");
+    fs::copy(&src, &webm).unwrap();
+    export_custom(&webm, &dir, "clip").unwrap();
+    let b = fs::read(dir.join("clip.vid")).unwrap();
+    let u = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+    assert_eq!((u(12), u(16)), (24, 121), "its own 24 fps, every frame once");
+    assert!(current(&webm, &dir, "clip"));
+    // the lord's zip imported again: a newer clip is exported again
+    fs::File::options().write(true).open(&webm).unwrap().set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60)).unwrap();
+    assert!(!current(&webm, &dir, "clip"));
+    let _ = fs::remove_dir_all(&dir);
 }

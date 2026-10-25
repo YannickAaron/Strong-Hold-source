@@ -88,6 +88,22 @@ pub fn set_in_game(p: usize, c: Option<Custom>) {
     if let Some(c) = &c { export_videos(c); }
     if (1..9).contains(&p) { in_game_all()[p] = c; }
 }
+/// A loaded save's custom lords (a save holds no name): each AI on a custom slot (engine lord kind = p + 0x1d) is the
+/// installed lord whose 377 AIC fields its slot holds (`ai::set_extended_lord_config`; fields 1 and 0x114 are the
+/// engine's own). Without that his lines played the generic soldier clip and he never reacted. A custom slot with no
+/// installed match keeps what it had (a LAN guest's lord); every other player is no custom lord.
+#[cfg(feature = "live")]
+pub fn restore(m: &shc_sim::mem::Mem) {
+    if count() == 0 { rescan(); }
+    let all = list().clone();
+    for p in 1..9usize {
+        let kind = m.i32(0x188571c34 + p as u64 * 4);
+        if kind != p as i32 + 0x1d { if in_game(p).is_some() { set_in_game(p, None) } continue; }
+        let at = shc_sim::ai::F + kind as u64 * shc_sim::ai::CFG_STRIDE as u64;
+        let same = |c: &Custom| c.config.iter().take(377).enumerate().filter(|&(k, &v)| k != 1 && k != 0x114 && m.i32(at + k as u64 * 4) == v).count();
+        if let Some(c) = all.iter().max_by_key(|c| same(c)).filter(|c| same(c) + 2 >= c.config.len().min(377)) { set_in_game(p, Some(c.clone())) }
+    }
+}
 /// The reaction videos as minimap clips (video.rs plays .vid files only), off the UI thread (export_custom keeps the
 /// ones exported before).
 pub fn export_videos(c: &Custom) {
@@ -300,8 +316,15 @@ pub fn lordjson(text: &str) -> Option<Vec<i32>> {
         };
         cfg[k] = v as i32;
     }
+    // our extension, not DE's (DE skips the key): smart raids in Extended games, in the free field 299
+    cfg[SMART_RAIDS_FIELD] = lord.int("smart_raids") as i32;
     Some(cfg)
 }
+/// The AIC field of our `smart_raids` key (the sim's `ext::SMART_RAIDS`, a byte offset; the sim crate is only linked
+/// with the `live` feature).
+const SMART_RAIDS_FIELD: usize = 299;
+#[cfg(feature = "live")]
+const _: () = assert!(SMART_RAIDS_FIELD as i64 * 4 == shc_sim::ext::SMART_RAIDS);
 
 /// An .aivjson (AIVLoader.SaveData) as the DLL_ImportAIV blob.
 pub fn aivjson(text: &str) -> Option<Vec<i16>> {
@@ -521,6 +544,14 @@ mod tests {
         let (o, m) = (0x181b60e70u64, l.mem());
         let queued = [(m.i32(o + 4), cstr(m, o + 0x70)), (m.i32(o + 0x37 * 4), cstr(m, o + 0x14f * 4))];
         assert!(queued.iter().any(|(k, w)| *k == -2 && split(w) == Some((2, "TAUNT1".into()))), "the custom line: {queued:?}");
+        // a save of this game loaded again (another app run): the slot's config says which custom lord he is
+        let save = shc_sim::save::save_game(l.mem(), 0);
+        set_in_game(2, None);
+        let mut m2 = shc_sim::mem::Mem::default();
+        shc_sim::world::load_save(&mut m2, &save).unwrap();
+        restore(&m2);
+        assert_eq!(in_game(2).map(|c| c.name), Some("Test Lord".into()), "him again after the load");
+        assert!(in_game(3).is_none());
         set_in_game(2, None);
         let _ = std::fs::remove_dir_all(&dir);
     }

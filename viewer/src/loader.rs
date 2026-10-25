@@ -200,6 +200,7 @@ pub fn load_save(path: &std::path::Path) -> Result<shc_sim::mem::Mem, String> {
     let mut m = shc_sim::mem::Mem::default();
     shc_sim::world::load_save(&mut m, &file).map_err(|e| format!("{}: {e:?}", path.display()))?;
     crate::extended::after_load(&mut m, path);
+    crate::custom_lords::restore(&m); // which custom lord each custom slot is: his clips, voice and reactions
     Ok(m)
 }
 
