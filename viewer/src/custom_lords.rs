@@ -316,11 +316,12 @@ pub fn lordjson(text: &str) -> Option<Vec<i32>> {
         };
         cfg[k] = v as i32;
     }
-    // our extension, not DE's (DE skips the key): smart raids in Extended games, in the free field 299
+    // our extensions, not DE's (DE skips the keys), on whenever the lord plays (classic or Extended, sim/src/ext.rs):
+    // smart raids in the free field 299
     cfg[SMART_RAIDS_FIELD] = lord.int("smart_raids") as i32;
-    // and towers before battlements in Extended games, in the free field 300
+    // and towers before battlements, in the free field 300
     cfg[TOWERS_FIRST_FIELD] = lord.int("towers_first") as i32;
-    // and no selling of his own buildings in Extended games, in the free field 301
+    // and no selling or tearing down of his own buildings, in the free field 301
     cfg[KEEPS_BUILDINGS_FIELD] = lord.int("keeps_buildings") as i32;
     // and storming once his waiting siege army takes losses, in the free field 302
     cfg[STORMS_WHEN_HIT_FIELD] = lord.int("storms_when_hit") as i32;

@@ -288,7 +288,7 @@ fn bound(k: &str) -> String {
 const EXT_TEXT: [(&str, &str); 6] = [
     ("EXT_SASSANID_KNIGHT", "Sassanid Knight"),
     ("EXT_SASSANID_STABLE", "Sassanid Stable"),
-    ("EXT_RULES", "Extended rules"),
+    ("EXT_RULES", "Extended: Sassanid Knight"),
     ("EXT_NEEDS_BARRACKS", "You need a barracks to train Sassanid Knights."),
     ("EXT_SASSANID_KNIGHT_HELP", "Sassanid Knight: a lancer, lighter than a knight. After riding 6 tiles in one order its first blow strikes twice as hard. Strong against archers and horse archers, weak against pikemen."),
     ("EXT_SASSANID_STABLE_HELP", "Sassanid Stable: breeds horses like a stables and trains Sassanid Knights (60 gold, a pike, metal armour and a horse; needs a barracks)."),

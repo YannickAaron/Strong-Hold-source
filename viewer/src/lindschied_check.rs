@@ -581,7 +581,7 @@ fn review_demolish() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Smart raids (Extended rules, `shc_sim::ext::SMART_RAIDS`): 1v1, you idle as player 1 with wheat farms on every
+/// Smart raids (a custom lord's rule, `shc_sim::ext::SMART_RAIDS`; this test runs an Extended game): 1v1, you idle as player 1 with wheat farms on every
 /// spot round your keep (6..60 tiles) where the validator lets one stand, four archers beside every third far one.
 /// Over PROBE_TICKS (default 60 000; LINDSCHIED_LORDJSON for a variant, PROBE_MAP / PROBE_SEED): every farm his raid
 /// squads set out for is unguarded at that moment (no guard at it or on the straight way), raids cost at most a tenth

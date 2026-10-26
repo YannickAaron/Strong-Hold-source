@@ -253,8 +253,9 @@ impl Menu {
         self.label(ui, out, &format!("Mode: {}", crate::koth::mode_name(l.hill)), 669.0, 628.0, 16.0, 0.0, [0.905, 0.73, 0.402, 1.0]);
         self.label(ui, out, if edit { "click to change" } else { "set by the host" }, 990.0, 628.0, 12.0, 1.0, [0.905, 0.73, 0.402, 0.7]);
         self.glow(ui, out, &ui.text_of("TEXT_NEW_CTEXT_396"), 1016.0, 589.0, 280.0, None, (!lan).then_some(Act::Lobby(A::AdvOpen)), cursor);
-        // Extended rules (ours, shc_sim::ext): the host's to change in a LAN lobby, like the game mode
-        self.glow(ui, out, "Extended rules", 1016.0, 622.0, 280.0, Some(tick(l.extended)), self.mp_can_start().then_some(Act::Lobby(A::Extended)), cursor);
+        // Extended rules (ours, shc_sim::ext): the host's to change in a LAN lobby, like the game mode. The label names
+        // what it turns on (the user, 2026-10-26); custom lords' own rules don't depend on it
+        self.glow(ui, out, "Extended: Sassanid Knight", 1016.0, 622.0, 280.0, Some(tick(l.extended)), self.mp_can_start().then_some(Act::Lobby(A::Extended)), cursor);
     }
 
     /// The game mode picker (ours): dimmed screen, a panel with one card per mode (koth::MODES: picture, name, how you
