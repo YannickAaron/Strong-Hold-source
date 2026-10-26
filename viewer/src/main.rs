@@ -1715,9 +1715,11 @@ fn frame_clock_evens_out_late_frames() {
 }
 
 /// The cursor just left a `w`×`h` window with `c` its last position inside: the position pinned to the edge it went
-/// out through (within 8 logical px of it), so Cam::scroll keeps scrolling that way; None = it went elsewhere.
+/// out through, so Cam::scroll keeps scrolling that way; None = it went elsewhere (a window popped over it). A fast
+/// mouse moves tens of px between two events, and on a notch MacBook the full-screen window starts under the camera
+/// band, so the last position inside can be well short of the edge: within 64 logical px counts.
 fn edge_snap(c: [f32; 2], w: f32, h: f32) -> Option<[f32; 2]> {
-    let near = |v: f32, edge: f32| (v - edge).abs() <= 8.0;
+    let near = |v: f32, edge: f32| (v - edge).abs() <= 64.0;
     let x = if near(c[0], 0.0) { 0.0 } else if near(c[0], w - 1.0) { w - 1.0 } else { c[0] };
     let y = if near(c[1], 0.0) { 0.0 } else if near(c[1], h - 1.0) { h - 1.0 } else { c[1] };
     (x != c[0] || y != c[1]).then_some([x, y])
@@ -1726,6 +1728,7 @@ fn edge_snap(c: [f32; 2], w: f32, h: f32) -> Option<[f32; 2]> {
 #[test]
 fn cursor_leaving_through_an_edge_keeps_scrolling() {
     assert_eq!(edge_snap([500.0, 2.5], 1200.0, 800.0), Some([500.0, 0.0])); // out through the top (notch band)
+    assert_eq!(edge_snap([900.0, 47.0], 1200.0, 800.0), Some([900.0, 0.0])); // a fast mouse: 47 px inside, then out
     assert_eq!(edge_snap([1195.0, 300.0], 1200.0, 800.0), Some([1199.0, 300.0]));
     assert_eq!(edge_snap([3.0, 797.0], 1200.0, 800.0), Some([0.0, 799.0])); // a corner: both
     assert_eq!(edge_snap([500.0, 300.0], 1200.0, 800.0), None); // alt-tab, another window on top
@@ -1802,6 +1805,10 @@ impl ApplicationHandler for App {
         // like the original's first run (Unity): fullscreen at the screen's size. SHC_SHOT runs and --sheet keep the old
         // 1684×784 window (scripted SHC_INPUT coordinates assume it); SHC_WINDOW=WxH (logical px) or =full overrides.
         let attrs = Window::default_attributes().with_title("Strong Hold");
+        // full screen like a game: the menu bar and the dock stay hidden (AppKit's default auto-hides them, sliding
+        // the menu bar and the window title in whenever the cursor reaches the top edge, where edge scrolling lives)
+        #[cfg(target_os = "macos")]
+        let attrs = { use winit::platform::macos::WindowAttributesExtMacOS; attrs.with_borderless_game(true) };
         let fixed = std::env::var_os("SHC_SHOT").is_some() || self.sheet;
         let attrs = match std::env::var("SHC_WINDOW").ok().as_deref().map(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?)))) {
             Some(Some((w, h))) => attrs.with_inner_size(LogicalSize::new(w, h)).with_position(LogicalPosition::new(0, 0)),
@@ -2030,6 +2037,8 @@ impl App {
                 }
                 self.frame_times.push((now - self.last).as_secs_f32() * 1000.0);
                 self.last = now;
+                #[cfg(target_os = "macos")]
+                if self.frames % 240 == 0 { trace(|w, t| { let _ = writeln!(w, "P {t} {:#x}", crate::macos::presentation_bits()); }); }
                 if self.frame_times.len() == 60 {
                     let avg = self.frame_times.iter().sum::<f32>() / 60.0;
                     let max = self.frame_times.iter().cloned().fold(0.0, f32::max);

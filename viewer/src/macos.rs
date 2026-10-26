@@ -129,6 +129,11 @@ pub fn install_menu(pause_bg: bool, trackpad_pan: bool) {
     }
 }
 
+/// NSApp.presentationOptions as bits (SHC_TRACE `P` lines: does AppKit keep ours after a transition?).
+pub fn presentation_bits() -> usize {
+    MainThreadMarker::new().map_or(0, |mtm| NSApplication::sharedApplication(mtm).presentationOptions().bits())
+}
+
 /// A check-mark item's state.
 pub fn set_check(which: Check, on: bool) {
     CHECK_ITEMS.with(|c| if let Some(it) = &c.borrow()[which as usize] { unsafe { it.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff }) } });
