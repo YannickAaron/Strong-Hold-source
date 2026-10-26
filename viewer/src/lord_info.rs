@@ -50,6 +50,8 @@ impl Menu {
             // the book: name, title, the five rows
             self.label(ui, out, &c.name, 583.0, 112.0, 46.0, 0.5, INK);
             if let Some(t) = crate::custom_lords::help_text(&c, "TITLE") { self.label(ui, out, &t, 583.0, 166.0, 30.0, 0.5, RED); }
+            // his version (his .lordjson's own; Extras compares it with the lords release)
+            if !c.version.is_empty() { self.label(ui, out, &format!("Version {}", c.version), 583.0, 197.0, 18.0, 0.5, INK); }
             let mut y = PORTRAIT[1] + PORTRAIT[3] + 22.0;
             for k in 0..5 {
                 let Some(v) = crate::custom_lords::help(&c, k) else { continue };

@@ -22,6 +22,14 @@ fn short(p: &std::path::Path) -> String {
 }
 
 /// The lords column: the installed lords, then the published ones not installed here.
+/// A lord row's second line: his title and the installed version (his .lordjson's own, not the app's: the button
+/// beside it compares with the lords release); "Not installed" for a published lord not installed (None).
+fn row_sub(installed: Option<(Option<String>, &str)>) -> Option<String> {
+    let Some((title, version)) = installed else { return Some("Not installed".into()) };
+    let version = (!version.is_empty()).then(|| format!("Version {version}"));
+    match (title, version) { (Some(t), Some(v)) => Some(format!("{t} \u{2014} {v}")), (t, v) => t.or(v) }
+}
+
 fn lord_rows() -> Vec<(String, Option<crate::custom_lords::Custom>)> {
     let mut v: Vec<_> = (0..crate::custom_lords::count()).filter_map(crate::custom_lords::get).map(|c| (c.name.clone(), Some(c))).collect();
     for o in crate::lord_share::online() { if !v.iter().any(|r| r.0 == o.name) { v.push((o.name, None)); } }
@@ -116,8 +124,7 @@ impl Menu {
             }
             ui.img(out, "Face Border", p, [1.0; 4]);
             self.label(ui, out, name, x + 76.0, ry + 20.0, 22.0, 0.0, CREAM);
-            let title = c.as_ref().and_then(|c| crate::custom_lords::help_text(c, "TITLE"));
-            let sub = title.or_else(|| c.is_none().then(|| "Not installed".into()));
+            let sub = row_sub(c.as_ref().map(|c| (crate::custom_lords::help_text(c, "TITLE"), c.version.as_str())));
             if let Some(t) = sub { self.label(ui, out, &t, x + 76.0, ry + 44.0, 17.0, 0.0, DIM); }
             // published (lord_share.rs): download / update, or how far the download is
             let (bx, by) = (x + 410.0, ry + 10.0);
@@ -173,6 +180,16 @@ impl Menu {
         }
         self.button(ui, out, "Back", 840.0, 910.0, 240.0, 56.0, Act::Back, cursor);
     }
+}
+
+/// A lord row shows his title and installed version; a published lord not installed says so.
+#[test]
+fn lord_row_shows_version() {
+    assert_eq!(row_sub(Some((Some("the Cold".into()), "2026-10-26"))).as_deref(), Some("the Cold \u{2014} Version 2026-10-26"));
+    assert_eq!(row_sub(Some((None, "2026-10-26"))).as_deref(), Some("Version 2026-10-26"));
+    assert_eq!(row_sub(Some((Some("the Cold".into()), ""))).as_deref(), Some("the Cold"));
+    assert_eq!(row_sub(Some((None, ""))), None);
+    assert_eq!(row_sub(None).as_deref(), Some("Not installed"));
 }
 
 /// The main menu's Extras shield opens the screen (its buttons on it), Esc goes back; a .zip dropped on the window

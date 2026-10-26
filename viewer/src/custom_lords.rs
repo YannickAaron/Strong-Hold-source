@@ -29,6 +29,7 @@ pub struct Custom {
     pub avatar: Option<Vec<u8>>, // face.png (alpha) or avatar.png as 130² RGBA (the coat-of-arms face sheet's slot size)
     pub media: Option<PathBuf>,  // CustomMedia/<name>
     pub dir: PathBuf,            // CustomLords/<name>
+    pub version: String,         // our `version` key of the .lordjson ("" = none), shown in Extras and on his page
 }
 
 /// The lords found. Tests: one list per thread, as their profile folder is (parallel tests rescan and start games).
@@ -290,12 +291,15 @@ pub(crate) fn load(dir: &Path) -> Option<Custom> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).collect();
     files.sort();
     let ext = |p: &Path, e: &str| p.extension().is_some_and(|x| x.eq_ignore_ascii_case(e));
-    let config = files.iter().filter(|p| ext(p, "lordjson")).find_map(|p| lordjson(&std::fs::read_to_string(p).ok()?))?;
+    let (config, version) = files.iter().filter(|p| ext(p, "lordjson")).find_map(|p| {
+        let text = std::fs::read_to_string(p).ok()?;
+        Some((lordjson(&text)?, version(&text)))
+    })?;
     let aivs = files.iter().filter(|p| ext(p, "aivjson")).filter_map(|p| aivjson(&std::fs::read_to_string(p).ok()?)).collect();
     // face.png (our extension: the figure on alpha, the faces' stone wall shows around him) before DE's opaque avatar.png
     let avatar = ["face.png", "avatar.png"].iter().find_map(|n| files.iter().find(|p| p.file_name().is_some_and(|f| f.eq_ignore_ascii_case(n))).and_then(|p| avatar(&std::fs::read(p).ok()?)));
     let media = roots().into_iter().map(|r| r.join("CustomMedia").join(&name)).find(|d| d.is_dir());
-    Some(Custom { name, config, aivs, avatar, media, dir: dir.to_path_buf() })
+    Some(Custom { name, config, aivs, avatar, media, dir: dir.to_path_buf(), version })
 }
 
 /// A .lordjson (LordRoot { lord: NewAIC }) as the 377 AIC fields: EngineInterface.CreateAILordConfigData copies
@@ -350,6 +354,13 @@ const _: () = assert!(STORMS_WHEN_HIT_FIELD as i64 * 4 == shc_sim::ext::STORMS_W
 const MORE_HOUSES_FIELD: usize = 303;
 #[cfg(feature = "live")]
 const _: () = assert!(MORE_HOUSES_FIELD as i64 * 4 == shc_sim::ext::MORE_HOUSES);
+
+/// Our `version` key of a .lordjson (DE ignores it): the lord's own version, "2026-10-26" for a date, "" when it sets
+/// none. Not the app's: a lord is updated on its own (lord_share.rs, the `lords` release).
+pub fn version(text: &str) -> String {
+    let Some(j) = J::parse(text) else { return String::new() };
+    j.get("lord").unwrap_or(&j).str("version")
+}
 
 /// Our `min_app` key of a .lordjson ("0.5.0": the lord uses a feature older apps lack; DE ignores the key): the app
 /// version it needs, "" when it sets none. lord_share::import refuses a lord newer than the app.
@@ -440,6 +451,9 @@ mod tests {
         assert_eq!(split("rt_taunt_01.wav"), None);
         assert_eq!((mood("SK_TAUNT3"), mood("sk_defeat"), mood("THANK_GOODS"), mood("TAUNT1")), ("neutral", "sad", "happy", "angry"));
         assert_eq!(slug("Lord David von Lindschied"), "lord_david_von_lindschied");
+        // his own version (our key), "" without one
+        assert_eq!(version(r#"{"lord":{"version":"2026-10-26","attack_wall":1}}"#), "2026-10-26");
+        assert_eq!(version(r#"{"lord":{"attack_wall":1}}"#), "");
         // mood variants: never the one played last while another is there
         let c: Vec<String> = ["angry", "angry_2", "angry_3"].map(String::from).into();
         assert!((0..9).all(|r| pick(&c, |s| s == "angry_2", r).unwrap() != "angry_2"));

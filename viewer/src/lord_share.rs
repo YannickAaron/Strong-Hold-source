@@ -10,7 +10,8 @@
 //!
 //! Online: the public repo's `lords` release (scripts/publish_lord.sh) holds one zip per lord, labelled with the
 //! lord's name. Every import notes its zip's SHA-256 in `CustomLords/<Name>/.zip-sha256`; a lord whose online zip
-//! has another one has an update. Downloads are checked against GitHub's SHA-256 before they're imported.
+//! has another one has an update. Downloads are checked against GitHub's SHA-256 before they're imported. A lord's own
+//! `version` (.lordjson, our key) is what Extras and his page show; the lords release, not the app's, decides updates.
 //!
 //! LAN: a lobby's AI that is a custom lord travels as `custom_lords::BASE + i`, i into the lobby's `customs` table of
 //! (name, checksum); every machine maps that to its own list by name and checksum of the sim-relevant data (config
@@ -411,6 +412,7 @@ mod tests {
         assert!(l.join("trailer.webm").exists() && l.join("face.png").exists() && l.join("sprite/sprites.tsv").exists());
         assert_eq!(std::fs::read_dir(&m).unwrap().count(), 66, "44 wav (30 lines + lobby add / kick + 12 reactions) + 20 webm + text.txt + react.txt");
         let c = custom_lords::load(&l).expect("loads");
+        assert!(!c.version.is_empty(), "his zip carries his version");
         assert_eq!(c.aivs.len(), 8);
     }
 
