@@ -88,7 +88,7 @@ fn tag_name(json: &str) -> Option<String> { json_str(json, "tag_name") }
 
 /// The string value of top-level-ish `"key"` in a JSON text, unescaped (\n, \", \\, \uXXXX incl. surrogate pairs).
 /// ponytail: the first `"key":` anywhere wins, which is enough for GitHub's release object.
-fn json_str(json: &str, key: &str) -> Option<String> {
+pub(crate) fn json_str(json: &str, key: &str) -> Option<String> {
     let pat = format!("\"{key}\"");
     let rest = json[json.find(&pat)? + pat.len()..].trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
     let (mut out, mut it) = (String::new(), rest.chars());

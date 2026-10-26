@@ -195,9 +195,9 @@ pub fn pick_zip() -> Option<PathBuf> { None }
 
 const LORDS: &str = "https://api.github.com/repos/YannickAaron/Strong-Hold/releases/tags/lords";
 
-/// A published lord: its name (the asset's label) and its zip.
+/// A published lord: its name (the asset's label), its zip, and its version from the release notes ("" = none listed).
 #[derive(Clone, Debug, PartialEq)]
-pub struct Online { pub name: String, pub zip: crate::update::Asset }
+pub struct Online { pub name: String, pub zip: crate::update::Asset, pub version: String }
 
 /// The published lords, once fetched (empty offline / none published); the lord downloading now and how far.
 static ONLINE: Mutex<Vec<Online>> = Mutex::new(Vec::new());
@@ -216,11 +216,28 @@ pub fn fetch_online() {
     });
 }
 
-/// The lords: zips with a label (publish_lord.sh sets the lord's name); any other file of the release is not one.
+/// The lords: zips with a label (publish_lord.sh sets the lord's name); any other file of the release is not one. Their
+/// versions come from the release notes (`versions_of`).
 fn online_of(json: &str) -> Vec<Online> {
+    let versions = crate::update::json_str(json, "body").map(|b| versions_of(&b)).unwrap_or_default();
     crate::update::assets(json).into_iter().filter(|a| a.file.to_ascii_lowercase().ends_with(".zip") && !a.label.trim().is_empty())
-        .map(|zip| Online { name: zip.label.trim().to_string(), zip }).collect()
+        .map(|zip| {
+            let name = zip.label.trim().to_string();
+            Online { version: versions.iter().find(|v| v.0 == name).map(|v| v.1.clone()).unwrap_or_default(), name, zip }
+        })
+        .collect()
 }
+
+/// The lords release's notes list each lord's version after a "Versions:" line, one "- <name>: <version>" per lord
+/// (scripts/publish_lord.sh keeps it): the latest version Extras shows without downloading a zip.
+fn versions_of(body: &str) -> Vec<(String, String)> {
+    body.lines().map(str::trim).skip_while(|l| *l != "Versions:").skip(1)
+        .filter_map(|l| { let (n, v) = l.strip_prefix("- ")?.rsplit_once(": ")?; Some((n.trim().to_string(), v.trim().to_string())) })
+        .collect()
+}
+
+/// Lord `name`'s latest version in the lords release ("" = not listed or not fetched).
+pub fn latest(name: &str) -> String { online().into_iter().find(|o| o.name == name).map(|o| o.version).unwrap_or_default() }
 
 pub fn online() -> Vec<Online> { ONLINE.lock().unwrap().clone() }
 
@@ -379,7 +396,7 @@ mod tests {
         let sha = crate::update::sha256(&f).unwrap();
         assert_eq!(std::fs::read_to_string(root.join("CustomLords/Lord T").join(SHA_FILE)).unwrap(), sha, "notes the zip it came from");
         // published: the same zip = up to date, another one = update, not installed = get
-        let pub_ = |sha: &str| Online { name: "Lord T".into(), zip: crate::update::Asset { sha: sha.into(), ..Default::default() } };
+        let pub_ = |sha: &str| Online { name: "Lord T".into(), zip: crate::update::Asset { sha: sha.into(), ..Default::default() }, version: String::new() };
         *ONLINE.lock().unwrap() = vec![pub_(&sha)];
         assert_eq!(state_in("Lord T", &root), Some(State::Current));
         assert_eq!(state_in("Lord T", &d.join("elsewhere")), Some(State::Get));
@@ -461,6 +478,17 @@ mod tests {
         assert_eq!(v, ["Lady Anne-Marie"]);
     }
 
+    /// Each lord's latest version comes from the release notes' "Versions:" list (publish_lord.sh); lines before it and
+    /// lords it doesn't name have none.
+    #[test]
+    fn online_versions() {
+        let json = r#"{"tag_name":"lords","assets":[{"name":"x.zip","label":"Lady Anne-Marie","size":5,"digest":"sha256:bb","browser_download_url":"https://e/x.zip"},
+            {"name":"d.zip","label":"Lord David von Lindschied","size":5,"digest":"sha256:aa","browser_download_url":"https://e/d.zip"}],
+            "tarball_url":"https://e/t","body":"Custom lords for Strong Hold.\r\n- not a lord: 9\r\n\r\nVersions:\r\n- Lord David von Lindschied: 1.5\r\n"}"#;
+        let v: Vec<(String, String)> = online_of(json).into_iter().map(|o| (o.name, o.version)).collect();
+        assert_eq!(v, [("Lady Anne-Marie".to_string(), String::new()), ("Lord David von Lindschied".to_string(), "1.5".to_string())]);
+    }
+
     /// Lord David's published zip (network, 34 MB): downloaded, checked and imported, then up to date.
     /// `cargo test --release lord_from_github -- --ignored`
     #[test]
@@ -468,7 +496,7 @@ mod tests {
     fn lord_from_github() {
         let json = crate::update::get_json("https://api.github.com/repos/YannickAaron/Strong-Hold/releases/tags/v0.12.1").unwrap();
         let zip = crate::update::assets(&json).into_iter().find(|a| a.file == "Lord-David-von-Lindschied.zip").expect("published");
-        let o = Online { name: "Lord David von Lindschied".into(), zip }; // v0.12.1's zip has no label (publish_lord.sh sets it)
+        let o = Online { name: "Lord David von Lindschied".into(), zip, version: String::new() }; // v0.12.1's zip has no label (publish_lord.sh sets it)
         let d = dir("online");
         let f = d.join(&o.zip.file);
         crate::update::download(&o.zip, &f, &|_| {}).unwrap();

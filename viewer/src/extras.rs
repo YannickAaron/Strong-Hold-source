@@ -10,7 +10,9 @@ use super::*;
 pub enum A { Open, Folder, Check, Notes, Import, Replace(bool), Lord(u8), Maps(bool), Map(u8), MapsFolder }
 
 /// Lords listed (more: "+n more").
-const SHOWN: usize = 6;
+const SHOWN: usize = 5;
+/// A lord row's height: name, title, versions.
+const ROW: f32 = 84.0;
 const OK: [f32; 4] = [0.45, 0.85, 0.35, 1.0];
 const BAD: [f32; 4] = [1.0, 0.4, 0.3, 1.0];
 const DIM: [f32; 4] = [0.75, 0.72, 0.6, 1.0];
@@ -22,12 +24,17 @@ fn short(p: &std::path::Path) -> String {
 }
 
 /// The lords column: the installed lords, then the published ones not installed here.
-/// A lord row's second line: his title and the installed version (his .lordjson's own, not the app's: the button
-/// beside it compares with the lords release); "Not installed" for a published lord not installed (None).
-fn row_sub(installed: Option<(Option<String>, &str)>) -> Option<String> {
-    let Some((title, version)) = installed else { return Some("Not installed".into()) };
-    let version = (!version.is_empty()).then(|| format!("Version {version}"));
-    match (title, version) { (Some(t), Some(v)) => Some(format!("{t} \u{2014} {v}")), (t, v) => t.or(v) }
+/// A lord row's version line: the installed version (None = not installed, "" = his zip names none) against the
+/// latest in the lords release ("" = not listed / offline); true when a newer one is there (drawn gold).
+fn version_line(installed: Option<&str>, latest: &str) -> (String, bool) {
+    let known = |v: &str| if v.is_empty() { "no version".to_string() } else { v.to_string() };
+    match installed {
+        None if latest.is_empty() => ("Not installed".into(), false),
+        None => (format!("Not installed \u{2014} latest {latest}"), false),
+        Some(i) if latest.is_empty() => (format!("Installed: {}", known(i)), false),
+        Some(i) if i == latest => (format!("Installed: {i} \u{2014} the latest"), false),
+        Some(i) => (format!("Installed: {} \u{2014} {latest} available", known(i)), true),
+    }
 }
 
 fn lord_rows() -> Vec<(String, Option<crate::custom_lords::Custom>)> {
@@ -117,15 +124,18 @@ impl Menu {
         if rows.is_empty() { self.para(ui, out, "None installed yet.", x, 296.0, 540.0, 20.0, DIM); }
         let getting = crate::lord_share::GETTING.lock().unwrap().clone();
         for (k, (name, c)) in rows.iter().enumerate().take(SHOWN) {
-            let (ry, p) = (296.0 + 66.0 * k as f32, self.r(x, 296.0 + 66.0 * k as f32, 60.0, 60.0));
+            let (ry, p) = (296.0 + ROW * k as f32, self.r(x, 296.0 + ROW * k as f32, 60.0, 60.0));
             ui.img(out, "Face Background Generic", p, [1.0; 4]);
             if let Some(c) = c {
                 if !crate::custom_lords::draw_face(out, c, p, [1.0; 4]) { ui.img(out, FACES.iter().find(|f| f.1 == crate::custom_lords::parent(c)).map_or("", |f| f.0), p, [1.0; 4]); }
             }
             ui.img(out, "Face Border", p, [1.0; 4]);
-            self.label(ui, out, name, x + 76.0, ry + 20.0, 22.0, 0.0, CREAM);
-            let sub = row_sub(c.as_ref().map(|c| (crate::custom_lords::help_text(c, "TITLE"), c.version.as_str())));
-            if let Some(t) = sub { self.label(ui, out, &t, x + 76.0, ry + 44.0, 17.0, 0.0, DIM); }
+            self.label(ui, out, name, x + 76.0, ry + 18.0, 22.0, 0.0, CREAM);
+            if let Some(t) = c.as_ref().and_then(|c| crate::custom_lords::help_text(c, "TITLE")) { self.label(ui, out, &t, x + 76.0, ry + 41.0, 16.0, 0.0, DIM); }
+            // installed against the lords release's latest (his own version, not the app's)
+            let latest = crate::lord_share::latest(name);
+            let (line, newer) = version_line(c.as_ref().map(|c| c.version.as_str()), &latest);
+            self.label(ui, out, &line, x + 76.0, ry + 63.0, 16.0, 0.0, if newer { GOLD } else { DIM });
             // published (lord_share.rs): download / update, or how far the download is
             let (bx, by) = (x + 410.0, ry + 10.0);
             match (getting.as_ref().filter(|g| &g.0 == name), crate::lord_share::state(name)) {
@@ -136,7 +146,7 @@ impl Menu {
                 (None, None) => {}
             }
         }
-        if rows.len() > SHOWN { self.label(ui, out, &format!("+{} more", rows.len() - SHOWN), x, 296.0 + 66.0 * SHOWN as f32 + 10.0, 18.0, 0.0, DIM); }
+        if rows.len() > SHOWN { self.label(ui, out, &format!("+{} more", rows.len() - SHOWN), x, 296.0 + ROW * SHOWN as f32, 18.0, 0.0, DIM); }
         let y = 720.0;
         let pending = crate::lord_share::PENDING.lock().unwrap().clone();
         if let Some((_, names)) = pending {
@@ -182,14 +192,15 @@ impl Menu {
     }
 }
 
-/// A lord row shows his title and installed version; a published lord not installed says so.
+/// A lord row says which version is installed and which is the latest.
 #[test]
 fn lord_row_shows_version() {
-    assert_eq!(row_sub(Some((Some("the Cold".into()), "2026-10-26"))).as_deref(), Some("the Cold \u{2014} Version 2026-10-26"));
-    assert_eq!(row_sub(Some((None, "2026-10-26"))).as_deref(), Some("Version 2026-10-26"));
-    assert_eq!(row_sub(Some((Some("the Cold".into()), ""))).as_deref(), Some("the Cold"));
-    assert_eq!(row_sub(Some((None, ""))), None);
-    assert_eq!(row_sub(None).as_deref(), Some("Not installed"));
+    assert_eq!(version_line(Some("1.5"), "1.5"), ("Installed: 1.5 \u{2014} the latest".into(), false));
+    assert_eq!(version_line(Some("1.4"), "1.5"), ("Installed: 1.4 \u{2014} 1.5 available".into(), true));
+    assert_eq!(version_line(Some(""), "1.5"), ("Installed: no version \u{2014} 1.5 available".into(), true));
+    assert_eq!(version_line(Some("1.5"), ""), ("Installed: 1.5".into(), false));
+    assert_eq!(version_line(None, "1.5"), ("Not installed \u{2014} latest 1.5".into(), false));
+    assert_eq!(version_line(None, ""), ("Not installed".into(), false));
 }
 
 /// The main menu's Extras shield opens the screen (its buttons on it), Esc goes back; a .zip dropped on the window
