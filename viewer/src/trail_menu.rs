@@ -1455,7 +1455,9 @@ impl Menu {
                 if m.teams[a] == 0 || m.teams[a] != m.teams[b] { ui.img_fit(out, "UI-Buttons S041", self.r(x - 12.0, 230.0, 40.0, 40.0), WHITE); } // centred in the row
                 x += 16.0;
             }
-            ui.img_fit(out, "Lord Case", self.r(x, 150.0, 160.0, 200.0), WHITE);
+            // Image Width 160, top aligned: 235×330 px → 160 × 224.7. In a 200 high box it came out 142 wide, its ribbon
+            // up under the face
+            ui.img_fit(out, "Lord Case", self.r(x, 150.0, 160.0, 160.0 * 330.0 / 235.0), WHITE);
             let face = self.r(x + 32.0, 201.0, 96.0, 96.0);
             ui.img(out, FACE_BACKGROUNDS[k], face, WHITE);
             if k == 0 {
@@ -1469,7 +1471,9 @@ impl Menu {
             ui.img_fit(out, "UISprites I024", self.r(x + 63.5, 163.0, 33.0, 22.0), WHITE);
             self.label(ui, out, &(start_gold(m.starting_level, m.fairness, k == 0) * mult).to_string(), x + 80.0, 193.0, 13.0, 0.5, GOLD);
             let name = if k == 0 { player_name() } else { skirmish::LORDS.get((m.lords[k] - 1) as usize).copied().unwrap_or("").to_string() };
-            self.label(ui, out, &name, x + 80.0, 306.0, 13.0, 0.5, INK); // 10 px in the original: too small to read
+            // on the case's ribbon under the face (TextBlock Margin 0,152,0,50, centred in the 224.7 high grid: y 163 of
+            // it); 13 px (10 px in the original: too small to read), a long name a little smaller
+            self.label(ui, out, &name, x + 80.0, 150.0 + 163.0, if name.chars().count() > 15 { 11.0 } else { 13.0 }, 0.5, INK);
             x += 144.0;
         }
         // radar block (260 wide) + Sands times (260, 100 apart), centred at y 405

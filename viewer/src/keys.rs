@@ -153,7 +153,7 @@ pub fn game_action(f: &str, c: &Ctx) -> Option<[i32; 3]> {
         "Cathedral" => (!c.sh1_centre && !panel(&[96])).then_some([1047, 38, -1]),
         "Signpost" | "Lord" | "CycleLord" | "AllyToggle" | "MPPing" => Some([k, -1, 0]),
         // a barracks / merc post / stockade / guild / cathedral panel: the number keys pick its assembly-point
-        // tools there. ponytail: those tools aren't ported, so the key does nothing in those panels
+        // tools there (main.rs `hotkey`: live::rally_key), not a control group
         _ if f.starts_with("SelectClan") => (!(c.mode == 16 && matches!(c.sub, 1 | 23 | 24 | 44 | 63 | 96))).then_some([k, -1, 0]),
         _ if f.starts_with("GroupTroops") || f.starts_with("GotoBookmark") => Some([k, -1, 0]),
         _ if f.starts_with("SetBookmark") => Some(c.centre.map_or([k, -1, -1], |[x, y]| [k, x, y])),

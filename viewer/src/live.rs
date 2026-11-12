@@ -11,6 +11,11 @@ use crate::replay::Rec;
 /// radar = whole map. Smaller radars (`Live::radar_n`) are scaled up to this.
 pub const RADAR_N: i32 = 796;
 
+/// Options' "radar zoomed out" key. Ours: on unless the player turns it off, so a game starts with the whole map on
+/// the minimap (DE starts on a 124-tile patch around the camera). A key of our own: settings.cfg files written before
+/// carry DE's "RadarDefaultZoomedOut:False" although nobody chose it.
+pub const RADAR_WHOLE: &str = "NativeRadarWholeMap";
+
 /// GameMap.resetRadarZoom at a map start: Options' "radar zoomed out" (Settings_RadarDefaultZoomedOut) = the whole
 /// map (getMaxRadarSize: tilemapSize − 4, at most 800), else 124 px around the camera (capRadarZoom: never past the
 /// whole map). `tilemap` ≤ 4 (no size read): an 800 map's.
@@ -84,9 +89,34 @@ pub fn ported(_: i32) -> bool { false }
 pub fn is_drag(tool: i32) -> bool { shc_sim::mapaction::is_drag(tool) }
 
 /// The assembly-point flag tools (eMappers MAPPER_PLACE_ASSEMBLY_POINT*) of a building panel (app sub mode): barracks,
-/// mercenary post, Bedouin stockade, engineers' and tunnellers' guild, as KeyManager picks them there.
+/// mercenary post, Bedouin stockade, engineers' and tunnellers' guild, cathedral, as KeyManager picks them there.
 pub fn rally_tools(sub: i32) -> Vec<i32> {
-    match sub { 1 => (332..=338).collect(), 44 => (360..=366).collect(), 63 => (391..=398).collect(), 23 => vec![367, 368], 24 => vec![369], _ => vec![] }
+    match sub { 1 => (332..=338).collect(), 44 => (360..=366).collect(), 63 => (391..=398).collect(), 23 => vec![367, 368], 24 => vec![369], 96 => vec![370], _ => vec![] }
+}
+
+/// KeyManager's number keys (SelectClan `n`, key "0" first) with such a panel open: the flag tool of one troop type,
+/// in the original's order per panel (barracks, mercenary post, stockade, the guilds, the cathedral).
+pub fn rally_key(sub: i32, n: usize) -> Option<i32> {
+    let t: &[i32] = match sub {
+        1 => &[332, 334, 335, 333, 336, 337, 338],
+        44 => &[360, 362, 364, 363, 361, 366, 365],
+        63 => &[395, 397, 391, 396, 398, 393, 392, 394],
+        23 => &[367, 368],
+        24 => &[369],
+        96 => &[370],
+        _ => &[],
+    };
+    t.get(n).copied()
+}
+
+#[test]
+fn rally_keys_cover_each_panel() {
+    for sub in [1, 44, 63, 23, 24, 96] {
+        let mut keys: Vec<i32> = (0..9).filter_map(|n| rally_key(sub, n)).collect();
+        keys.sort();
+        assert_eq!(keys, rally_tools(sub), "panel {sub}: one key per flag tool");
+    }
+    assert_eq!(rally_key(4, 0), None); // a granary has no flag
 }
 #[cfg(not(feature = "live"))]
 pub fn is_drag(_: i32) -> bool { false }
@@ -153,7 +183,7 @@ mod sim {
                 }
             }
             // GameMap.resetRadarZoom by tilemapSize (0x1860ab524), then GameAction 0x406 (ResizeRadarMapBuffer)
-            let radar_n = radar_size(m.i32(0x1860ab524), crate::menu::opt("RadarDefaultZoomedOut", false));
+            let radar_n = radar_size(m.i32(0x1860ab524), crate::menu::opt(RADAR_WHOLE, true));
             shc_sim::hudstate::set_radar_size(&mut m, radar_n);
             // FatControler's start: Options' "show planned moat" (Settings_ShowPlannedMoat) = GameAction ShowPlannedMoat
             // 1067 (1, 1); the draw pass then shows dug-to-be moat tiles (sim draw.rs)
@@ -332,6 +362,8 @@ mod sim {
             let hill = self.hill.as_ref().or(match &self.tap { Some(crate::game_replay::Tap::Play(p)) => p.hill.as_ref(), _ => None });
             let names = self.net.as_ref().map_or(vec![], |n| n.status().lock().unwrap().players.clone());
             h.lords.who = crate::endgame::player_names(&self.m, self.me, &names); // the standings panel's names
+            // a LAN game's humans: their coats of arms (the who-owns line, the allies panel)
+            if let Some(n) = &self.net { for (p, c) in &n.status().lock().unwrap().coa { if let Some(s) = h.lords.coa.get_mut(*p as usize) { *s = c.clone(); } } }
             if let Some(hill) = hill { h.hill = Some(crate::koth::board(hill, &self.m, self.me, &names)); }
             h
         }
@@ -694,7 +726,7 @@ mod sim {
         assert_eq!([radar_step(124, 64, 804), radar_step(764, 64, 804), radar_step(124, -64, 804), radar_step(188, 64, 200)], [188, 800, 124, 196]);
         let dir = std::env::temp_dir().join(format!("shc-radar-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("settings.cfg"), "||SETTINGS||\nRadarDefaultZoomedOut:True\nMoat:True\n||SETTINGS||\n").unwrap();
+        std::fs::write(dir.join("settings.cfg"), "||SETTINGS||\nNativeRadarWholeMap:True\nMoat:True\n||SETTINGS||\n").unwrap();
         crate::skirmish::set_test_profile(&dir);
         let Ok(m) = crate::skirmish::start_mission(1, 1) else { return }; // needs the game's Maps folder
         let mut l = Live::from_mem(m);
@@ -1040,7 +1072,8 @@ pub struct EdIn { pub tool: i32, pub brush: i32, pub state: i32, pub x: i32, pub
 /// the viewer draws in, screen px = window. `Press(world, screen, window world rect)`: left press on the map with no
 /// build tool (the rect gives the on-screen units); `Release`: left release after such a press; `Right(down)`;
 /// `Cursor(world, screen, [shift, ctrl, alt])`: every cursor move / modifier change.
-pub enum TroopIn { Press([f32; 2], [f32; 2], [f32; 4]), Release, Right(bool), Cursor([f32; 2], [f32; 2], [bool; 3]) }
+/// `Drawn`: where the viewer draws each unit right now (id, base point in world px): between two tiles while it walks.
+pub enum TroopIn { Press([f32; 2], [f32; 2], [f32; 4]), Release, Right(bool), Cursor([f32; 2], [f32; 2], [bool; 3]), Drawn(Vec<(i32, [f32; 2])>) }
 
 /// Game speed = sim ticks per second (Director.SetEngineFrameRate: engineFrameTime = 1 / speed), 10..90 in steps
 /// of 5, default 40 (ConfigSettings.Default_GameSpeed). At ≤ 20 the C# timer runs 2-4× faster and only every
@@ -1105,6 +1138,7 @@ pub struct Thread {
     pub keys: [bool; 3],           // shift, ctrl, alt held (DLL_RunTick)
     rect: std::cell::Cell<[f32; 4]>, // the window's world-px rect last sent with Cmd::View (on-screen units)
     sent: ([f32; 2], [f32; 2], [bool; 3]), // the last TroopIn::Cursor
+    drawn_sent: std::time::Instant,        // when the last TroopIn::Drawn went out
     pub cursor: Option<Rec>,       // the sim's cursor sprite of the last frame (draw record type 5), if any
     pub replay: bool,              // playing a replay: only Run / View / Step / Radar reach the sim (game_replay.rs)
     pub stats: std::sync::Arc<std::sync::Mutex<crate::stats::History>>, // per-player values over time (stats.rs), sampled on the sim thread
@@ -1199,7 +1233,7 @@ impl Thread {
                             crate::military::after_action(l.mem(), a, r);
                         }
                         #[cfg(feature = "live")]
-                        Ok(Cmd::Troops(t)) => { input = true; l.troop_event(t) }
+                        Ok(Cmd::Troops(t)) => { input |= !matches!(t, TroopIn::Drawn(_)); l.troop_event(t) } // Drawn alone: nothing to redraw
                         #[cfg(not(feature = "live"))]
                         Ok(Cmd::Troops(_)) => {}
                         Ok(Cmd::Radar(x, y)) => { input = true; goto = l.radar_tile(x, y); }
@@ -1300,11 +1334,13 @@ impl Thread {
             }
         });
         Self { tx, rx, tick, rot, verdict, tool: None, hover_at: [i32::MIN; 2], mouse_at: [i32::MIN; 2], press_w: None,
-            keys: [false; 3], rect: Default::default(), sent: ([f32::NAN; 2], [0.0; 2], [false; 3]), cursor: None, stats, ed, saved, replay }
+            keys: [false; 3], rect: Default::default(), sent: ([f32::NAN; 2], [0.0; 2], [false; 3]), drawn_sent: std::time::Instant::now(), cursor: None, stats, ed, saved, replay }
     }
 
-    /// Left press on the map with no build tool at world px `w` / window px `s` (DLL_TroopSelection state 1).
-    pub fn press(&mut self, w: [f32; 2], s: [f32; 2]) {
+    /// Left press on the map with no build tool at world px `w` / window px `s` (DLL_TroopSelection state 1). `drawn`:
+    /// the units' drawn base points (replay::World::drawn), so the press picks a walking unit where it shows.
+    pub fn press(&mut self, w: [f32; 2], s: [f32; 2], drawn: &std::collections::HashMap<i32, [f32; 2]>) {
+        self.send_drawn(drawn);
         self.press_w = Some(w);
         self.send(Cmd::Troops(TroopIn::Press(w, s, self.rect.get())));
     }
@@ -1312,10 +1348,17 @@ impl Thread {
     /// Left release after `press` (state 3).
     pub fn release(&mut self) { if self.press_w.take().is_some() { self.send(Cmd::Troops(TroopIn::Release)); } }
 
-    /// The cursor at world px `w` / window px `s` (+ the held modifiers): sent when anything changed.
-    pub fn cursor_at(&mut self, w: [f32; 2], s: [f32; 2]) {
+    /// The cursor at world px `w` / window px `s` (+ the held modifiers): sent when anything changed. The units' drawn
+    /// places go with it, and every 100 ms while the cursor rests (they walk on under it).
+    pub fn cursor_at(&mut self, w: [f32; 2], s: [f32; 2], drawn: &std::collections::HashMap<i32, [f32; 2]>) {
         let now = (w, s, self.keys);
+        if now != self.sent || self.drawn_sent.elapsed().as_millis() > 100 { self.send_drawn(drawn); }
         if now != self.sent { self.sent = now; self.send(Cmd::Troops(TroopIn::Cursor(w, s, self.keys))); }
+    }
+
+    fn send_drawn(&mut self, drawn: &std::collections::HashMap<i32, [f32; 2]>) {
+        self.drawn_sent = std::time::Instant::now();
+        self.send(Cmd::Troops(TroopIn::Drawn(drawn.iter().map(|(&i, &p)| (i, p)).collect())));
     }
 
     pub fn verdict(&self) -> Option<Verdict> { self.verdict.lock().unwrap().clone() }

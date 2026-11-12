@@ -1059,6 +1059,7 @@ pub struct Status {
     pub waiting_for: Vec<i32>,
     pub waiting_since: Option<Instant>,
     pub players: Vec<(i32, String)>,
+    pub coa: Vec<(i32, String)>, // the humans' coats of arms (player, AvatarDesign code)
     pub chat: Vec<(i32, String)>,
     pub say: Vec<(String, u32)>, // lines (insults "\u{1}" + n) and their recipients' mask
     pub me: i32,
@@ -1154,7 +1155,8 @@ impl Lockstep {
         let active = net.lobby.player_numbers();
         let players = net.lobby.humans.iter().enumerate().map(|(k, h)| (net.lobby.player_of(k), h.name.clone())).collect();
         let teams = net.lobby.humans.iter().enumerate().map(|(k, h)| (net.lobby.player_of(k), h.team)).collect();
-        let status = Arc::new(Mutex::new(Status { players, teams, me: net.me, chat: net.chat.clone(), delay, ..Default::default() }));
+        let coa = net.lobby.humans.iter().enumerate().map(|(k, h)| (net.lobby.player_of(k), h.coa.clone())).collect();
+        let status = Arc::new(Mutex::new(Status { players, coa, teams, me: net.me, chat: net.chat.clone(), delay, ..Default::default() }));
         let through = active.iter().map(|&p| (p, tick + delay - 1)).collect();
         let (spectator, speed) = (net.me >= SPECTATOR, net.lobby.speed);
         let mut ls = Lockstep { me: net.me, spectator, net, delay, adaptive: true, resync: true, hash_every: HASH_EVERY, rejoin_wait: REJOIN_WAIT, promised: tick + delay - 1,

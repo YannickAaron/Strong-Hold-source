@@ -397,10 +397,46 @@ impl Cam {
     }
 }
 
+/// A `w`² BGRA picture into the radar texture's top-left corner, with a 2×2-averaged mip under each level: the minimap
+/// shows up to 796 px on ~190, which one bilinear tap per pixel turns into noise.
+fn write_radar(queue: &wgpu::Queue, tex: &wgpu::Texture, px: &[u8], w: u32) {
+    let (mut px, mut w) = (px.to_vec(), w);
+    for level in 0..tex.mip_level_count() {
+        queue.write_texture(wgpu::TexelCopyTextureInfo { texture: tex, mip_level: level, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All }, &px,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: None }, wgpu::Extent3d { width: w, height: w, depth_or_array_layers: 1 });
+        (px, w) = (halve(&px, w as usize), w / 2);
+    }
+}
+
+/// `px` (`w`² × 4 bytes) at half the size: each pixel the mean of its 2×2 block.
+/// ponytail: a pure white pixel wins its block, so the 1 px camera rectangle the sim paints stays a white line
+fn halve(px: &[u8], w: usize) -> Vec<u8> {
+    let h = w / 2;
+    let mut out = Vec::with_capacity(h * h * 4);
+    for y in 0..h {
+        for x in 0..h {
+            let at = |dx: usize, dy: usize| { let i = ((2 * y + dy) * w + 2 * x + dx) * 4; [px[i], px[i + 1], px[i + 2], px[i + 3]] };
+            let b = [at(0, 0), at(1, 0), at(0, 1), at(1, 1)];
+            if b.iter().any(|p| p[..3] == [255; 3]) { out.extend([255; 4]); continue; }
+            out.extend((0..4).map(|c| ((b.iter().map(|p| p[c] as u32).sum::<u32>() + 2) / 4) as u8));
+        }
+    }
+    out
+}
+
+#[test]
+fn radar_mip_average() {
+    let px: Vec<u8> = [[10u8, 20, 30, 255], [30, 40, 50, 255], [50, 60, 70, 255], [70, 80, 90, 255]].concat(); // one 2×2 block
+    assert_eq!(halve(&px, 2), [40, 50, 60, 255]);
+    let line: Vec<u8> = [[255u8; 4], [0, 0, 0, 255], [0, 0, 0, 255], [0, 0, 0, 255]].concat(); // a camera-rectangle pixel
+    assert_eq!(halve(&line, 2), [255; 4]);
+}
+
 /// MainControls.computeMouseMapPosition: building heights catch the cursor unless a build tool is held, except the
 /// tools that are placed on buildings (tower engines, flags, brazier, …: the sub-actions it lists).
 fn bld_pick(mapper: Option<i32>) -> bool {
-    mapper.is_none_or(|m| matches!(m, 120..=129 | 148 | 210 | 211 | 332..=338 | 360..=370 | 391..=398))
+    // 0x27: the delete tool is CurrentAction 6, not a placement (5), so the building under the cursor counts
+    mapper.is_none_or(|m| matches!(m, 0x27 | 120..=129 | 148 | 210 | 211 | 332..=338 | 360..=370 | 391..=398))
 }
 
 struct App {
@@ -1284,10 +1320,11 @@ impl App {
                     let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
                     self.cam.centre_on(sz.width, sz.height, &p.world, f.rot, x, y);
                 }
-                if let (Some(r), Some(h), Some(u)) = (f.radar, self.gfx.as_ref().and_then(|g| g.hud.as_ref().map(|h| (g, h))), self.ui.as_mut()) {
+                // not under a menu: its map preview (lobby, briefing, Load Game) lives in the same texture's corner, and
+                // a briefing shown over a running game got the minimap's corner instead (a blown-up patch of the map)
+                if let (Some(r), Some(h), Some(u), None) = (f.radar, self.gfx.as_ref().and_then(|g| g.hud.as_ref().map(|h| (g, h))), self.ui.as_mut(), &self.menu) {
                     let (g, h) = h;
-                    g.queue.write_texture(h.radar.as_image_copy(), bytemuck::cast_slice(&r),
-                        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(live::RADAR_N as u32 * 4), rows_per_image: None }, h.radar.size());
+                    write_radar(&g.queue, &h.radar, bytemuck::cast_slice(&r), live::RADAR_N as u32);
                     u.radar = true;
                 }
             }
@@ -1361,14 +1398,19 @@ impl App {
         // --live with a building picked in the build menu: a map press is DLL_MapAction mouse state 1 (no pan);
         // the sim validates it and queues the chore only on a valid, affordable spot
         let mapper = self.ui.as_ref().and_then(|u| u.selected_mapper());
-        let tool = !on_hud && match (mapper, self.play.as_mut().and_then(|p| p.live.as_mut())) {
-            (Some(mp), Some(l)) => {
+        let sub = self.play.as_ref().and_then(|p| p.huds.first()).map_or(0, |h| h.app_sub_mode as i32);
+        let tool = !on_hud && match (mapper, self.play.as_mut().and_then(|p| Some((p.live.as_mut()?, &p.world.drawn)))) {
+            (Some(mp), Some((l, _))) => {
                 let t = self.cam.tile_at(l.rot);
                 if live::is_drag(mp) {
                     // DLL_MapAction press (1) / release (3); the moves in between go out from build_ghost (2)
                     if down { self.drag_from = Some(t); l.send(live::Cmd::Drag(1, t[0], t[1])); }
                     else if self.drag_from.take().is_some() { l.send(live::Cmd::Drag(3, t[0], t[1])); }
                     l.hover_at = t;
+                } else if down && self.ui.as_ref().is_some_and(|u| u.rally_all) && live::rally_tools(sub).contains(&mp) {
+                    // the panel's rally button holds a flag tool: all of the panel's points go to the click
+                    l.send(live::Cmd::Rally(t[0], t[1]));
+                    if let Some(u) = self.ui.as_mut() { u.drop_tool(); }
                 } else if down {
                     l.send(live::Cmd::Click(t[0], t[1]));
                 }
@@ -1376,10 +1418,10 @@ impl App {
             }
             // no build tool: press / release on the map is DLL_TroopSelection (building / unit selection, the troop
             // box: a left drag selects own units; no pan in --live: middle drag / arrows pan)
-            (None, Some(l)) => {
+            (None, Some((l, drawn))) => {
                 let c = &self.cam;
                 let w = [(c.cursor[0] - c.off[0]) / c.zoom, (c.cursor[1] - c.off[1]) / c.zoom];
-                if down { if !on_hud { l.press(w, c.cursor); } } else { l.release(); }
+                if down { if !on_hud { l.press(w, c.cursor, drawn); } } else { l.release(); }
                 !on_hud
             }
             _ => false,
@@ -1484,6 +1526,7 @@ impl App {
         let ctx = keys::Ctx { mode: st.map_or(0, |h| h.app_mode), sub: st.map_or(0, |h| h.app_sub_mode), attack_here: st.is_some_and(|h| h.attack_here > 0),
             sh1_centre: skirmish::Settings::load().flag("SH1CentreControls", true), centre: centre.filter(|t| t.iter().all(|&v| (0..replay::N as i32).contains(&v))) };
         let place = keys::PLACE.iter().find(|q| q.0 == f).map(|q| q.1);
+        let flag = f.strip_prefix("SelectClan").and_then(|n| n.parse().ok()).filter(|_| ctx.mode == 16).and_then(|n| live::rally_key(ctx.sub, n));
         let available = |m: i32| st.is_none_or(|h| h.available.get(m as usize).copied().unwrap_or(true));
         match f {
             "Pause" => { p.playing = !p.playing; self.tick_replay(0.0, 0) }
@@ -1503,6 +1546,7 @@ impl App {
             "FlattenLandscape" if !paused => if let (Some(u), Some(l)) = (self.ui.as_mut(), &p.live) {
                 u.flat = !u.flat;
                 l.send(live::Cmd::Flatten(u.flat));
+                self.ux.note(if u.flat { "Flattened view on: buildings hidden" } else { "Flattened view off" }); // ours: a stray Space looked like a bug
                 let t = if u.flat { 4 } else { 5 };
                 self.tutorial_action(t, -1);
             },
@@ -1543,6 +1587,8 @@ impl App {
             },
             // build hotkeys (C = walls): that tool, if the mission offers it (IsMapperAvailable), not while paused
             _ if place.is_some() => if let (false, Some(m), Some(u)) = (paused, place.filter(|&m| available(m)), self.ui.as_mut()) { u.pick_mapper(m) },
+            // the number keys with a recruit panel open: that troop type's flag tool (KeyManager: SelectClan there)
+            _ if flag.is_some() => if let (false, Some(t), Some(u)) = (paused, flag, self.ui.as_mut()) { u.hold_flag(t) },
             // the rest: one DLL_GameAction (camera keys centre on its answer, live.rs)
             _ => if let (Some(a), Some(l)) = (keys::game_action(f, &ctx), &p.live) { l.send(live::Cmd::Action(a)) },
         }
@@ -1789,6 +1835,8 @@ pub(crate) fn thread_cpu_us() -> u64 {
 }
 
 fn scripted() -> bool { std::env::var_os("SHC_SHOT").is_some() || std::env::var_os("SHC_INPUT").is_some() }
+/// A scripted run that isn't asked to be full screen: its window opens without taking the keyboard focus.
+fn quiet_start() -> bool { scripted() && std::env::var_os("SHC_FULL").is_none() }
 
 /// Borderless fullscreen, or a window of Options' Resolution (menu::window_size), else 80 % of the screen.
 fn set_windowed(window: &Window, windowed: bool) {
@@ -1804,7 +1852,7 @@ impl ApplicationHandler for App {
         if self.gfx.is_some() { return; }
         // like the original's first run (Unity): fullscreen at the screen's size. SHC_SHOT runs and --sheet keep the old
         // 1684×784 window (scripted SHC_INPUT coordinates assume it); SHC_WINDOW=WxH (logical px) or =full overrides.
-        let attrs = Window::default_attributes().with_title("Strong Hold");
+        let attrs = Window::default_attributes().with_title("Strong Hold").with_active(!quiet_start());
         // full screen like a game: the menu bar and the dock stay hidden (AppKit's default auto-hides them, sliding
         // the menu bar and the window title in whenever the cursor reaches the top edge, where edge scrolling lives)
         #[cfg(target_os = "macos")]
@@ -1945,7 +1993,12 @@ impl App {
                 if state == ElementState::Pressed { if let Some(e) = self.end.click(self.cam.cursor) { self.end_exit(e, el) } }
             }
             WindowEvent::MouseInput { button: MouseButton::Left, state, .. } => self.left_button(state == ElementState::Pressed),
-            WindowEvent::MouseInput { button: MouseButton::Middle, state, .. } => self.cam.drag = state == ElementState::Pressed,
+            // EditorDirector.Update: a middle click turns the held gatehouse (the editor's docks and big rocks too: RotateBuilding, as Tab); with
+            // any other tool or none the middle button pans
+            WindowEvent::MouseInput { button: MouseButton::Middle, state, .. } => {
+                let turns = self.ui.as_ref().and_then(|u| u.selected_mapper()).is_some_and(|m| matches!(m, 140..=147 | 195..=198 | 205..=208));
+                if !turns { self.cam.drag = state == ElementState::Pressed } else if state == ElementState::Pressed { self.hotkey("RotateBuilding") }
+            }
             // --live: right release (DLL_TroopSelection rightUp)
             WindowEvent::MouseInput { button: MouseButton::Right, state, .. } => self.right_button(state == ElementState::Pressed),
             WindowEvent::MouseWheel { delta, .. } if self.play.as_ref().is_some_and(|p| p.live.is_some()) => {
@@ -2054,12 +2107,12 @@ impl App {
                 #[cfg(feature = "live")]
                 self.lan_tick(el); // lan.rs: the LAN lobby session / a client's game start / a LAN game that stopped
                 // DLL_RunTick mouse tile: hover (building interiors, panels on click); off the map over the HUD
-                if let Some(l) = self.play.as_mut().and_then(|p| p.live.as_mut()) {
+                if let Some((l, drawn)) = self.play.as_mut().and_then(|p| Some((p.live.as_mut()?, &p.world.drawn))) {
                     let over = self.ui.as_ref().is_some_and(|u| u.over(self.cam.cursor));
                     let t = if over { [-1, -1] } else { self.cam.tile_at(l.rot) };
                     if t != l.mouse_at { l.send(live::Cmd::Mouse(t[0], t[1])); l.mouse_at = t; }
                     let c = &self.cam;
-                    l.cursor_at([(c.cursor[0] - c.off[0]) / c.zoom, (c.cursor[1] - c.off[1]) / c.zoom], c.cursor); // troop cursor
+                    l.cursor_at([(c.cursor[0] - c.off[0]) / c.zoom, (c.cursor[1] - c.off[1]) / c.zoom], c.cursor, drawn); // troop cursor
                 }
                 // HUD_RightClick.Update while it shows (FatControler): one action per press, rotation repeating
                 let (paused, rot) = self.play.as_ref().map_or((true, 0), |p| (!p.playing, p.live.as_ref().map_or(0, |l| l.rot)));
@@ -2238,8 +2291,8 @@ impl App {
                 // lobby: the selected map's 200×200 radar preview into the radar texture's top-left corner
                 if let (Some(px), Some(h)) = (self.menu.as_mut().and_then(|m| m.preview.take()), &g.hud) {
                     let bgra: Vec<u8> = px.chunks(4).flat_map(|c| [c[2], c[1], c[0], c[3]]).collect();
-                    g.queue.write_texture(h.radar.as_image_copy(), &bgra, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(800), rows_per_image: None },
-                        wgpu::Extent3d { width: 200, height: 200, depth_or_array_layers: 1 });
+                    write_radar(&g.queue, &h.radar, &bgra, 200);
+                    if let Some(u) = &mut self.ui { u.radar = false; } // the HUD's minimap waits for the game's next one
                 }
                 let hud = match (&mut self.menu, &mut self.ui) {
                     (Some(m), Some(u)) if self.intro.is_none() => {
@@ -2430,7 +2483,7 @@ async fn init_gfx(window: Arc<Window>, atlases: &[Atlas], with_hud: bool) -> Gfx
             ],
         });
         // minimap from the sim (--live): ARGB u32 little-endian = BGRA bytes
-        let radar = tex("radar", live::RADAR_N as u32, 1, wgpu::TextureFormat::Bgra8UnormSrgb);
+        let radar = tex("radar", live::RADAR_N as u32, 3, wgpu::TextureFormat::Bgra8UnormSrgb); // + 2 mips (write_radar)
         // main-menu art sheet (menu::ART, re/scripts/export_frontend.py); 1×1 when not exported
         let (aw, ah, px) = menu::art_pixels().unwrap_or((1, 1, vec![0; 4]));
         let art = device.create_texture_with_data(&queue, &wgpu::TextureDescriptor {
@@ -2545,8 +2598,11 @@ fn main() {
     update::start();
     lord_share::fetch_online();
     let mut app = App::new();
-    let el = EventLoop::new().unwrap();
-    el.run_app(&mut app).unwrap();
+    let mut el = EventLoop::builder();
+    // a scripted run (shots, SHC_INPUT) stays behind whatever the user works in: it would take their typing otherwise
+    #[cfg(target_os = "macos")]
+    if quiet_start() { use winit::platform::macos::EventLoopBuilderExtMacOS; el.with_activate_ignoring_other_apps(false); }
+    el.build().unwrap().run_app(&mut app).unwrap();
 }
 
 #[test]
@@ -2595,6 +2651,7 @@ fn pick_building_body() {
     c.use_bld = bld_pick(Some(32)); // a building tool: ground only
     assert_ne!(c.tile_at(6), [x as i32, y as i32]);
     assert!(bld_pick(Some(210))); // mangonel: placed on a tower, so the tower body counts
+    assert!(bld_pick(Some(0x27))); // the delete tool: a click on a building's wall or roof deletes that building
     // the radar's screen centre is flat (PreCalcScreenCentre, useHeight false), the rotation centre ground-only
     c.use_bld = true;
     assert_ne!(c.centre_flat(c.cursor, 6), [x as i32, y as i32]);

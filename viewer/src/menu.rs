@@ -197,13 +197,14 @@ pub fn window_size() -> Option<[u32; 2]> {
 /// page's scroll). Applied: the sound ones (audio.rs, ux.rs), Lock Cursor and VSync (ux.rs apply_options), the clocks
 /// (`clock_overlay`), SH1 RTS controls (live.rs), Confirm Disband / Building Tooltips (`opt`, for the HUD), Compass
 /// (ost.rs), Sands Timer (trail_menu.rs). VSync is ours ("NativeVSync", on by default; the game's "VSync" key defaults
-/// off). ponytail: Radar zoomed out, Steam overlay, Extra Zoom, Moat, Custom Intros are saved only.
-const CHECKS: [(u8, &str, &str, bool, f32, f32); 19] = [
+/// off). Radar zoomed out (live.rs), Extra Zoom (gestures.rs), Moat (live.rs) and Custom Intros (audio.rs) too.
+const CHECKS: [(u8, &str, &str, bool, f32, f32); 18] = [
     (0, "LockCursor", "TEXT_NEW_TEXT_084", false, 373.5, 288.0), (0, "Compass", "TEXT_NEW_TEXT2_125", false, 373.5, 316.0),
-    (0, "RadarDefaultZoomedOut", "TEXT_NEW_TEXT2_127", false, 373.5, 344.0), (0, "ShowBuildingTooltips", "TEXT_NEW_TEXT2_081", true, 373.5, 372.0),
-    (0, "UseSteamOverlayForHelp", "TEXT_NEW_TEXT2_166", false, 373.5, 400.0), (0, "ExtraZoom", "TEXT_NEW_TEXT2_171", true, 373.5, 428.0),
-    (0, "LocalTime", "TEXT_NEW_CTEXT_215", false, 373.5, 456.0), (0, "GameTime", "TEXT_NEW_CTEXT_214", false, 373.5, 484.0),
-    (0, "SandsTimer", "TEXT_NEW_CTEXT_332", true, 373.5, 512.0),
+    (0, crate::live::RADAR_WHOLE, "TEXT_NEW_TEXT2_127", true, 373.5, 344.0), (0, "ShowBuildingTooltips", "TEXT_NEW_TEXT2_081", true, 373.5, 372.0),
+    // DE's "Use Steam overlay for help" (y 400) is left out: there is no overlay here, the box did nothing; the rows under it moved up
+    (0, "ExtraZoom", "TEXT_NEW_TEXT2_171", true, 373.5, 400.0),
+    (0, "LocalTime", "TEXT_NEW_CTEXT_215", false, 373.5, 428.0), (0, "GameTime", "TEXT_NEW_CTEXT_214", false, 373.5, 456.0),
+    (0, "SandsTimer", "TEXT_NEW_CTEXT_332", true, 373.5, 484.0),
     (1, "PlayUISFX", "TEXT_NEW_TEXT2_155", true, 373.5, 543.0), (1, "GenieSpeech", "TEXT_SKIRMISH_MISC_013", true, 373.5, 573.0),
     (1, "ReduceMusicVolumeForSpeech", "TEXT_NEW_TEXT2_165", true, 373.5, 603.0), (1, "!BackgroundAudio", "TEXT_NEW_CTEXT_242", false, 373.5, 633.0),
     (1, "MuteInsults", "TEXT_NEW_CTEXT_267", false, 373.5, 663.0), (1, "MuteInsultSpeech", "TEXT_NEW_CTEXT_268", false, 373.5, 693.0),
@@ -2645,7 +2646,7 @@ fn options_save_settings() {
     press_at(&mut m, &mut u, Act::OptPage(1), 0.5);
     press_at(&mut m, &mut u, Act::Slider(0), (10.0 + 94.0) / 208.0); // the middle of the thumb's travel
     m.wheel(-2.0); // Reduce Music Volume For Speech is below the fold: default on -> off
-    press_at(&mut m, &mut u, Act::Check(11), 0.5);
+    press_at(&mut m, &mut u, Act::Check(10), 0.5);
     press_at(&mut m, &mut u, Act::OptPage(2), 0.5);
     m.wheel(-2.0); // the speed row is below the fold
     press_at(&mut m, &mut u, Act::Slider(5), 0.99); // game speed to the end: 18 × 5

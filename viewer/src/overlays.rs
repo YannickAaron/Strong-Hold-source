@@ -230,13 +230,20 @@ impl Ui {
     }
 
     /// Player `p`'s face (allies panel, the who-owns line): the lord colour's background when `bg`, then getAIFace(kind)
-    /// (a custom lord: its own picture); `kind` -1 = a human: the generic face. ponytail: no Steam avatars.
+    /// (a custom lord: its own picture); `kind` -1 = a human: the coat of arms. ponytail: no Steam avatars.
     pub(super) fn lord_face(&mut self, out: &mut Vec<HudTri>, r: [f32; 4], p: usize, kind: i32, bg: bool, alpha: f32) {
         let c = [1.0, 1.0, 1.0, alpha];
         if bg { self.img(out, face_bg(p), r, c); }
         if let Some(cl) = crate::custom_lords::by_kind(kind) { if !crate::custom_lords::draw_face(out, &cl, r, c) { self.img_fit(out, ai_face(crate::custom_lords::parent(&cl) as i16 + 1), r, c); } }
         else if kind != -1 { self.img_fit(out, ai_face(kind as i16), r, c); }
-        else { self.img(out, "Face Background Generic", r, c); self.img(out, "Face Border", r, c); }
+        else {
+            // a human: their coat of arms (a LAN game's lobby code, else your own: Avatars.GetLocalAvatar), as the lobby
+            // shows it; the crusader shield without one
+            let k = (r[2] - r[0]) * 0.15;
+            let theirs = self.lords.coa.get(p).is_some_and(|code| !code.is_empty() && crate::menu::coa::draw_face(out, code, r, c));
+            if !(theirs || p as i32 == self.lords.me && crate::menu::coa::draw_mine(out, r, c)) { self.img_fit(out, "shield_crusader", [r[0] + k, r[1] + k, r[2] - k, r[3] - k], c); }
+            self.img(out, "Face Border", r, c);
+        }
     }
 
     /// HUD_ControlGroups.ButtonClicked: Select = SelectClanN (29 + N), Create / Add / Delete = GroupTroopsN (19 + N) with

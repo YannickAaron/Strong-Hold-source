@@ -57,6 +57,9 @@ fn body(t: i32) -> (f32, f32, f32) {
     }
 }
 
+/// How long a `TroopIn::Drawn` counts: the press it came with reaches the sim within a tick (100 ms at speed 10).
+const DRAWN_FRESH: Duration = Duration::from_millis(250);
+
 /// EditorDirector's DLL_TroopSelection inputs between two DLL_RunTicks.
 #[derive(Default)]
 pub struct Troop {
@@ -79,6 +82,7 @@ pub struct Troop {
     pub keys: [bool; 3], // shift, ctrl, alt (DLL_RunTick)
     units: BTreeMap<i32, Rec>, // last draw record per unit index: GameMap's chimps
     narrow: bool,              // drop the selection before this press goes in (see `event`)
+    drawn: (std::collections::HashMap<i32, [f32; 2]>, Option<Instant>), // unit -> base point the viewer draws it at (TroopIn::Drawn), when
 }
 
 impl Troop {
@@ -125,6 +129,7 @@ impl Troop {
                 self.start = None;
             }
             TroopIn::Right(down) => if down { self.rdown = true } else { self.rup = true },
+            TroopIn::Drawn(v) => self.drawn = (v.into_iter().collect(), Some(Instant::now())),
             TroopIn::Cursor(w, s, keys) => {
                 (self.cursor, self.screen, self.keys) = (w, s, keys);
                 let Some(s0) = self.start else { return };
@@ -161,11 +166,16 @@ impl Troop {
     }
 
     /// A unit's body box in world px (x0, y0, x1, y1): Chimp.position ± bodyWidth / 2, bodyHeight up, bodyHeightBelow
-    /// down, 3/32 unit lower (grabTroopsOnScreen). ponytail: tele_x_adjust and the between-tiles slide are left out.
-    fn body_px(m: &Mem, rot: i16, i: i32, r: &Rec) -> [f32; 4] {
+    /// down, 3/32 unit lower (grabTroopsOnScreen). Chimp.position is where GameMap draws the unit, between two tiles
+    /// while it walks (up to 64 px from the record's tile): the viewer's drawn base while that is fresh (`DRAWN_FRESH`),
+    /// else the record's own place.
+    fn body_px(&self, m: &Mem, rot: i16, i: i32, r: &Rec) -> [f32; 4] {
         let mut r = *r;
         (r[1], r[2]) = replay::to_west_pub(rot, r[1], r[2]);
-        let p = replay::chimp_px(&r, 0); // Chimp.position
+        let p = match self.drawn.0.get(&i).filter(|_| self.drawn.1.is_some_and(|t| t.elapsed() < DRAWN_FRESH)) {
+            Some(b) => { let v = replay::pivot((r[20] & 0xff) as i32); [b[0] + v[0], b[1] + v[1] + r[17] as f32 * 2.0] } // replay::chimp_px from that base
+            None => replay::chimp_px(&r, 0),
+        };
         let (w, h, below) = body(ty(m, i));
         [p[0] - w, p[1] - 2.0 * h + 6.0, p[0] + w, p[1] + 2.0 * below + 6.0]
     }
@@ -175,7 +185,7 @@ impl Troop {
     fn grab(&self, m: &Mem, rot: i16, r: [f32; 4]) -> Vec<i32> {
         let (x0, x1, y0, y1) = (r[0].min(r[2]), r[0].max(r[2]), r[1].min(r[3]), r[1].max(r[3]));
         self.units.iter().filter(|(&i, rec)| {
-            let b = Self::body_px(m, rot, i, rec);
+            let b = self.body_px(m, rot, i, rec);
             b[0] <= x1 && b[2] >= x0 && b[1] <= y1 && b[3] >= y0
         }).map(|(&i, _)| i).collect()
     }
@@ -184,7 +194,7 @@ impl Troop {
     fn under(&self, m: &Mem, rot: i16) -> Vec<i32> {
         let c = self.cursor;
         let mut v: Vec<(f32, i32)> = self.units.iter().filter_map(|(&i, rec)| {
-            let b = Self::body_px(m, rot, i, rec);
+            let b = self.body_px(m, rot, i, rec);
             (c[0] >= b[0] && c[0] <= b[2] && c[1] >= b[1] && c[1] <= b[3]).then_some((b[3], i))
         }).collect();
         v.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -296,6 +306,29 @@ pub fn box_tris(a: [f32; 2], b: [f32; 2]) -> Vec<crate::hud::HudTri> {
 mod tests {
     use super::*;
     use crate::live::Live;
+
+    /// A walking unit is picked where the viewer draws it (between two tiles), not at the tile its record still names;
+    /// once the viewer's places are stale, at the record's again.
+    #[test]
+    fn picks_walking_unit_where_drawn() {
+        let (m, rot, mut t) = (Mem::default(), 6, Troop::default());
+        let mut r: Rec = [0; 21];
+        (r[0], r[1], r[2], r[3], r[10]) = (2, 400, 300, 5, 7);
+        t.track(&[r]);
+        let b = t.body_px(&m, rot, 7, &r);
+        t.cursor = [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0];
+        assert_eq!(t.under(&m, rot), [7], "standing: at its tile");
+        let mut w = r;
+        (w[1], w[2]) = replay::to_west_pub(rot, r[1], r[2]);
+        let base = replay::chimp_base(&w, 0);
+        t.event(&m, rot, TroopIn::Drawn(vec![(7, [base[0] + 48.0, base[1]])])); // most of a step to the right
+        assert!(t.under(&m, rot).is_empty(), "picked at the tile it left");
+        t.cursor[0] += 48.0;
+        assert_eq!(t.under(&m, rot), [7], "not picked where it is drawn");
+        assert_eq!(t.grab(&m, rot, [t.cursor[0] - 2.0, t.cursor[1] - 2.0, t.cursor[0] + 2.0, t.cursor[1] + 2.0]), [7], "the drag box");
+        t.drawn.1 = Instant::now().checked_sub(DRAWN_FRESH * 2);
+        assert!(t.drawn.1.is_none() || t.under(&m, rot).is_empty(), "a stale drawn place still counts");
+    }
     use shc_sim::buildings as b;
 
     fn save(name: &str) -> Option<Live> {
@@ -325,7 +358,7 @@ mod tests {
     /// Centre of unit `i`'s body in world px (what a click on it hits).
     fn at(l: &Live, i: i32) -> [f32; 2] {
         let t = &l.troop;
-        let b = Troop::body_px(l.mem_ref(), l.rotation(), i, &t.units[&i]);
+        let b = t.body_px(l.mem_ref(), l.rotation(), i, &t.units[&i]);
         [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0]
     }
 

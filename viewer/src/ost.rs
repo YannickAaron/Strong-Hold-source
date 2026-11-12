@@ -181,7 +181,8 @@ impl Ui {
         if !on { self.ost.owner = None; return; }
         let [p, kind, team, variant, building] = st.ev.ost[WHO_OWNS].data;
         let name = if kind < 1 {
-            crate::skirmish::Settings::load().get("UserName").filter(|n| !n.is_empty()).map_or_else(|| format!("Player {p}"), str::to_string)
+            // the standings' name: you by Options > Player Settings, a LAN human by their own (endgame::player_names)
+            st.lords.who.get(p.max(0) as usize).filter(|n| !n.is_empty()).cloned().unwrap_or_else(|| format!("Player {p}"))
         } else { self.text_of(&crate::endgame::name(kind, variant)) };
         let b = self.titles.get(building.max(0) as usize).map(|k| self.text_of(k)).filter(|s| !s.is_empty()).map_or(String::new(), |s| format!("  {s}  "));
         self.ost.owner = Some((format!("  {name}  "), b, [p, kind, team]));
