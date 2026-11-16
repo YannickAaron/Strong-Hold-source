@@ -1966,7 +1966,9 @@ impl App {
                 trace(|w, t| { let _ = writeln!(w, "C {t} left {:?} in={}", self.cam.cursor, self.cam.cursor_in); });
             }
             WindowEvent::MouseInput { button: MouseButton::Left, state, .. } if self.menu.is_some() => {
-                if state == ElementState::Pressed { if let Some(go) = self.menu.as_mut().unwrap().click(self.cam.cursor) { self.menu_go(go, el) } }
+                let m = self.menu.as_mut().unwrap();
+                let go = if state == ElementState::Pressed { m.click(self.cam.cursor) } else { m.release(self.cam.cursor) };
+                if let Some(go) = go { self.menu_go(go, el) }
             }
             // MouseRightButtonUp: a Sandbox option steps back
             WindowEvent::MouseInput { button: MouseButton::Right, state: ElementState::Released, .. } if self.menu.is_some() => self.menu.as_mut().unwrap().right_click(self.cam.cursor),

@@ -9,10 +9,12 @@
 //!   it has military units on the hill and nobody else has (the hill's guards count as a side that never scores);
 //!   contested = nobody scores. Peasants and workers don't count. The engine's score counts down from the target.
 //! - The fort: a side alone on the hill for `TAKE` seconds takes it: the old tower (or its ruins) goes, the side's
-//!   strongest player there gets a new one on the spot. Its archers on the hill climb onto it (no stairs needed).
+//!   strongest player there gets a new one on the spot. Its archers on the hill climb onto it; stairs on its north
+//!   and south sides (they change hands with it) let anyone walk up. The tower can't be destroyed: its hit points
+//!   are topped up every tick (it changes hands only by holding the hill).
 //! - The first side to the target wins through end_check. A dead lord still knocks a player out as usual.
 //! - The AI lords play it too (`lords`): every `WAVE` ticks they send half their idle defenders to the hill, which
-//!   shoot its guards, attack a fort that isn't theirs and hold the hill (the sim's AI doesn't know the mode).
+//!   shoot its guards, fight the men there and hold the hill (the sim's AI doesn't know the mode).
 //! The rules read the sim between ticks and act through the engine's own functions (placement, demolition, spawn,
 //! teleport, group orders), the same on every LAN peer; the sim's code is untouched. What lives outside the sim
 //! memory (the hill, the counts, the capture clock) travels explicitly: a sidecar next to a save (`<save>.hill`), the
@@ -202,6 +204,7 @@ mod sim {
                     if let Some(t) = (1..=8).find(|t| !used.contains(t)) { m.set_i32(0x1837ebecc + k * 4, t); }
                 }
                 b::place(m, h.keeper, h.x - 2, h.y - 2, TOWER, 6, 0, true);
+                stairs(m, &h, h.keeper);
                 for (x, y) in seats(&h).take(GUARD_COUNT as usize) {
                     let z = units::height(m, units::tile(m, x, y)) as i16;
                     units::helpers::spawn(m, h.keeper, h.keeper as i16, (x * 8) as i16, (y * 8) as i16, z, 22);
@@ -259,6 +262,23 @@ mod sim {
         }
     }
 
+    /// The fort's stairs: against the middle of its south and north sides a high wall piece (0x19: the tower takes
+    /// walkers from a wall, not from stairs) and a flight of 5 down from it (0xb5, 80 high, .. 0xb9); placed the AI's
+    /// way where the ground is free (a quarter stone for the wall piece), else (standing already) handed to `p`
+    /// (the tile's owner bits, as place_wall sets them). Anyone may walk them, as on any stairs.
+    pub(super) fn stairs(m: &mut Mem, h: &Hill, p: i32) {
+        const OWNER: u64 = shc_sim::terrain::W + 0xe1afe0;
+        const FLAGS: u64 = shc_sim::terrain::W + 0x898400;
+        for (x, y0, dy) in [(h.x, h.y + 4, 1), (h.x + 1, h.y - 3, -1)] {
+            for k in 0..6 {
+                let (y, t) = (y0 + dy * k, units::tile(m, x, y0 + dy * k) as u64);
+                if !units::valid_xy(m, x, y) { break; }
+                if m.u32(FLAGS + t * 4) & 0x900 != 0 { m.set_u8(OWNER + t, (m.u8(OWNER + t) & 0xf8) | (p as u8).wrapping_sub(1)); }
+                else { shc_sim::ai::build::place_wall(m, p, x, y, if k == 0 { 0x19 } else { 0xb4 + k as u16 }); }
+            }
+        }
+    }
+
     /// The tower's top, inner 4×4, row by row: where guards stand and climbers land.
     fn seats(h: &Hill) -> impl Iterator<Item = (i32, i32)> {
         let (x0, y0) = (h.x - 1, h.y - 1);
@@ -281,6 +301,7 @@ mod sim {
                     }
                     let clear = (h.y - 2..h.y + 4).all(|y| (h.x - 2..h.x + 4).all(|x| units::bld(m, units::tile(m, x, y)) == 0));
                     if clear { b::place(m, p, h.x - 2, h.y - 2, TOWER, 6, 0, true); }
+                    stairs(m, h, p);
                 }
                 Act::Lift(u, x, y) => {
                     let z = units::height(m, units::tile(m, x, y)) as i32;
@@ -294,6 +315,10 @@ mod sim {
     /// whose recorded writes do).
     pub fn after_tick(h: &mut Option<Hill>, m: &mut Mem, write: bool) {
         if let Some(h) = h {
+            // the fort can't be destroyed: full hit points (+0x10c, of +0x10e) after every tick
+            if write && m.i32(OVER) == 0 {
+                if let Some((id, _, TOWER_KIND)) = fort(m, h) { let r = b::rec(id); m.set_i16(r + 0x10c, m.i16(r + 0x10e)); }
+            }
             if let Some(acts) = h.update(m) {
                 if write {
                     apply(m, h, &acts);
@@ -326,7 +351,7 @@ mod sim {
     /// again: the force lives in the sim memory (saves, LAN, replays). Every ORDERS ticks each group gets the troop
     /// cursor's orders (FUN_18011da80, chore 0x24's): on its way until its leader is close (an attack from afar
     /// leaves shooters standing); then the shooters at the nearest enemy on the hill (guards, another side's men),
-    /// the rest at the fort while it isn't their side's, else at the nearest enemy on the ground there; with nobody
+    /// the rest at the nearest enemy on the ground there (the fort can't be destroyed); with nobody
     /// left to fight, onto the hill to hold it. Those on their side's tower stay up there, in a group of their own.
     /// ponytail: a fixed half; an AIC-driven share if lords should differ
     pub fn lords(m: &mut Mem, h: &Hill) {
@@ -393,11 +418,6 @@ mod sim {
                 let shooters = shooter(m, us[0]);
                 let (lx, ly) = pos(m, m.i16(grp(g) + 0x5a) as i32);
                 if (lx - h.x).pow(2) + (ly - h.y).pow(2) <= FIGHT * FIGHT {
-                    if let Some((id, _, _)) = tower.filter(|f| !shooters && foe(side(f.1.clamp(0, 8) as usize))) {
-                        let serial = m.i32(b::rec(id) + 0xd8);
-                        if m.i16(grp(g) + 0x64c) as i32 != id || m.i32(grp(g) + 0x650) != serial { order(m, g, 9, id, serial, 0); }
-                        continue;
-                    }
                     // the nearest enemy there (the rest: none up on a tower)
                     let near = men.iter().filter(|&&(_, s, top)| foe(s) && (shooters || !top || tower.is_none()))
                         .min_by_key(|&&(i, _, _)| { let (x, y) = pos(m, i); ((x - lx).pow(2) + (y - ly).pow(2), i) });
@@ -422,14 +442,14 @@ mod sim {
 
     /// Group g's order (chore 0x24's FUN_18011da80), its members' arrived flags (+0x42c) dropped first
     /// (FUN_180125140, as the lord's turns do before sending a squad: a move skips arrived members).
-    fn order(m: &mut Mem, g: i32, what: i32, a: i32, b: i32, c: i32) {
+    pub(super) fn order(m: &mut Mem, g: i32, what: i32, a: i32, b: i32, c: i32) {
         shc_sim::ai::groups::clear_hold(m, g);
         shc_sim::orders::f11da80(m, g, what, a, b, c);
     }
 
     /// `us` (p's) leave their groups for a new one (FUN_180118e80, FUN_180122fc0, FUN_18011c490: as the lord's
     /// defence turns regroup). 0 = none (no one, or no free group).
-    fn band(m: &mut Mem, p: i32, us: &[i32]) -> i32 {
+    pub(super) fn band(m: &mut Mem, p: i32, us: &[i32]) -> i32 {
         if us.is_empty() { return 0; }
         let g = shc_sim::ai::groups::new_group_top(m, p);
         if g <= 0 { return 0; }
@@ -512,60 +532,49 @@ pub fn ring(out: &mut Vec<HudTri>, b: &Board, at: impl Fn(f32, f32) -> [f32; 2],
     }
 }
 
-/// The score bar at the top centre (the HUD's scale; the end box's parchment look, endgame.rs): the title and the
-/// target, a row per side (its players' shields, its first player's name, the score as a bar in its colour), who
-/// holds the hill, and the fort (its owner or guards, and a side's clock to take it).
+/// The score board, top right: small and see-through so the game shows past it. A thin header (the mode, the
+/// target, a stripe in the holder's colour: cream while free or the guards hold it, red while contested), a row per
+/// side (its players' shields, the score as a bar in its colour, outlined while it holds the hill, the number), and
+/// a line only while something is happening (contested, a side's clock to take the fort).
 pub fn bar(ui: &mut Ui, out: &mut Vec<HudTri>, b: &Board, w: f32, h: f32) {
     let s = crate::ux::hud_scale(w, h);
     (ui.s, ui.w, ui.h) = (s, w, h);
-    const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+    const CREAM: [f32; 4] = [0.937, 0.953, 0.776, 1.0];
     let sides = b.sides();
-    let (bw, bh) = (440.0, 88.0 + 26.0 * sides.len() as f32);
-    let (x0, y0) = ((w - bw * s) / 2.0, 8.0 * s);
-    let r = |x: f32, y: f32, ww: f32, hh: f32| [x0 + x * s, y0 + y * s, x0 + (x + ww) * s, y0 + (y + hh) * s];
-    Ui::fill(out, [x0 - 3.0 * s, y0 - 3.0 * s, x0 + (bw + 3.0) * s, y0 + (bh + 3.0) * s], [0.313, 0.248, 0.152, 0.95]);
-    ui.img(out, "Panel_BG", r(0.0, 0.0, bw, bh), [1.0, 1.0, 1.0, 0.95]);
     let hill = &b.hill;
-    ui.text(out, "King of the Hill", x0 + 14.0 * s, y0 + 24.0 * s, 20.0, 1.0, 0.0, 0.0, BLACK);
-    ui.text(out, &format!("first to {}", hill.target), x0 + (bw - 14.0) * s, y0 + 24.0 * s, 16.0, 1.0, 0.0, 1.0, BLACK);
     let names: Vec<String> = b.names.iter().map(|n| ui.text_of(n)).collect(); // AI lords' are text keys
-    let name = |p: u8| names[p as usize].clone();
-    let side_name = |t: i32| sides.iter().find(|x| x.0 == t).map_or(String::new(), |x| name(x.1[0]));
+    let side_name = |t: i32| sides.iter().find(|x| x.0 == t).map_or(String::new(), |x| names[x.1[0] as usize].clone());
+    let note = match (hill.holder, hill.taking) {
+        (-1, _) => Some(("Contested!".to_string(), [1.0, 0.35, 0.3, 1.0])),
+        (_, t) if t > 0 => Some((format!("{} takes the fort in {} s", side_name(t), (TAKE - (b.tick - hill.since) / SECOND).max(0)), CREAM)),
+        _ => None,
+    };
+    let (bw, row) = (210.0, 17.0);
+    let bh = 24.0 + row * sides.len() as f32 + if note.is_some() { 16.0 } else { 0.0 } + 4.0;
+    let (x0, y0) = (w - (bw + 10.0) * s, 10.0 * s);
+    let r = |x: f32, y: f32, ww: f32, hh: f32| [x0 + x * s, y0 + y * s, x0 + (x + ww) * s, y0 + (y + hh) * s];
+    Ui::fill(out, r(0.0, 0.0, bw, bh), [0.04, 0.03, 0.02, 0.5]);
+    let hc = match hill.holder { -1 => [0.85, 0.15, 0.1, 1.0], 0 | GUARDS => [CREAM[0], CREAM[1], CREAM[2], 0.5], t => crate::endgame::rgb(b.colour(t)) };
+    Ui::fill(out, r(0.0, 0.0, bw, 2.0), hc);
+    ui.img_fit(out, crate::endgame::shield(b.flag()), r(5.0, 5.0, 13.0, 13.0), [1.0; 4]); // the fort's flag
+    ui.text_sh(out, "King of the Hill", x0 + 22.0 * s, y0 + 16.0 * s, 12.0, 0.0, CREAM);
+    ui.text_sh(out, &format!("to {}", hill.target), x0 + (bw - 6.0) * s, y0 + 16.0 * s, 11.0, 1.0, [CREAM[0], CREAM[1], CREAM[2], 0.7]);
     for (k, (t, ps)) in sides.iter().enumerate() {
-        let y = 34.0 + 26.0 * k as f32;
-        for (j, &p) in ps.iter().enumerate().take(4) {
-            ui.img_fit(out, crate::endgame::shield(crate::endgame::colour(&b.colours, p)), r(12.0 + 18.0 * j as f32, y, 22.0, 22.0), [1.0; 4]);
+        let y = 22.0 + row * k as f32;
+        for (j, &p) in ps.iter().enumerate().take(3).rev() {
+            ui.img_fit(out, crate::endgame::shield(crate::endgame::colour(&b.colours, p)), r(5.0 + 7.0 * j as f32, y + 1.0, 14.0, 14.0), [1.0; 4]);
         }
-        let label = if ps.len() > 1 { format!("{} +{}", name(ps[0]), ps.len() - 1) } else { name(ps[0]) };
-        ui.text(out, &label, x0 + (44.0 + 18.0 * (ps.len().min(4) - 1) as f32) * s, y0 + (y + 17.0) * s, 15.0, 1.0, 0.0, 0.0, BLACK);
         let c = crate::endgame::rgb(b.colour(*t));
-        let (bx, bwid) = (250.0, 130.0);
-        Ui::fill(out, r(bx, y + 5.0, bwid, 13.0), [0.15, 0.1, 0.05, 0.85]);
+        let (bx, bwid) = (36.0, bw - 36.0 - 40.0);
+        Ui::fill(out, r(bx, y + 5.0, bwid, 7.0), [0.0, 0.0, 0.0, 0.75]);
+        if hill.holder == *t { // holds it now: a thin frame
+            for e in [r(bx - 1.5, y + 3.5, bwid + 3.0, 1.5), r(bx - 1.5, y + 12.0, bwid + 3.0, 1.5), r(bx - 1.5, y + 3.5, 1.5, 10.0), r(bx + bwid, y + 3.5, 1.5, 10.0)] { Ui::fill(out, e, CREAM); }
+        }
         let f = (hill.score[*t as usize] as f32 / hill.target.max(1) as f32).clamp(0.0, 1.0);
-        Ui::fill(out, r(bx + 1.0, y + 6.0, (bwid - 2.0) * f, 11.0), c);
-        if hill.holder == *t { Ui::fill(out, r(bx - 8.0, y + 8.0, 5.0, 7.0), c); } // holds it now
-        ui.text(out, &hill.score[*t as usize].to_string(), x0 + (bw - 14.0) * s, y0 + (y + 17.0) * s, 15.0, 1.0, 0.0, 1.0, BLACK);
+        Ui::fill(out, r(bx, y + 5.0, bwid * f, 7.0), c);
+        ui.text_sh(out, &hill.score[*t as usize].to_string(), x0 + (bw - 6.0) * s, y0 + (y + 12.5) * s, 12.0, 1.0, CREAM);
     }
-    let status = match hill.holder {
-        -1 => "Contested!".to_string(),
-        0 => "Nobody holds the hill".to_string(),
-        GUARDS => "The hill's guards hold it".to_string(),
-        t => format!("Held by {}", side_name(t)),
-    };
-    let y = bh - 34.0;
-    if hill.holder != 0 {
-        let c = match hill.holder { -1 => [0.75, 0.1, 0.05, 1.0], GUARDS => crate::endgame::rgb(0), t => crate::endgame::rgb(b.colour(t)) };
-        Ui::fill(out, r(14.0, y - 10.0, 10.0, 10.0), c);
-    }
-    ui.text(out, &status, x0 + 32.0 * s, y0 + y * s, 15.0, 1.0, 0.0, 0.0, BLACK);
-    let fort = match b.fort {
-        0 => "Fort: in ruins".to_string(),
-        k if k == hill.keeper => format!("Fort: neutral, {} guard{} left", b.guards, if b.guards == 1 { "" } else { "s" }),
-        k => format!("Fort: {}'s", name(k as u8)),
-    };
-    let taking = (hill.taking > 0).then(|| format!("  -  {} takes it in {} s", side_name(hill.taking), (TAKE - (b.tick - hill.since) / SECOND).max(0)));
-    ui.text(out, &format!("{fort}{}", taking.unwrap_or_default()), x0 + 32.0 * s, y0 + (bh - 12.0) * s, 15.0, 1.0, 0.0, 0.0, BLACK);
-    ui.img_fit(out, crate::endgame::shield(b.flag()), r(12.0, bh - 28.0, 16.0, 16.0), [1.0; 4]);
+    if let Some((text, c)) = note { ui.text_sh(out, &text, x0 + 6.0 * s, y0 + (bh - 6.0) * s, 11.0, 0.0, c); }
 }
 
 #[test]
@@ -674,6 +683,41 @@ pub mod tests {
         let frozen = l.hill.clone();
         for _ in 0..2 { second(&mut l); }
         assert_eq!(l.hill, frozen, "no counting after the end");
+    }
+
+    /// The fort comes with stairs (south and north, the hill player's) that a swordsman walks up onto its top, and it
+    /// can't be destroyed: a blow far past its hit points leaves it standing at full health; once taken, the stairs
+    /// are the new owner's.
+    #[test]
+    fn fort_has_stairs_and_stands() {
+        let Some(mut l) = game(1000) else { return };
+        let h = hill(&l);
+        let m = l.mem_ref();
+        let flags = |m: &Mem, x: i32, y: i32| m.u32(shc_sim::terrain::W + 0x898400 + units::tile(m, x, y) as u64 * 4);
+        let owner = |m: &Mem, x: i32, y: i32| m.u8(shc_sim::terrain::W + 0xe1afe0 + units::tile(m, x, y) as u64) & 7;
+        let steps: Vec<(i32, i32)> = (1..6).map(|k| (h.x, h.y + 4 + k)).chain((1..6).map(|k| (h.x + 1, h.y - 3 - k))).collect();
+        let built: Vec<_> = steps.iter().filter(|&&(x, y)| flags(m, x, y) & 0x800 != 0).collect();
+        assert!(built.len() >= 5, "stairs at {built:?} of {steps:?}");
+        assert!(built.iter().all(|&&(x, y)| owner(m, x, y) as i32 == h.keeper - 1), "the hill player's");
+        // a blow far past its hit points
+        let (id, _, _) = fort(l.mem_ref(), &h).unwrap();
+        let r = shc_sim::buildings::rec(id);
+        let max = l.mem_ref().i16(r + 0x10e);
+        l.mem().set_i16(r + 0x10c, 1);
+        second(&mut l);
+        assert_eq!((fort(l.mem_ref(), &h).map(|f| f.0), l.mem_ref().i16(r + 0x10c)), (Some(id), max), "standing, healed");
+        // your swordsman walks up the stairs (the guards gone)
+        let mine = spawn(l.mem(), &Hill { x: h.x + 1, y: h.y + 13, ..h.clone() }, 1, 27, 1)[0];
+        for g in guards(l.mem_ref(), &h) { units::helpers::apply_hit(l.mem(), mine, g, 10_000_000); }
+        let mut n = 0;
+        // ponytail: re-ordered every second (a count's lift or a repath can stop it)
+        while on_tower(l.mem_ref(), &h, &[mine]) == 0 && n < 60 { units::motion::walk_to(l.mem(), mine, h.x, h.y, 0); second(&mut l); n += 1; }
+        let u = units::u(mine);
+        let at = (l.mem_ref().i16(u + 0xc4), l.mem_ref().i16(u + 0xc6));
+        assert_eq!(on_tower(l.mem_ref(), &h, &[mine]), 1, "on the tower after {n} s: at {at:?}");
+        while fort(l.mem_ref(), &h).map(|f| f.1) != Some(1) && n < 120 { second(&mut l); n += 1; }
+        assert_eq!(fort(l.mem_ref(), &h).map(|f| f.1), Some(1), "taken");
+        assert!(built.iter().all(|&&(x, y)| owner(l.mem_ref(), x, y) == 0), "your stairs now");
     }
 
     /// p's defenders (AI role 1) outside its squads (its hill force, `lords`) and in them (at home).
@@ -808,7 +852,7 @@ pub mod tests {
     #[test]
     #[ignore]
     fn write_hill_saves() {
-        if std::env::var_os("SHC_SAVES").is_none() { return; }
+        let Some(dir) = std::env::var_os("SHC_SAVES").map(std::path::PathBuf::from) else { return };
         let wait = |p: &std::path::Path| while crate::saves::pending(p) || !p.exists() { std::thread::sleep(std::time::Duration::from_millis(20)); };
         for (target, name) in [(300, "Hill.sav"), (300, "HillTaken.sav"), (25, "HillWon.sav")] {
             let Some(mut l) = game(target) else { return };
@@ -824,7 +868,7 @@ pub mod tests {
                 while name == "HillWon.sav" && hill(&l).winner == 0 { second(&mut l); }
             }
             for _ in 0..3 { l.step(); }
-            let path = crate::skirmish::saves_dir().join(name);
+            let path = dir.join(name);
             l.save(&path).unwrap();
             wait(&path);
             let (wx, wy) = crate::replay::to_west_pub(l.rotation(), h.x as i16, h.y as i16);
@@ -836,7 +880,7 @@ pub mod tests {
         rat_troops(&mut l, &h);
         second(&mut l); // the guards live
         while guards(l.mem_ref(), &h).len() > 4 && l.tick() < 16_000 { second(&mut l); }
-        let path = crate::skirmish::saves_dir().join("HillAI.sav");
+        let path = dir.join("HillAI.sav");
         l.save(&path).unwrap();
         wait(&path);
         let (wx, wy) = crate::replay::to_west_pub(l.rotation(), h.x as i16, (h.y + 4) as i16);

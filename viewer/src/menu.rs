@@ -163,7 +163,7 @@ const NOT_YET: &str = "Not in the native port yet.";
 pub enum Go { Load(PathBuf), Replay(PathBuf), Start(Lobby), Quit, Resume, ToMenu, Save(PathBuf), Restart, Mission(i32), Brief(i32), QuitMission(usize), FreeBuild(PathBuf, skirmish::FreeBuild), Scenario(PathBuf, i32), Settings(Option<u8>), Tutorial, Trail(i32, i32, i32), Lan(Box<mp_menu::Started>), Editor(editor::Start) }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Act { Skirmish, LoadList, Quit, Back, Pick(usize), Fair(i32), Goods(i32), Outposts, AddAiOpen, AddAiClose, AddLord(usize), DelAi(usize), LordInfo(usize), LordInfoClose, LordTrailer, TeamsOpen, TeamsClose, TeamFace(usize), TeamCancel, Restart, Campaigns, Campaign(usize), ToCampaigns, Mission(i32), PlayMission, Difficulty, BriefStart, BriefQuit, BriefTab(u8), Hint(usize), HelpBack, StoryAdvance, Sandbox, SoloOpen(bool), SoloNext, SoloPlay, SoloDifficulty, Advanced, Cycle(u8), Faction(i32), Flag(u8), Include(u8), Options, OptPage(u8), OptBack, OptFolder, ScreenMode, ApplyMode, Check(u8), Slider(u8), Group(u8, bool), Reset(u8), Colour(i32), HkRow(u16), HkSlot(u8), HkClose, HkApply, HkClear, HkCancel, HkPreset(bool), Nop, Tutorial, Start, Resume, ToMenu, Save, Trail(trail_menu::A), Mp(mp_menu::A), Help(help::A), Lobby(lobby::A), Update, GameFiles, Extras(extras::A),
+enum Act { Skirmish, LoadList, Quit, Back, Pick(usize), Fair(i32), Goods(i32), Outposts, AddAiOpen, AddAiClose, AddLord(usize), DelAi(usize), LordInfo(usize), LordInfoClose, LordTrailer, TeamsOpen, TeamsClose, TeamFace(usize), TeamCancel, Keep(usize), Restart, Campaigns, Campaign(usize), ToCampaigns, Mission(i32), PlayMission, Difficulty, BriefStart, BriefQuit, BriefTab(u8), Hint(usize), HelpBack, StoryAdvance, Sandbox, SoloOpen(bool), SoloNext, SoloPlay, SoloDifficulty, Advanced, Cycle(u8), Faction(i32), Flag(u8), Include(u8), Options, OptPage(u8), OptBack, OptFolder, ScreenMode, ApplyMode, Check(u8), Slider(u8), Group(u8, bool), Reset(u8), Colour(i32), HkRow(u16), HkSlot(u8), HkClose, HkApply, HkClear, HkCancel, HkPreset(bool), Nop, Tutorial, Start, Resume, ToMenu, Save, Trail(trail_menu::A), Mp(mp_menu::A), Help(help::A), Lobby(lobby::A), Update, GameFiles, Extras(extras::A),
     WinSize, SaveGo, Delete(usize), Yes, No, Sort(u8), Credits, Ed(editor::A), Coa(coa::A), NameBox }
 
 /// `Missions(c, m)`: campaign c (0..7) with mission m selected.
@@ -307,6 +307,7 @@ pub struct Menu {
     add_ai: bool,              // Lobby: the Add-AI face grid is open
     teams_open: bool,          // Lobby: the round-table Teams popup is open
     team_pick: Option<usize>,  // Teams: the picked-up member (0 = you, 1.. = AI k - 1)
+    keep_pick: Option<usize>,  // the radar: the picked-up start position (click another / drop on it to swap)
     brief: Option<String>,     // Lobby: the selected map's own briefing (user maps)
     help: Vec<(u8, String)>,   // Briefing Help tab: the mission's help page as (0 title / 1 heading / 2 text) blocks
     solo: Vec<skirmish::SoloInfo>, // Sandbox screen: per map in `files`
@@ -335,7 +336,7 @@ static SORT: std::sync::Mutex<(u8, bool)> = std::sync::Mutex::new((1, false));
 static LAST_SAVE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 impl Menu {
-    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], quiet_hover: false, error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, teams_open: false, team_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default(), mouse: ([0.0; 2], false) } }
+    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], quiet_hover: false, error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, teams_open: false, team_pick: None, keep_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default(), mouse: ([0.0; 2], false) } }
     pub fn pause(can_restart: bool) -> Self { Menu { screen: Screen::Pause, in_game: true, can_restart, ..Self::main() } }
     /// Back from a sub-screen: the pause menu in game, else the main menu.
     fn home(&self) -> Self { if self.in_game { Self::pause(self.can_restart) } else { Self::main() } }
@@ -498,6 +499,13 @@ impl Menu {
     }
 
     /// Right click (MouseRightButtonUp): a Free Build option steps back.
+    /// The left button let go: a start position dragged onto another on the radar swaps them (`Act::Keep`).
+    pub fn release(&mut self, c: [f32; 2]) -> Option<Go> {
+        let a = self.keep_pick?;
+        let &(_, hit) = self.hits.iter().rev().find(|(p, _)| c[0] >= p[0] && c[0] < p[2] && c[1] >= p[1] && c[1] < p[3])?;
+        if matches!(hit, Act::Keep(k) if k != a) { self.click(c) } else { None }
+    }
+
     pub fn right_click(&mut self, c: [f32; 2]) {
         let Some(&(_, Act::Cycle(f))) = self.hits.iter().rev().find(|(p, _)| Self::inside(*p, c)) else { return };
         if let Screen::Solo(so) = &mut self.screen { cycle(&mut so.fb, f, true); }
@@ -775,6 +783,17 @@ impl Menu {
                     t[a] = 0;
                     normalize(&mut t);
                     set_teams(l, &t);
+                },
+                // the radar's start positions: pick one, then click (or drop on) another: the two swap their members
+                Act::Keep(k) => match self.keep_pick.take() {
+                    None => self.keep_pick = Some(k),
+                    Some(a) if a == k => {}
+                    Some(a) => {
+                        let n = self.mp.net.as_ref().map_or(1, |n| n.lobby.humans.len()) + l.ais.len();
+                        let o = l.keeps.get_or_insert_with(|| std::array::from_fn(|k| if k < n.min(8) { k as i32 } else { -10 }));
+                        o.swap(a, k);
+                        crate::audio::ui(crate::audio::ui_id::TABLE, 1.0);
+                    }
                 },
                 Act::Start => return Some(Go::Start(l.clone())),
                 _ => {}
@@ -1963,7 +1982,7 @@ impl Menu {
         let room = nh + l.ais.len() < positions.max(2);
         let add = (room && !self.add_ai).then_some(Act::AddAiOpen);
         self.img_button(ui, out, ["SkirmishSetup 015", "SkirmishSetup 016", "SkirmishSetup 015"], 519.0, 135.0, 82.0, 59.0, add, cursor);
-        self.img_button(ui, out, ["SkirmishSetup 038", "SkirmishSetup 039", "SkirmishSetup 038"], 528.0, 205.0, 65.0, 51.0, None, cursor);
+        self.img_button(ui, out, ["SkirmishSetup 038", "SkirmishSetup 039", "SkirmishSetup 038"], 528.0, 205.0, 65.0, 51.0, add.map(|_| Act::AddLord(99)), cursor); // the dice: a random lord
         self.img_button(ui, out, ["SkirmishSetup 017", "SkirmishSetup 018", "SkirmishSetup 017"], 521.0, 270.0, 78.0, 47.0, (!self.add_ai).then_some(Act::TeamsOpen), cursor);
         let human = self.mp_rows(ui).unwrap_or_else(|| vec![(tx(ui, "TEXT_XPLAY_WAITING_ROOM_403"), coa::player_name())]);
         let rows: Vec<(String, String)> = human.into_iter().chain(l.ais.iter().map(|&(n, _)| { let (a, b) = lord_keys(n); (tx(ui, &a), tx(ui, &b)) })).collect();
@@ -2018,7 +2037,13 @@ impl Menu {
             let m = usize::try_from(order[k]).ok().filter(|&m| m < rows.len());
             let s = m.map_or("UI-Buttons H039", |m| KEEP_SHIELDS[colour(m)]);
             let (sx, sy) = (1084.0 + at(kx, 4), 120.0 + at(ky, 6));
-            ui.img_fit(out, s, self.r(sx, sy, 16.0, 16.0), [1.0; 4]);
+            let p = self.r(sx - 4.0, sy - 4.0, 24.0, 24.0);
+            let (picked, hot) = (self.keep_pick == Some(k), Self::inside(p, cursor));
+            if picked || hot { Ui::fill(out, p, if picked { [0.905, 0.73, 0.402, 0.9] } else { [1.0, 1.0, 1.0, 0.35] }); }
+            // dragged: the shield follows the cursor while the button is held
+            let r = if picked && self.mouse.1 && !hot { [cursor[0] - 8.0 * self.s, cursor[1] - 8.0 * self.s, cursor[0] + 8.0 * self.s, cursor[1] + 8.0 * self.s] } else { self.r(sx, sy, 16.0, 16.0) };
+            ui.img_fit(out, s, r, [1.0; 4]);
+            if !self.add_ai && !self.teams_open { self.hits.push((p, Act::Keep(k))); }
             if let Some(&t) = m.and_then(|m| teams(l).get(m).copied()).as_ref().filter(|&&t| t > 0) {
                 ui.img_fit(out, &format!("Team Allies Shield {t} Large"), self.r(sx + 14.0, sy + 8.0, 12.0, 12.0), [1.0; 4]);
             }
@@ -2747,4 +2772,46 @@ fn mid_mission_briefing_resumes() {
     let p = m.hits.iter().find(|h| h.1 == Act::BriefStart).unwrap().0;
     assert!(matches!(m.click([(p[0] + p[2]) / 2.0, (p[1] + p[3]) / 2.0]), Some(Go::Resume)));
     assert!(matches!(Menu::briefing_mid(3, 2).back(), Some(Go::Resume)));
+}
+
+/// The lobby's dice adds a random lord; on the radar a start position picked and dropped on another (press, drag,
+/// release) swaps their members; a click, then a click on another does the same.
+#[test]
+fn lobby_dice_and_start_positions() {
+    let Some(mut u) = Ui::load(&crate::cache_dir().join("ui")) else { return }; // needs the exported UI
+    let dir = std::env::temp_dir().join(format!("shc-dice-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    skirmish::set_test_profile(&dir);
+    let mut m = Menu::main();
+    m.hits = vec![([0.0, 0.0, 1.0, 1.0], Act::Skirmish)];
+    m.click([0.5, 0.5]);
+    let Some(i) = m.files.iter().position(|f| f.file_stem().is_some_and(|s| s == "Crater Lake")) else { return }; // needs the game's maps
+    m.hits = vec![([0.0, 0.0, 1.0, 1.0], Act::Pick(i))];
+    m.click([0.5, 0.5]);
+    let mid = |p: [f32; 4]| [(p[0] + p[2]) / 2.0, (p[1] + p[3]) / 2.0];
+    let at = |m: &Menu, a: Act| mid(m.hits.iter().rev().find(|h| h.1 == a).expect("no such button").0);
+    let n = if let Screen::Lobby(l) = &m.screen { l.ais.len() } else { panic!() };
+    for _ in n..2 {
+        m.draw(&mut u, 1366.0, 768.0, [0.0; 2]);
+        m.click(at(&m, Act::AddLord(99)));
+    }
+    let Screen::Lobby(l) = &m.screen else { panic!() };
+    assert_eq!((l.ais.len(), l.keeps), (2, None), "the dice: random lords");
+    // drag position 0 (you) onto position 2
+    m.draw(&mut u, 1366.0, 768.0, [0.0; 2]);
+    let (p0, p2) = (at(&m, Act::Keep(0)), at(&m, Act::Keep(2)));
+    m.click(p0);
+    m.draw(&mut u, 1366.0, 768.0, p2);
+    m.release(p2);
+    let Screen::Lobby(l) = &m.screen else { panic!() };
+    assert_eq!(l.keeps.map(|k| k[..3].to_vec()), Some(vec![2, 1, 0]), "dragged: you start at position 2");
+    // click 1, click 2
+    m.draw(&mut u, 1366.0, 768.0, [0.0; 2]);
+    m.click(at(&m, Act::Keep(1)));
+    m.release(at(&m, Act::Keep(1))); // let go on the same one: stays picked
+    m.draw(&mut u, 1366.0, 768.0, [0.0; 2]);
+    m.click(at(&m, Act::Keep(2)));
+    let Screen::Lobby(l) = &m.screen else { panic!() };
+    assert_eq!(l.keeps.map(|k| k[..3].to_vec()), Some(vec![2, 0, 1]), "clicked: swapped");
+    let _ = std::fs::remove_dir_all(&dir);
 }
