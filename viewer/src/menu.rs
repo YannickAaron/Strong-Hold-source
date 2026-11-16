@@ -641,6 +641,7 @@ impl Menu {
                 Some(Confirm::Delete(p)) => {
                     self.confirm = None;
                     let _ = std::fs::remove_file(crate::koth::Hill::sidecar(&p)); // a King of the Hill save's score
+                    let _ = std::fs::remove_file(crate::saves::Mission::sidecar(&p)); // a trail / campaign save's mission
                     match std::fs::remove_file(&p) {
                         Ok(()) => { self.files.retain(|f| *f != p); self.scroll = self.scroll.min(self.files.len().saturating_sub(ROWS)); }
                         Err(e) => self.error = Some(format!("{}: {e}", p.display())),

@@ -151,6 +151,7 @@ mod sim {
         pub tap: Option<crate::game_replay::Tap>, // around every RunTick: records the game, or plays a replay (game_replay.rs)
         editor: Option<i32>,                      // the map editor's brush size while its tool input repeats (editor.rs)
         pub hill: Option<crate::koth::Hill>,      // King of the Hill (koth.rs); a replay's is its Player's
+        pub mission: Option<crate::saves::Mission>, // the trail / campaign mission this game is (saves::Mission, next to its saves)
     }
 
     impl Live {
@@ -169,6 +170,7 @@ mod sim {
             // a LAN game's saves are .msv, like the original's multiplayer saves (the LAN lobby's Load lists those)
             let path = if self.net.is_some() { path.with_extension("msv") } else { path.to_path_buf() };
             crate::koth::Hill::write_beside(&self.hill, &path)?; // the score is not in the sim memory (koth.rs)
+            crate::saves::Mission::write_beside(self.mission, &path)?; // nor which trail / campaign mission it is
             crate::saves::save_async(&self.m, path, self.t0.elapsed().as_millis() as u32, |_| {});
             Ok(())
         }
@@ -190,7 +192,7 @@ mod sim {
             let me = m.i32(ma::LOCAL).max(1);
             Self { radar_n, m, last: vec![[0; 21]; 320_800], tiles, t0: std::time::Instant::now(), sent: false, view: None, preview: vec![],
                 mouse: [-1, -1], centre: [400, 400, 30, 30], pos: None, flattened: false, ret: vec![0; shc_sim::hudstate::RET_LEN], sel: vec![], held: None,
-                troop: Default::default(), idx: vec![], ev: Default::default(), me, net: None, tap: Some(crate::game_replay::Tap::record()), editor: None, hill: None }
+                troop: Default::default(), idx: vec![], ev: Default::default(), me, net: None, tap: Some(crate::game_replay::Tap::record()), editor: None, hill: None, mission: None }
         }
 
         /// A new game in King of the Hill to `target` points (0 = conquest): its hill, fort and guards, koth.rs.
@@ -301,7 +303,10 @@ mod sim {
             // writes, which a replay plays back (it counts in its Player, koth.rs)
             crate::koth::after_tick(&mut self.hill, &mut self.m, true);
             if let Some(crate::game_replay::Tap::Rec(r)) = &mut self.tap {
-                if let Some(p) = r.autosaved.take() { let _ = crate::koth::Hill::write_beside(&self.hill, &p); } // after this tick's count
+                if let Some(p) = r.autosaved.take() { // after this tick's count
+                    let _ = crate::koth::Hill::write_beside(&self.hill, &p);
+                    let _ = crate::saves::Mission::write_beside(self.mission, &p);
+                }
             }
             self.sel = out.selected.iter().flat_map(|p| p.iter().flat_map(|v| v.to_le_bytes())).collect();
             self.troop.track(&out.draw);

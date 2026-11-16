@@ -687,7 +687,9 @@ impl App {
     fn start_mission(&mut self, id: i32, d: i32, m: shc_sim::mem::Mem, briefing: bool, from_story: bool) {
         (self.last_lobby, self.campaign) = (None, Some((id, d, false)));
         let cam = engine_view(&m);
-        self.start_live(live::Live::from_mem(m), cam);
+        let mut l = live::Live::from_mem(m);
+        l.mission = Some(saves::Mission::Campaign(id, d)); // next to its saves
+        self.start_live(l, cam);
         if let Some(p) = &mut self.play {
             p.playing = false;
             if let Some(l) = &p.live { l.send(live::Cmd::Action([1045, 1, 1])); }
@@ -855,7 +857,15 @@ impl App {
                     let ach = achievements::saved_counters(&m);
                     let mut l = live::Live::from_mem(m);
                     l.hill = koth::Hill::read_beside(&f); // a King of the Hill game's score (koth.rs)
+                    // a trail / campaign mission's save: its win still counts and Continue goes to the next mission
+                    l.mission = saves::Mission::read_beside(&f);
+                    let mission = l.mission;
                     self.start_live(l, None);
+                    match mission {
+                        Some(saves::Mission::Trail(t, id, d)) => self.trail = Some((t, id, d, false)),
+                        Some(saves::Mission::Campaign(id, d)) => self.campaign = Some((id, d, false)),
+                        None => {}
+                    }
                     achievements::save_loaded(ach); // UpdateAfterLoadingASave
                 }
                 Err(e) => if let Some(m) = &mut self.menu { m.error = Some(e) },
@@ -911,7 +921,9 @@ impl App {
                 Ok(m) => {
                     (self.menu, self.last_lobby, self.campaign) = (None, None, None);
                     let cam = engine_view(&m);
-                    self.start_live(live::Live::from_mem(m), cam);
+                    let mut l = live::Live::from_mem(m);
+                    l.mission = Some(saves::Mission::Trail(t, id, d)); // next to its saves
+                    self.start_live(l, cam);
                     self.trail = Some((t, id, d, false));
                     if let Some(l) = self.play.as_ref().and_then(|p| p.live.as_ref()) { for a in menu::trail_menu::start_actions(t) { l.send(live::Cmd::Action(a)); } }
                     // the trail briefing over the paused mission until its Start (trail_menu.rs, ButtonGotoBriefing)

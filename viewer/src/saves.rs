@@ -11,6 +11,33 @@ pub fn autosave_ticks() -> i32 { std::env::var("SHC_AUTOSAVE_TICKS").ok().and_th
 pub const AUTOSAVES: usize = 5;
 
 pub fn quick_path() -> PathBuf { saves_dir().join("Quicksave.sav") }
+
+/// The trail or campaign mission a save is from (the sim memory doesn't say which): `<save>.mission` next to it,
+/// "trail <trail> <mission> <difficulty>" / "campaign <mission> <difficulty>". A loaded save then still records its
+/// win (next mission unlocked) and Continue goes on to the next mission instead of the main menu.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Mission { Trail(i32, i32, i32), Campaign(i32, i32) }
+
+impl Mission {
+    pub fn sidecar(save: &Path) -> PathBuf { let mut s = save.as_os_str().to_owned(); s.push(".mission"); s.into() }
+    /// Written with the save; a save of any other game removes an old one (a reused name).
+    pub fn write_beside(m: Option<Mission>, save: &Path) -> std::io::Result<()> {
+        match m {
+            Some(m) => crate::paths::write_atomic(&Self::sidecar(save), m.encode()),
+            None => match std::fs::remove_file(Self::sidecar(save)) { Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e), _ => Ok(()) },
+        }
+    }
+    pub fn read_beside(save: &Path) -> Option<Mission> { std::fs::read_to_string(Self::sidecar(save)).ok().and_then(|s| Self::decode(&s)) }
+    fn encode(self) -> String {
+        match self { Mission::Trail(t, id, d) => format!("trail {t} {id} {d}\n"), Mission::Campaign(id, d) => format!("campaign {id} {d}\n") }
+    }
+    fn decode(s: &str) -> Option<Mission> {
+        let mut w = s.split_whitespace();
+        let kind = w.next()?;
+        let n: Vec<i32> = w.map(|v| v.parse().ok()).collect::<Option<_>>()?;
+        match (kind, n.as_slice()) { ("trail", &[t, id, d]) => Some(Mission::Trail(t, id, d)), ("campaign", &[id, d]) => Some(Mission::Campaign(id, d)), _ => None }
+    }
+}
 pub fn replays_dir() -> PathBuf { saves_dir().join("Replays") }
 pub fn is_replay(p: &Path) -> bool { p.extension().is_some_and(|e| e == "shcreplay") }
 
@@ -26,7 +53,7 @@ fn rotate(dir: &Path, now: u64) -> PathBuf {
     let time = |p: &PathBuf| p.file_stem().and_then(|s| s.to_str()?.strip_prefix("Autosave-")?.parse::<u64>().ok());
     let mut old: Vec<(u64, PathBuf)> = list(dir, "sav").into_iter().filter_map(|p| Some((time(&p)?, p))).collect();
     old.sort(); // the name carries the time
-    for (_, p) in old.iter().rev().skip(AUTOSAVES - 1) { let _ = std::fs::remove_file(p); let _ = std::fs::remove_file(crate::koth::Hill::sidecar(p)); }
+    for (_, p) in old.iter().rev().skip(AUTOSAVES - 1) { let _ = std::fs::remove_file(p); let _ = std::fs::remove_file(crate::koth::Hill::sidecar(p)); let _ = std::fs::remove_file(Mission::sidecar(p)); }
     dir.join(format!("Autosave-{now}.sav"))
 }
 
@@ -308,4 +335,21 @@ fn reads_save_headers() {
         assert!(e.preview.as_ref().is_some_and(|px| px.len() == 200 * 200 * 4), "{}: no preview", p.display());
         assert!(e.play_ms < 1000 * 3600 * 1000, "{}: play time {}", p.display(), e.play_ms);
     }
+}
+
+/// A trail / campaign save's mission round-trips next to it; a save of another game drops a stale one.
+#[test]
+fn mission_beside_save() {
+    let dir = std::env::temp_dir().join(format!("shc-mission-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = dir.join("Trail 3.sav");
+    for m in [Mission::Trail(0, 3, 2), Mission::Trail(13, 0, 1), Mission::Campaign(7, 4)] {
+        Mission::write_beside(Some(m), &save).unwrap();
+        assert_eq!(Mission::read_beside(&save), Some(m));
+    }
+    Mission::write_beside(None, &save).unwrap();
+    assert_eq!(Mission::read_beside(&save), None);
+    Mission::write_beside(None, &save).unwrap(); // nothing to remove
+    assert_eq!((Mission::decode("trail 1 2"), Mission::decode("campaign x 1"), Mission::decode("")), (None, None, None));
+    std::fs::remove_dir_all(&dir).ok();
 }
