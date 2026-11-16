@@ -160,27 +160,29 @@ const NOT_YET: &str = "Not in the native port yet.";
 /// `FreeBuild(map, options)` / `Scenario(map, difficulty)`: the Sandbox screen's Play (FRONT_StandaloneMission.StartMap).
 /// `Settings(mode)`: Options changed settings.cfg (game speed, VSync, cursor lock, ...); Some = Apply's screen mode
 /// (0 fullscreen, 1 borderless, 2 windowed at the chosen size). `Save(path)`: the Save dialog's file.
-pub enum Go { Load(PathBuf), Replay(PathBuf), Start(Lobby), Quit, Resume, ToMenu, Save(PathBuf), Restart, Mission(i32), Brief(i32), QuitMission(usize), FreeBuild(PathBuf, skirmish::FreeBuild), Scenario(PathBuf, i32), Settings(Option<u8>), Tutorial, Trail(i32, i32, i32), Lan(Box<mp_menu::Started>), Editor(editor::Start) }
+pub enum Go { Load(PathBuf), Replay(PathBuf), Start(Lobby), Quit, Resume, ToMenu, Save(PathBuf), Restart, Mission(i32), Brief(i32), QuitMission(usize), FreeBuild(PathBuf, skirmish::FreeBuild), Scenario(PathBuf, i32), Settings(Option<u8>), Action([i32; 3]), Tutorial, Trail(i32, i32, i32), Lan(Box<mp_menu::Started>), Editor(editor::Start) }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Act { Skirmish, LoadList, Quit, Back, Pick(usize), Fair(i32), Goods(i32), Outposts, AddAiOpen, AddAiClose, AddLord(usize), DelAi(usize), LordInfo(usize), LordInfoClose, LordTrailer, TeamsOpen, TeamsClose, TeamFace(usize), TeamCancel, Keep(usize), Restart, Campaigns, Campaign(usize), ToCampaigns, Mission(i32), PlayMission, Difficulty, BriefStart, BriefQuit, BriefTab(u8), Hint(usize), HelpBack, StoryAdvance, Sandbox, SoloOpen(bool), SoloNext, SoloPlay, SoloDifficulty, Advanced, Cycle(u8), Faction(i32), Flag(u8), Include(u8), Options, OptPage(u8), OptBack, OptFolder, ScreenMode, ApplyMode, Check(u8), Slider(u8), Group(u8, bool), Reset(u8), Colour(i32), HkRow(u16), HkSlot(u8), HkClose, HkApply, HkClear, HkCancel, HkPreset(bool), Nop, Tutorial, Start, Resume, ToMenu, Save, Trail(trail_menu::A), Mp(mp_menu::A), Help(help::A), Lobby(lobby::A), Update, GameFiles, Extras(extras::A),
-    WinSize, SaveGo, Delete(usize), Yes, No, Sort(u8), Credits, Ed(editor::A), Coa(coa::A), NameBox }
+    WinSize, SaveGo, Delete(usize), Yes, No, Sort(u8), Credits, Ed(editor::A), Coa(coa::A), NameBox, Cheat(i32), Scribe(u8) }
 
 /// `Missions(c, m)`: campaign c (0..7) with mission m selected.
 /// `Load`: the save browser; `Save`: the Save Game dialog (the same list, own saves only, and a name box).
 enum Screen { Main, Load, Save, Lobby(Lobby), Pause, Campaigns, Missions(usize, i32), Briefing(Brief), Story(Story), Sandbox, Solo(Solo), Options(Opt), Trail(trail_menu::T), Mp(mp_menu::T), Credits(credits::Credits), Help(Box<help::Help>), Editor(editor::T), Lord(Box<lord_info::Page>), Extras }
 
 /// The save browser's popup: overwrite this file / delete this file? `Leave`: the pause menu's Quit Mission (false) /
-/// Exit Crusader (true), HUD_IngameMenu cases 6 / 7.
+/// Exit Crusader (true), HUD_IngameMenu cases 6 / 7. `Progress`: Options > Cheats' Unlock All Missions: Permanently
+/// (true) / Reset All Missions (false), HUD_Options cases 102 / 103.
 #[derive(Clone, PartialEq)]
-enum Confirm { Overwrite(PathBuf), Delete(PathBuf), Leave(bool) }
+enum Confirm { Overwrite(PathBuf), Delete(PathBuf), Leave(bool), Progress(bool) }
 
 /// HUD_Options (its 800×600 grid, options-ui-spec.md): `page` 0 Video, 1 Sound, 2 Controls, 3 Hotkeys, 4 Player;
 /// `in_game` = from the pause menu (back to it, `can_restart` kept for it); `mode` the screen mode picked (0
 /// fullscreen, 1 borderless, 2 windowed), `applied` the one in use; `size` the window size picked for windowed mode
 /// (logical px, None = unchanged); `scroll` the page's, design px. Page 5 = View Patch Notes (ours: this app's notes).
 /// `hk`: the Hotkeys popup on row r of `hotkeys()`, slot -1 = choosing a slot, 0 / 1 = waiting for a key (`hk_new`).
-/// Page 6 = Coat of Arms (`coa` its tabs, coa.rs); `typing` = the Player page's name box has the keyboard.
+/// Page 6 = Coat of Arms (`coa` its tabs, coa.rs); page 7 = Cheats (the chicken); `typing` = the Player page's name
+/// box has the keyboard.
 #[derive(Clone, Copy)]
 struct Opt { page: u8, in_game: bool, can_restart: bool, mode: u8, applied: u8, size: Option<[u32; 2]>, scroll: f32, hk: Option<(u16, i8)>, coa: coa::Ed, typing: bool }
 
@@ -198,7 +200,7 @@ pub fn window_size() -> Option<[u32; 2]> {
 /// (`clock_overlay`), SH1 RTS controls (live.rs), Confirm Disband / Building Tooltips (`opt`, for the HUD), Compass
 /// (ost.rs), Sands Timer (trail_menu.rs). VSync is ours ("NativeVSync", on by default; the game's "VSync" key defaults
 /// off). Radar zoomed out (live.rs), Extra Zoom (gestures.rs), Moat (live.rs) and Custom Intros (audio.rs) too.
-const CHECKS: [(u8, &str, &str, bool, f32, f32); 18] = [
+const CHECKS: [(u8, &str, &str, bool, f32, f32); 19] = [
     (0, "LockCursor", "TEXT_NEW_TEXT_084", false, 373.5, 288.0), (0, "Compass", "TEXT_NEW_TEXT2_125", false, 373.5, 316.0),
     (0, crate::live::RADAR_WHOLE, "TEXT_NEW_TEXT2_127", true, 373.5, 344.0), (0, "ShowBuildingTooltips", "TEXT_NEW_TEXT2_081", true, 373.5, 372.0),
     // DE's "Use Steam overlay for help" (y 400) is left out: there is no overlay here, the box did nothing; the rows under it moved up
@@ -211,6 +213,7 @@ const CHECKS: [(u8, &str, &str, bool, f32, f32); 18] = [
     (2, "Moat", "TEXT_NEW_CTEXT_204", false, 375.5, 623.48), (2, "Confirm_Disband_Troops", "TEXT_NEW_CTEXT_393", true, 375.5, 658.48),
     (4, "CustomIntros", "TEXT_NEW_TEXT2_143", true, 373.5, 163.8),
     (0, "NativeVSync", "TEXT_NEW_TEXT_085", true, 373.5, 221.0),
+    (7, "CheatKeysEnabled", "TEXT_NEW_TEXT2_168", false, 373.5, 420.0), // Cheats: CheatKeysCheck
 ];
 
 /// settings.cfg as Options last saved it (read once): what the rest of the app applies.
@@ -241,12 +244,46 @@ pub fn opt_text(key: &str) -> Option<String> { cfg().get_or_insert_with(skirmish
 /// Tests: a new test profile's settings.cfg is read afresh.
 #[cfg(test)]
 pub fn reset_cfg() { *cfg() = None; }
+
+/// Options > Cheats this session, not saved (ConfigSettings.TempMissionUnlock / AchievementsDisabled): "Unlock All
+/// Missions: Temporarily" (HUD_Options case 101) and a cheat used (the page's "Achievements Disabled").
+static TEMP_UNLOCK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CHEATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// ConfigSettings.TempMissionUnlock: every campaign mission and trail reads as unlocked (skirmish / trail_menu Progress).
+pub fn temp_unlock() -> bool { TEMP_UNLOCK.load(std::sync::atomic::Ordering::Relaxed) }
+fn set_flag(f: &std::sync::atomic::AtomicBool, on: bool) { f.store(on, std::sync::atomic::Ordering::Relaxed) }
+/// The cheat keys' GameAction (KeyManager.Update, Settings_CheatKeysEnabled = opt("CheatKeysEnabled", false)):
+/// Cheat_gold = SH1Cheats (1044) 3 then 2, Cheat_freestuff = SH1Cheats 1 / 0 by free_buildingCheat. Each also sets
+/// ConfigSettings.AchievementsDisabled: call `cheated()`.
+pub fn cheated() { set_flag(&CHEATED, true) }
+
+/// The trails' settings.cfg keys (progress, times) and mission counts, ConfigSettings.SaveSettings order: classic 1..3,
+/// Sands of Time 1..7.
+const TRAIL_KEYS: [(&str, &str, i32); 10] = [("CampaignTrail", "Trail1Times", 50), ("CampaignTrail2", "Trail2Times", 30),
+    ("CampaignTrail3", "Trail3Times", 20), ("Sands1Trail", "TrailS1Times", 5), ("Sands2Trail", "TrailS2Times", 7), ("Sands3Trail", "TrailS3Times", 9),
+    ("Sands4Trail", "TrailS4Times", 11), ("Sands5Trail", "TrailS5Times", 9), ("Sands6Trail", "TrailS6Times", 9), ("Sands7Trail", "TrailS7Times", 9)];
+/// HUD_Options cases 102 / 103 (the popup's Yes): every campaign at mission 5 and every trail done, a trail mission not
+/// won counted as chickened (time -1 -> -1200), CoopCheatsEnabled on / all back to mission 1, times cleared, off.
+fn progress_cheat(cfg: &mut skirmish::Settings, unlock: bool) {
+    for c in 1..=7 { cfg.set(&format!("Campaign{c}"), if unlock { 5 } else { 1 }); }
+    for (kp, kt, n) in TRAIL_KEYS {
+        let old: Vec<i32> = cfg.get(kt).unwrap_or("").split(':').filter_map(|v| v.trim().parse().ok()).collect();
+        let times: String = (0..n as usize).map(|k| match old.get(k).copied().unwrap_or(-1) { _ if !unlock => -1, -1 => -1200, t => t })
+            .map(|t| format!("{t}:")).collect();
+        cfg.set(kp, if unlock { n + 1 } else { 1 });
+        cfg.set(kt, times);
+    }
+    cfg.set("CoopCheatsEnabled", if unlock { "True" } else { "False" });
+}
 /// Options > Controls > Confirm Disband Troops? (ConfigSettings.Settings_Confirm_Disband_Troops, default on): the HUD's
 /// Disband asks first (MainViewModel:36733).
 #[allow(dead_code)] // for the HUD's troop panel
 pub fn confirm_disband() -> bool { opt("Confirm_Disband_Troops", true) }
 /// Options > Video > Show Extended Building Tooltips (default on; HUD_Main.CreateBuildingTooltip).
 pub fn building_tooltips() -> bool { opt("ShowBuildingTooltips", true) }
+/// Options > Player > Pick your Scribe (ConfigSettings.Settings_Scribe "Scribe", default 2; a saved 1 loads as 2): 0 the
+/// classic scribe (FatControler: GameSprites 296.. = "UI-Scribe B001".., the HUD's face), else the modern one (24.. = C001..).
+pub fn scribe() -> i32 { if opt_num("Scribe", 2.0) as i32 == 0 { 0 } else { 2 } }
 /// Options > Controls: SH1 RTS controls (left click orders, right click deselects; default on), DLL_RunTick's flag.
 #[allow(dead_code)] // live.rs (feature "live")
 pub fn sh1_rts() -> bool { opt("SH1RTSControls", true) }
@@ -268,9 +305,9 @@ const GROUPS: [(&str, &str, &str, &str, bool, f32); 4] = [
 const PAGE_H: [f32; 3] = [781.0, 688.0, 693.48];
 
 /// FRONT_StandaloneMission: Custom Scenarios (`invasion`, at `difficulty` 0..3) or Free Build (options `fb`; `advanced`
-/// shows them); `sel` = the map in `files` / `solo`; `user` / `builtin` = the include boxes.
+/// shows them); `sel` = the map in `files` / `solo`; `include` = the include boxes (user, built-in, Workshop).
 #[derive(Clone, Copy)]
-struct Solo { invasion: bool, sel: Option<usize>, fb: skirmish::FreeBuild, difficulty: i32, user: bool, builtin: bool }
+struct Solo { invasion: bool, sel: Option<usize>, fb: skirmish::FreeBuild, difficulty: i32, include: [bool; 3] }
 
 /// HUD_Briefing over the paused mission `id` at difficulty `d`: `tab` 0 Objectives, 1 Hints (`hints` revealed,
 /// GameData.numHintsUnlockedForMission), 2 Help (scrolled `scroll` design px).
@@ -327,6 +364,9 @@ pub struct Menu {
     confirm: Option<Confirm>,  // Save / Load: the Yes / No popup
     lst: lobby::List,          // Lobby: the map list's search / sort / include, the Advanced popup (lobby.rs)
     mouse: ([f32; 2], bool),   // this frame's cursor and held left button (`draw`): the checkboxes' hover / press
+    /// Options > Cheats in a game: free_buildingCheat (PlayStateReturnData +2196, main.rs hands it in once; the Free
+    /// Buildings button flips it like HUD_Options case 106 flips lastGameState's)
+    pub free_build: Option<bool>,
 }
 
 /// Save / Load list order (HUD_LoadSaveRequester sortByColumn / sortByAscending): 0 name, 1 date; ascending. Kept
@@ -336,7 +376,7 @@ static SORT: std::sync::Mutex<(u8, bool)> = std::sync::Mutex::new((1, false));
 static LAST_SAVE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 impl Menu {
-    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], quiet_hover: false, error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, teams_open: false, team_pick: None, keep_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default(), mouse: ([0.0; 2], false) } }
+    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], quiet_hover: false, error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, teams_open: false, team_pick: None, keep_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default(), mouse: ([0.0; 2], false), free_build: None } }
     pub fn pause(can_restart: bool) -> Self { Menu { screen: Screen::Pause, in_game: true, can_restart, ..Self::main() } }
     /// Back from a sub-screen: the pause menu in game, else the main menu.
     fn home(&self) -> Self { if self.in_game { Self::pause(self.can_restart) } else { Self::main() } }
@@ -410,7 +450,10 @@ impl Menu {
             Screen::Solo(_) => { *self = Menu { screen: Screen::Sandbox, ..Self::main() }; None } // ButtonClicked("Combat")
             Screen::Trail(t) => self.trail_back(t),
             Screen::Mp(_) if self.mp_typing() => { self.mp.typing = false; None } // Esc closes the address field (mp_menu.rs)
-            Screen::Options(op) if op.hk.is_some() => { if let Screen::Options(op) = &mut self.screen { op.hk = None; } None } // Esc closes the popup
+            Screen::Options(_) if self.confirm.is_some() => { self.confirm = None; None } // Esc = No
+            // Esc while waiting for a key = Cancel (-104: back to Hotkey 1 / 2; KeyManager never takes Escape), else
+            // closes the popup
+            Screen::Options(op) if op.hk.is_some() => { if let Screen::Options(op) = &mut self.screen { op.hk = op.hk.filter(|h| h.1 >= 0).map(|(r, _)| (r, -1)); } None }
             Screen::Options(op) if op.typing => { if let Screen::Options(op) = &mut self.screen { op.typing = false; } None } // and the name box
             Screen::Options(_) => self.close_options(),
             Screen::Help(_) => self.help_close(),
@@ -498,6 +541,10 @@ impl Menu {
         None
     }
 
+    /// Space / Down pressed or let go: the credits scroll fast while held (credits.rs).
+    pub fn hold_key(&mut self, on: bool) { if let Screen::Credits(c) = &mut self.screen { c.hold(on) } }
+    pub fn is_credits(&self) -> bool { matches!(self.screen, Screen::Credits(_)) }
+
     /// Right click (MouseRightButtonUp): a Free Build option steps back.
     /// The left button let go: a start position dragged onto another on the radar swaps them (`Act::Keep`).
     pub fn release(&mut self, c: [f32; 2]) -> Option<Go> {
@@ -517,7 +564,7 @@ impl Menu {
     fn open_solo(&mut self, so: Solo, fresh: bool) {
         if fresh { self.lst = Default::default(); }
         self.lst.completed &= so.invasion;
-        self.lst.solo = skirmish::solo_maps(if so.invasion { 1 } else { 3 }, so.user, so.builtin);
+        self.lst.solo = skirmish::solo_maps_in(if so.invasion { 1 } else { 3 }, so.include);
         self.progress = skirmish::Progress::load(); // the won maps, for Show Completed
         (self.screen, self.scroll, self.error, self.preview, self.brief) = (Screen::Solo(so), 0, None, None, None);
         self.lst.dirty = true; // again by the shown names at the draw
@@ -573,6 +620,20 @@ impl Menu {
             (_, Act::Yes) => match self.confirm.clone() {
                 Some(Confirm::Overwrite(_)) => return self.save_go(),
                 Some(Confirm::Leave(exit)) => { self.confirm = None; return Some(if exit { Go::Quit } else { Go::ToMenu }) }
+                // Unlock All Missions: Permanently / Reset All Missions (HUD_Options 102 / 103); the reset also ends
+                // the temporary unlock, clears AchievementsDisabled and wipes the scores (WipeCampaignScores: missions.cfg)
+                Some(Confirm::Progress(unlock)) => {
+                    self.confirm = None;
+                    progress_cheat(&mut self.cfg, unlock);
+                    self.save_cfg();
+                    if !unlock {
+                        set_flag(&TEMP_UNLOCK, false);
+                        set_flag(&CHEATED, false);
+                        let mut p = skirmish::Progress::load();
+                        (p.done, p.maps) = Default::default();
+                        if let Err(e) = p.save() { self.error = Some(format!("missions.cfg: {e}")); }
+                    }
+                }
                 Some(Confirm::Delete(p)) => {
                     self.confirm = None;
                     let _ = std::fs::remove_file(crate::koth::Hill::sidecar(&p)); // a King of the Hill save's score
@@ -643,6 +704,19 @@ impl Menu {
                 self.cfg.keys = keys.text();
                 self.save_cfg();
             },
+            // Cheats (HUD_Options.ButtonClicked 101..106): 101 Unlock All Missions: Temporarily, 102 / 103 ask first;
+            // in a game SH1Cheats (1044) 3 Reset Popularity, 2 +1000 Gold, 1 / 0 Free Buildings on / off
+            (Screen::Options(_), Act::Cheat(101)) => { set_flag(&TEMP_UNLOCK, true); cheated(); }
+            (Screen::Options(_), Act::Cheat(p @ (102 | 103))) => self.confirm = Some(Confirm::Progress(p == 102)),
+            (Screen::Options(_), Act::Cheat(p @ (104 | 105))) => { cheated(); return Some(Go::Action([1044, 107 - p, 0])) }
+            (Screen::Options(_), Act::Cheat(_)) => {
+                let on = !self.free_build.unwrap_or(false);
+                self.free_build = Some(on);
+                if on { cheated(); }
+                return Some(Go::Action([1044, on as i32, 0]));
+            }
+            // Pick your Scribe (cases -15 / -17): ConfigSettings.Settings_Scribe 0 classic, 2 modern
+            (Screen::Options(_), Act::Scribe(v)) => { self.cfg.set("Scribe", v); self.save_cfg(); }
             (Screen::Options(_), Act::HkPreset(modern)) => {
                 self.cfg.keys = if modern { crate::keys::Keys::modern() } else { crate::keys::Keys::classic() }.text();
                 self.save_cfg();
@@ -695,7 +769,7 @@ impl Menu {
                 1 => for (k, v) in [("MasterVolume", 80), ("MusicVolume", 100), ("SpeechVolume", 100), ("UnitSpeechVolume", 100), ("SFXVolume", 100)] { self.set_slider(k, v) },
                 _ => self.set_slider("GameSpeed", 8),
             },
-            (_, Act::SoloOpen(invasion)) => self.open_solo(Solo { invasion, sel: None, fb: Default::default(), difficulty: 1, user: true, builtin: true }, true),
+            (_, Act::SoloOpen(invasion)) => self.open_solo(Solo { invasion, sel: None, fb: Default::default(), difficulty: 1, include: [true; 3] }, true),
             // Next: the other mode, keeping the options (its Advanced flag too: the original's quirk) and the include boxes
             (Screen::Solo(so), Act::SoloNext) => { let so = Solo { invasion: !so.invasion, difficulty: 1, ..*so }; self.open_solo(so, false) }
             (Screen::Solo(so), Act::Pick(i)) => { so.sel = Some(i); self.select_solo(i) }
@@ -708,7 +782,7 @@ impl Menu {
                 let v = match f { 0 => &mut fb.remove_animals, 1 => &mut fb.extreme_troops, 2 => &mut fb.extreme_powers, _ => &mut fb.defeat_on_death };
                 *v = !*v;
             }
-            (Screen::Solo(so), Act::Include(k)) => { if k == 0 { so.user = !so.user } else { so.builtin = !so.builtin }; let so = Solo { sel: None, ..*so }; self.open_solo(so, false) }
+            (Screen::Solo(so), Act::Include(k)) => { so.include[k as usize] ^= true; let so = Solo { sel: None, ..*so }; self.open_solo(so, false) }
             (Screen::Solo(so), Act::SoloPlay) => if let Some(i) = so.sel {
                 let map = self.files[i].clone();
                 // the Remove Hostile Animals box only counts while it shows (a Free Build map with hostile animals)
@@ -910,7 +984,7 @@ impl Menu {
         Ui::fill(out, all, [0.0, 0.0, 0.0, 0.5]);
         self.hits.push((all, Act::Nop));
         self.panel(ui, out, 610.0, 400.0, 700.0, 240.0);
-        let (q, p) = match c { Confirm::Overwrite(p) => (ui.text_of("TEXT_GAME_OPTIONS_031"), p), Confirm::Delete(p) => (format!("{}?", ui.text_of("TEXT_SCENARIO_020")), p), Confirm::Leave(_) => return }; // Leave: leave_popup
+        let (q, p) = match c { Confirm::Overwrite(p) => (ui.text_of("TEXT_GAME_OPTIONS_031"), p), Confirm::Delete(p) => (format!("{}?", ui.text_of("TEXT_SCENARIO_020")), p), Confirm::Leave(_) | Confirm::Progress(_) => return }; // leave_popup, progress_popup
         self.text(ui, out, &q, 960.0, 470.0, 36.0, 0.5, GOLD);
         self.text(ui, out, &p.file_stem().unwrap_or_default().to_string_lossy(), 960.0, 520.0, 26.0, 0.5, CREAM);
         self.button(ui, out, &ui.text_of("TEXT_GAME_OPTIONS_023"), 700.0, 560.0, 220.0, 52.0, Act::Yes, cursor);
@@ -1010,7 +1084,8 @@ impl Menu {
                 self.screen = Screen::Save;
                 self.load_screen(ui, out, true, cursor);
             }
-            Screen::Credits(c) => {
+            Screen::Credits(mut c) => {
+                c.step();
                 self.screen = Screen::Credits(c);
                 self.credits_screen(ui, out, &c, w, h, cursor);
             }
@@ -1340,7 +1415,6 @@ impl Menu {
     /// FRONT_StandaloneMission (1366×768 grid, sandbox-ui-spec.md): title + Next carousel, the map list, map info and
     /// radar, Difficulty (Custom Scenarios) or Advanced / Remove Hostile Animals and the options panel (Free Build),
     /// Back / Play; the list's search box, sortable Size / Name / Date headers and (Custom Scenarios) Show Completed.
-    /// ponytail: no Workshop maps.
     fn solo_screen(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, so: &Solo, cursor: [f32; 2]) {
         const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
         const ACCENT7: [f32; 4] = [0.905, 0.73, 0.402, 1.0]; // #F4DEAA
@@ -1378,7 +1452,7 @@ impl Menu {
             }
             let i = self.solo[j];
             // the type, or with Show Completed won / not won (GameSprites 368 / 369)
-            let icon = match (completed, i.user) { (true, _) if self.progress.map_done(&self.files[j]) => "Slider_Thumb", (true, _) => "notcompleted", (_, true) => "user", _ => "ff" };
+            let icon = match completed { true if self.progress.map_done(&self.files[j]) => "Slider_Thumb", true => "notcompleted", _ => i.src.icon() };
             ui.img_fit(out, icon, self.r(x0 + 3.0, y + 2.0, 30.0, 30.0), [1.0; 4]);
             if i.size >= 0 { self.label(ui, out, &i.size.to_string(), x0 + 40.0, y + 17.0, 16.0, 0.0, BLACK); }
             self.label(ui, out, &map_name(ui, &self.files[j]), x0 + 80.0, y + 17.0, 16.0, 0.0, BLACK);
@@ -1387,9 +1461,9 @@ impl Menu {
             }
             self.hits.push((p, Act::Pick(j)));
         }
-        // include boxes: user maps, built-in maps (Workshop drawn, nothing to include)
-        for (k, (x, icon, on)) in [(46.0, "user", so.user), (104.0, "ff", so.builtin), (164.0, "steam", true)].into_iter().enumerate() {
-            self.checkbox(out, x, 630.0, on, (k < 2).then_some(Act::Include(k as u8)));
+        // include boxes: user maps, built-in maps, Workshop maps (none without a Workshop folder)
+        for (k, (x, icon)) in [(46.0, "user"), (104.0, "ff"), (164.0, "steam")].into_iter().enumerate() {
+            self.checkbox(out, x, 630.0, so.include[k], Some(Act::Include(k as u8)));
             ui.img_fit(out, icon, self.r(x + 22.0, 625.0, 30.0, 30.0), [1.0; 4]);
         }
         self.search_box(ui, out, 230.0, 624.0, true, cursor);
@@ -1558,8 +1632,9 @@ impl Menu {
             let new = self.hk_new.clone();
             if let Some(k) = &new {
                 self.label(ui, out, &key_name(ui, k), 536.0, 326.0, 24.0, 0.5, BLACK);
-                // SetNewKey takes the key off its other function: say which
-                if let Some(other) = keys.owner(k).filter(|f| f != func) {
+                // HUD_Options.Update: OptionsHotKeyWarning names GetHotKeyFunction, the first function holding the key
+                // (this row's own too); SetNewKey takes it off there
+                if let Some(other) = keys.owner(k) {
                     let who = hotkeys().iter().position(|h| h.0 == other).map_or(other.to_string(), |i| hotkey_label(ui, i));
                     self.label(ui, out, &format!("{} {who}", tx(ui, "TEXT_NEW_TEXT_098")), 400.0, 356.0, 18.0, 0.5, BLACK);
                 }
@@ -1568,6 +1643,22 @@ impl Menu {
             self.glow(ui, out, &tx(ui, "TEXT_NEW_TEXT_099"), 325.0, 375.0, 150.0, None, Some(Act::HkClear), cursor);
             self.glow(ui, out, &tx(ui, "TEXT_SCENARIO_037"), 500.0, 375.0, 150.0, None, Some(Act::HkCancel), cursor);
         }
+    }
+
+    /// HUD_ConfirmationPopup over the Cheats page for cases 102 / 103: "Unlock All Missions" / "Reset All Missions", the
+    /// warning (TEXT_NEW_TEXT2 41 / 42), Yes / No. Laid out like the hotkey panel (BDR_SH1DEb 100, 175, 600×250).
+    fn progress_popup(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, unlock: bool, cursor: [f32; 2]) {
+        const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+        let all = self.r(0.0, 0.0, 800.0, 600.0);
+        Ui::fill(out, all, [0.058, 0.058, 0.058, 0x44 as f32 / 255.0]);
+        self.hits.push((all, Act::Nop));
+        self.frame(out, 100.0, 175.0, 600.0, 250.0, true);
+        let (title, body) = if unlock { ("TEXT_NEW_TEXT2_034", "TEXT_NEW_TEXT2_042") } else { ("TEXT_NEW_TEXT2_037", "TEXT_NEW_TEXT2_043") };
+        self.label(ui, out, &ui.text_of(title), 400.0, 209.0, 32.0, 0.5, BLACK);
+        tiled(out, 0, "Panel_Divider", self.r(103.0, 231.0, 594.0, 8.0), 250.0 * self.s, 7.5 * self.s, [1.0; 4]);
+        self.para(ui, out, &ui.text_of(body), 130.0, 255.0, 540.0, 20.0, BLACK);
+        self.glow(ui, out, &ui.text_of("TEXT_GAME_OPTIONS_023"), 150.0, 375.0, 200.0, None, Some(Act::Yes), cursor);
+        self.glow(ui, out, &ui.text_of("TEXT_GAME_OPTIONS_024"), 450.0, 375.0, 200.0, None, Some(Act::No), cursor);
     }
 
     /// BTN_SH_GlowSB: GlowS that can be selected (the lit bar, #FFD700 text).
@@ -1584,7 +1675,7 @@ impl Menu {
 
     /// HUD_Options (800×600 grid): BDR_SH1DEa frame, "Game Options", the section column, Back, and the page (350, 70,
     /// 397×510; Video / Sound / Controls scroll in 73..577, Hotkeys lists 179 rows). ponytail: no resolution list, UI
-    /// scale slider, cursor icons, lords, Cheats.
+    /// scale slider, cursor icons, lords.
     fn options_screen(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, op: &Opt, w: f32, h: f32, cursor: [f32; 2]) {
         const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
         let tx = |ui: &Ui, k: &str| ui.text_of(k);
@@ -1596,7 +1687,7 @@ impl Menu {
         for kx in [25.0, 755.0] { ui.img(out, "Panel_CelticKnot", self.r(kx, 11.0, 20.0, 40.0), [1.0; 4]); }
         self.label(ui, out, &tx(ui, "TEXT_GAME_OPTIONS_002"), 400.0, 34.0, 32.0, 0.5, BLACK);
         tiled(out, 0, "Panel_Divider", self.r(3.0, 56.0, 794.0, 8.0), 250.0 * self.s, 7.5 * self.s, [1.0; 4]);
-        // section column (GlowSB), chicken (Cheats, not ported), Back
+        // section column (GlowSB), chicken, Back
         let sections = [("TEXT_GAME_OPTIONS_005", Some(0)), ("TEXT_GAME_OPTIONS_006", Some(1)), ("TEXT_NEW_TEXT_058", Some(2)), ("TEXT_NEW_TEXT_077", Some(3)),
             ("TEXT_NEW_TEXT2_141", Some(4)), ("TEXT_NEW_CTEXT_373", Some(6))];
         for (k, (key, page)) in sections.into_iter().enumerate() {
@@ -1605,7 +1696,12 @@ impl Menu {
         // View Patch Notes: the original opens Steam's news page; ours shows this app's release notes (update.rs)
         self.glow_sel(ui, out, &tx(ui, "TEXT_NEW_CTEXT_429"), 45.0, 328.0, 260.0, op.page == 5, Some(Act::OptPage(5)), cursor);
         self.glow(ui, out, &tx(ui, "TEXT_NEW_TEXT_082"), 45.0, 366.0, 260.0, None, Some(Act::OptFolder), cursor);
-        self.img_button(ui, out, ["chicken1", "chicken2", "chicken1"], 115.0, 405.0, 122.0, 118.0, None, cursor);
+        // OptionsChickenButton: the Cheats page (OptionsCommand 8 -> menuSection 7); ChickenButtonEnter plays UI sound 137
+        let p = self.r(115.0, 405.0, 122.0, 118.0);
+        let hot = Self::inside(p, cursor);
+        if hot { crate::audio::hover(p, 137, 1.0); }
+        ui.img_fit(out, if hot { "chicken2" } else { "chicken1" }, p, [1.0; 4]);
+        self.hits.push((p, Act::OptPage(7)));
         self.glow(ui, out, &tx(ui, "TEXT_GAME_OPTIONS_018"), 75.0, 541.0, 200.0, None, Some(Act::OptBack), cursor);
         // the page: #44444444 fill, 2 px black edge
         let pg = self.r(350.0, 70.0, 397.0, 510.0);
@@ -1614,8 +1710,8 @@ impl Menu {
         for b in [[pg[0], pg[1], pg[2], pg[1] + e], [pg[0], pg[3] - e, pg[2], pg[3]], [pg[0], pg[1], pg[0] + e, pg[3]], [pg[2] - e, pg[1], pg[2], pg[3]]] { Ui::fill(out, b, BLACK); }
         let sc = if op.page < 3 { op.scroll } else { 0.0 };
         let vis = |y: f32, hh: f32| y - sc >= 73.0 && y - sc + hh <= 577.0; // inside the ScrollViewer
-        let title = ["TEXT_GAME_OPTIONS_005", "TEXT_GAME_OPTIONS_006", "TEXT_NEW_TEXT_058", "TEXT_NEW_TEXT_077", "TEXT_GAME_OPTIONS_046", "TEXT_NEW_CTEXT_429", ""][op.page as usize];
-        let ty = if op.page == 3 { 80.0 } else if op.page == 4 { 78.0 } else { 83.0 };
+        let title = ["TEXT_GAME_OPTIONS_005", "TEXT_GAME_OPTIONS_006", "TEXT_NEW_TEXT_058", "TEXT_NEW_TEXT_077", "TEXT_GAME_OPTIONS_046", "TEXT_NEW_CTEXT_429", "", "TEXT_NEW_TEXT2_033"][op.page as usize];
+        let ty = if matches!(op.page, 3 | 7) { 80.0 } else if op.page == 4 { 78.0 } else { 83.0 };
         if (vis(ty, 30.0) || op.page >= 3) && op.page != 6 { self.label(ui, out, &tx(ui, title), 548.5, ty + 15.0 - sc, 24.0, 0.5, BLACK); }
         for (i, &(page, _, label, _, x, y)) in CHECKS.iter().enumerate() {
             if page != op.page || !vis(y, 23.0) { continue; }
@@ -1674,7 +1770,7 @@ impl Menu {
                 }
                 if vis(728.48, 28.0) { self.glow(ui, out, &tx(ui, "TEXT_NEW_TEXT_088"), 467.0, 728.48 - sc, 250.0, None, Some(Act::Reset(2)), cursor); }
             }
-            // Hotkeys: the list (name, "K1 / K2"), 27 px rows, wheel-scrolled; the presets (rebinding not ported)
+            // Hotkeys: the list (name, "K1 / K2"), 27 px rows, wheel-scrolled; a row opens the rebind popup; the presets
             3 => {
                 let keys = crate::keys::Keys::from_block(&self.cfg.keys);
                 let first = (op.scroll / 27.0) as usize;
@@ -1713,6 +1809,29 @@ impl Menu {
                 if let Screen::Options(o) = &mut self.screen { o.scroll = o.scroll.min(end); }
             }
             6 => self.coa_page(ui, out, op.coa, op.scroll, cursor),
+            // Cheats (CheatSettings): Unlock All Missions (Temporarily / Permanently), Reset All Missions; in a game
+            // (OptionsInGameCheatsVis) Reset Popularity, +1000 Gold, Free Buildings; Enable Cheat Keys (CHECKS); the
+            // warning, "Achievements Disabled" once a cheat was used. ponytail: not hidden in a LAN game (the sim
+            // ignores SH1Cheats there)
+            7 => {
+                const INSET: [f32; 4] = [0.102, 0.006, 0.003, 0x22 as f32 / 255.0];
+                Ui::fill(out, self.r(373.0, 133.0, 351.0, 101.0), INSET);
+                self.label(ui, out, &tx(ui, "TEXT_NEW_TEXT2_034"), 548.5, 146.0, 19.0, 0.5, BLACK);
+                for (k, key) in ["TEXT_NEW_TEXT2_035", "TEXT_NEW_TEXT2_036", "TEXT_NEW_TEXT2_037"].into_iter().enumerate() {
+                    self.glow(ui, out, &tx(ui, key), 378.5, [164.0, 202.0, 251.5][k], 340.0, None, Some(Act::Cheat(101 + k as i32)), cursor);
+                }
+                if op.in_game {
+                    Ui::fill(out, self.r(373.0, 293.0, 351.0, 121.0), INSET);
+                    let free = if self.free_build == Some(true) { "TEXT_NEW_TEXT2_041" } else { "TEXT_NEW_TEXT2_040" };
+                    for (k, key) in ["TEXT_NEW_TEXT2_038", "TEXT_NEW_TEXT2_039", free].into_iter().enumerate() {
+                        self.glow(ui, out, &tx(ui, key), 378.5, 304.5 + 40.0 * k as f32, 340.0, None, Some(Act::Cheat(104 + k as i32)), cursor);
+                    }
+                }
+                Ui::fill(out, self.r(373.0, 453.0, 351.0, 101.0), INSET);
+                self.para(ui, out, &tx(ui, "TEXT_NEW_TEXT2_044"), 377.0, 457.0, 343.0, 19.0, BLACK);
+                if CHEATED.load(std::sync::atomic::Ordering::Relaxed) { self.label(ui, out, &tx(ui, "TEXT_NEW_TEXT2_045"), 548.5, 568.0, 19.0, 0.5, BLACK); }
+                if let Some(Confirm::Progress(unlock)) = self.confirm { self.progress_popup(ui, out, unlock, cursor); }
+            }
             // Player: the name box (click to type), Custom Intros, the single-player colour shields (front end only)
             _ => {
                 let name = coa::player_name();
@@ -1732,6 +1851,14 @@ impl Menu {
                         let normal = if i as i32 == col { c.as_str() } else { a.as_str() };
                         self.img_button(ui, out, [normal, b.as_str(), normal], 408.0 + 37.0 * i as f32, 235.8, 32.0, 33.0, Some(Act::Colour(i as i32)), cursor);
                     }
+                    // Pick your Scribe (OptionsMPLordVis: front end only): HUD_Options.UpdateCursors' sprites, the picked one
+                    // lit (GameSprites 340 / 343), the other one dim until hovered (341 / 344)
+                    self.label(ui, out, &tx(ui, "TEXT_NEW_TEXT2_160"), 548.5, 297.0, 24.0, 0.5, BLACK);
+                    let classic = scribe() == 0;
+                    let (b, c) = if classic { (["Scribe_B_over"; 3], ["Scribe_C_selected", "Scribe_C_over", "Scribe_C_selected"]) }
+                        else { (["Scribe_B_selected", "Scribe_B_over", "Scribe_B_selected"], ["Scribe_C_over"; 3]) };
+                    self.img_button(ui, out, b, 458.5, 317.3, 60.0, 60.0, Some(Act::Scribe(0)), cursor);
+                    self.img_button(ui, out, c, 578.5, 317.3, 60.0, 60.0, Some(Act::Scribe(2)), cursor);
                 }
             }
         }
@@ -2094,7 +2221,7 @@ impl Menu {
             if sel == Some(j) || Self::inside(p, cursor) {
                 Ui::fill(out, p, if sel == Some(j) { [0.356, 0.014, 0.002, 1.0] } else { [0.462, 0.027, 0.004, 1.0] }); // #A11F08 / #B52E0C
             }
-            ui.img_fit(out, if self.lst.is_user(&self.files[j]) { "user" } else { "ff" }, self.r(x0 - 2.0 + 5.0, y + 2.0, 30.0, 30.0), [1.0; 4]);
+            ui.img_fit(out, self.lst.icon(&self.files[j]), self.r(x0 - 2.0 + 5.0, y + 2.0, 30.0, 30.0), [1.0; 4]);
             let i = &self.infos[j];
             self.label(ui, out, &i.players.to_string(), col(1) + 15.0, y + 17.0, 16.0, 0.5, BLACK);
             self.label(ui, out, &i.size.to_string(), col(2) + 20.0, y + 17.0, 16.0, 0.5, BLACK);
@@ -2706,6 +2833,9 @@ fn hotkey_rebind_pause() {
     press(&mut m, &mut u, Act::HkRow(pause));
     press(&mut m, &mut u, Act::HkSlot(0));
     assert!(m.capturing());
+    // Esc = Cancel: back to Hotkey 1 / 2 (a second Esc closes the popup)
+    assert!(m.back().is_none() && !m.capturing() && matches!(m.screen, Screen::Options(Opt { hk: Some((_, -1)), .. })));
+    press(&mut m, &mut u, Act::HkSlot(0));
     m.key("L");
     press(&mut m, &mut u, Act::HkApply);
     assert!(!m.capturing());
@@ -2813,5 +2943,64 @@ fn lobby_dice_and_start_positions() {
     m.click(at(&m, Act::Keep(2)));
     let Screen::Lobby(l) = &m.screen else { panic!() };
     assert_eq!(l.keeps.map(|k| k[..3].to_vec()), Some(vec![2, 0, 1]), "clicked: swapped");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Options > Cheats (HUD_Options 101..106) and Player > Pick your Scribe: Permanently writes every campaign / trail
+/// done (open trail missions chickened) and CoopCheatsEnabled, Reset puts them back and ends Temporarily; Enable Cheat
+/// Keys saves "CheatKeysEnabled"; in a game the buttons send SH1Cheats; the scribe saves "Scribe" 0 / 2.
+#[test]
+fn options_cheats_scribe() {
+    let Some(mut u) = Ui::load(&crate::cache_dir().join("ui")) else { return }; // needs the exported UI
+    let dir = std::env::temp_dir().join(format!("shc-cheats-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("settings.cfg"), "||SETTINGS||\nName:Lord X\nCampaign2:3\nTrail1Times:12:-1:\nScribe:1\n||SETTINGS||\n").unwrap();
+    std::fs::write(dir.join("missions.cfg"), "mission1:2\n").unwrap();
+    crate::skirmish::set_test_profile(&dir);
+    let press = |m: &mut Menu, u: &mut Ui, a: Act| {
+        m.draw(u, 1920.0, 1080.0, [0.0; 2]);
+        let p = m.hits.iter().rev().find(|h| h.1 == a).expect("control on screen").0;
+        m.click([(p[0] + p[2]) / 2.0, (p[1] + p[3]) / 2.0])
+    };
+    let mut m = Menu::main();
+    press(&mut m, &mut u, Act::Options);
+    // Pick your Scribe: a saved 1 reads as modern (2)
+    assert_eq!(scribe(), 2);
+    press(&mut m, &mut u, Act::OptPage(4));
+    press(&mut m, &mut u, Act::Scribe(0));
+    assert_eq!((scribe(), skirmish::Settings::read(&dir).unwrap().get("Scribe")), (0, Some("0")));
+    // the chicken opens Cheats; no in-game buttons in the front end
+    press(&mut m, &mut u, Act::OptPage(7));
+    assert!(matches!(m.screen, Screen::Options(Opt { page: 7, .. })) && !m.hits.iter().any(|h| h.1 == Act::Cheat(104)));
+    let keys = CHECKS.iter().position(|c| c.1 == "CheatKeysEnabled").unwrap() as u8;
+    press(&mut m, &mut u, Act::Check(keys));
+    assert!(opt("CheatKeysEnabled", false));
+    press(&mut m, &mut u, Act::Cheat(101));
+    assert!(temp_unlock() && skirmish::Progress::load().unlocked == [5; 7]);
+    // Permanently asks; Yes unlocks
+    press(&mut m, &mut u, Act::Cheat(102));
+    assert!(m.confirm == Some(Confirm::Progress(true)));
+    press(&mut m, &mut u, Act::Yes);
+    let cfg = skirmish::Settings::read(&dir).unwrap();
+    assert_eq!((cfg.get("Campaign2"), cfg.get("CampaignTrail"), cfg.get("Sands4Trail"), cfg.get("CoopCheatsEnabled")), (Some("5"), Some("51"), Some("12"), Some("True")));
+    assert!(cfg.get("Trail1Times").unwrap().starts_with("12:-1200:-1200:") && cfg.get("Trail1Times").unwrap().matches(':').count() == 50);
+    // Reset: No keeps it, Yes puts everything back (scores wiped, the temporary unlock over)
+    press(&mut m, &mut u, Act::Cheat(103));
+    press(&mut m, &mut u, Act::No);
+    assert_eq!(skirmish::Settings::read(&dir).unwrap().get("Campaign2"), Some("5"));
+    press(&mut m, &mut u, Act::Cheat(103));
+    press(&mut m, &mut u, Act::Yes);
+    let cfg = skirmish::Settings::read(&dir).unwrap();
+    assert_eq!((cfg.get("Campaign2"), cfg.get("CampaignTrail"), cfg.get("CoopCheatsEnabled"), cfg.get("Name")), (Some("1"), Some("1"), Some("False"), Some("Lord X")));
+    assert!(!temp_unlock() && skirmish::Progress::load() == skirmish::Progress::default());
+    // in a game: Reset Popularity, +1000 Gold, Free Buildings on / off
+    let mut g = Menu { in_game: true, ..Menu::main() };
+    g.open_options();
+    g.free_build = Some(false);
+    press(&mut g, &mut u, Act::OptPage(7));
+    let mut sent = vec![];
+    for a in [104, 105, 106, 106] { if let Some(Go::Action(x)) = press(&mut g, &mut u, Act::Cheat(a)) { sent.push(x) } }
+    assert_eq!(sent, [[1044, 3, 0], [1044, 2, 0], [1044, 1, 0], [1044, 0, 0]]);
     let _ = std::fs::remove_dir_all(&dir);
 }

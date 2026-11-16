@@ -793,10 +793,11 @@ mod tests {
         assert_eq!(sel, want, "group 3 = the archer + the added spearman");
     }
 
-    /// Ours: a right click on the map with a barracks panel open moves all seven of its assembly points there
-    /// (`Live::rally`, the panel's own flag tools → chore 0x66 each).
+    /// The barracks panel's archer flag (MAPPER_PLACE_ASSEMBLY_POINT1, what its flag button and key 1 hold): a map
+    /// click moves only the archers' point (chore 0x66, a = 0) and drops the tool (DLL_MapAction -50); an archer
+    /// recruited afterwards walks to it.
     #[test]
-    fn rally_points_by_right_click() {
+    fn archer_flag_moves_one_point_and_recruits_go_there() {
         let Some(mut l) = save("Crater Lake-1test.sav") else { return };
         l.step();
         l.open_new(87); // a barracks near the keep, its panel open
@@ -804,10 +805,26 @@ mod tests {
         let (kx, ky) = l.keep().unwrap();
         let p = l.mem_ref().i32(LOCAL) as u64;
         let point = |l: &Live, a: u64| { let at = 0x18379b040 + p * 0x583c + a * 4; (l.mem_ref().i16(at), l.mem_ref().i16(at + 2)) };
+        let before: Vec<_> = (0..7).map(|a| point(&l, a)).collect();
         let spot = [(12, 12), (-12, 12), (12, -12), (-12, -12), (20, 0), (0, 20)].into_iter().map(|(dx, dy)| (kx as i32 + dx, ky as i32 + dy))
-            .find(|&(x, y)| l.rally(x, y) == 7).expect("no reachable spot near the keep");
+            .find(|&(x, y)| { l.set_tool(332); l.click(332, x, y).0.why == crate::live::DONE }).expect("no reachable spot near the keep");
+        assert_eq!(l.mem_ref().i32(shc_sim::mapaction::TOOL), 0, "the sim dropped the flag tool");
         l.step();
-        for a in 0..7 { assert_eq!(point(&l, a), (spot.0 as i16, spot.1 as i16), "assembly point {a}"); }
-        assert_eq!(l.hud().app_sub_mode, 1, "the panel stays open");
+        assert_eq!(point(&l, 0), (spot.0 as i16, spot.1 as i16), "the archers' point");
+        for a in 1..7 { assert_eq!(point(&l, a), before[a as usize], "assembly point {a} stays"); }
+        // an archer recruited now (MakeTroop 1007, chimp 22) heads for the flag
+        let old = own(l.mem_ref(), 0x16);
+        let pl = shc_sim::game::player(1);
+        l.mem().set_i32(pl + 0x4d0 + 17 * 4, 5); // bows in the armoury (resource 17)
+        l.game_action(1007, 1, 22);
+        let mut near = false;
+        for _ in 0..3000 {
+            l.step();
+            let new: Vec<i32> = own(l.mem_ref(), 0x16).into_iter().filter(|i| !old.contains(i)).collect();
+            let m = l.mem_ref();
+            near = new.iter().any(|&i| (m.i16(u(i) + 0x71c) as i32 - spot.0).abs() <= 3 && (m.i16(u(i) + 0x71e) as i32 - spot.1).abs() <= 3);
+            if near { break; }
+        }
+        assert!(near, "no new archer at the flag {spot:?}");
     }
 }

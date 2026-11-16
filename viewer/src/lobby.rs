@@ -14,24 +14,23 @@ pub enum A { Extreme(u8), Extended, AdvOpen, AdvClose, AdvEnable, Adv(usize), Re
 /// the include boxes (user, built-in), `adv` = the Advanced popup is open, `mode` = the game mode picker. `dirty`:
 /// re-sort by the shown (translated) names at the next draw. The Sandbox screen: `solo` = its maps (the include boxes
 /// applied), `completed` = Show Completed (Custom Scenarios: the type icon says won / not won).
-pub struct List { all: Vec<(PathBuf, MapInfo, bool)>, pub filter: String, sort: u8, asc: bool, include: [bool; 2], pub typing: bool, pub dirty: bool, pub adv: bool,
+pub struct List { all: Vec<(PathBuf, MapInfo, skirmish::MapSrc)>, pub filter: String, sort: u8, asc: bool, include: [bool; 3], pub typing: bool, pub dirty: bool, pub adv: bool,
     pub mode: bool, pub solo: Vec<(PathBuf, skirmish::SoloInfo)>, pub completed: bool }
 
 impl Default for List {
-    fn default() -> Self { List { all: vec![], filter: String::new(), sort: 0, asc: true, include: [true; 2], typing: false, dirty: false, adv: false, mode: false, solo: vec![], completed: false } }
+    fn default() -> Self { List { all: vec![], filter: String::new(), sort: 0, asc: true, include: [true; 3], typing: false, dirty: false, adv: false, mode: false, solo: vec![], completed: false } }
 }
 impl List {
     /// A map's info, also while the search hides it (the original keeps selectedMPHeader).
     pub fn info(&self, map: &std::path::Path) -> Option<&MapInfo> { self.all.iter().find(|e| e.0 == map).map(|e| &e.1) }
-    /// From a user Maps folder (the row's icon).
-    pub fn is_user(&self, map: &std::path::Path) -> bool { self.all.iter().any(|e| e.0 == map && e.2) }
+    /// The row's type icon (user / built-in / Workshop).
+    pub fn icon(&self, map: &std::path::Path) -> &'static str { self.all.iter().find(|e| e.0 == map).map_or("ff", |e| e.2.icon()) }
 }
 
 /// MapFileManager.GetMultiplayerMaps: multiplayer maps (mapType 1) with room for you and an AI, the user Maps folders'
-/// and the game's. ponytail: no Workshop maps.
-fn scan(include: [bool; 2]) -> Vec<(PathBuf, MapInfo, bool)> {
-    let dirs = skirmish::user_map_dirs().into_iter().filter(|_| include[0]).map(|d| (d, true)).chain(include[1].then(|| (skirmish::maps_dir(), false)));
-    dirs.flat_map(|(d, u)| skirmish::list(&d, "map").into_iter().map(move |p| (p, u)))
+/// the game's and the Workshop items' (WorkshopMP), as the include boxes pick.
+fn scan(include: [bool; 3]) -> Vec<(PathBuf, MapInfo, skirmish::MapSrc)> {
+    skirmish::map_dirs(include).into_iter().flat_map(|(d, u)| skirmish::list(&d, "map").into_iter().map(move |p| (p, u)))
         .filter_map(|(p, u)| skirmish::map_info(&p).filter(|i| i.players >= 2).map(|i| (p, i, u))).collect()
 }
 
@@ -46,7 +45,7 @@ impl Menu {
     /// FRONT_Multiplayer.Open(skirmishSetup): the map list with `l.map` selected (an empty path: Crater Lake, the map
     /// the setup port is verified on, else the first; the original starts with none).
     pub(super) fn open_lobby(&mut self, mut l: Lobby) {
-        let all = scan([true; 2]);
+        let all = scan([true; 3]);
         if !all.iter().any(|e| e.0 == l.map) {
             if !l.map.as_os_str().is_empty() {
                 self.error = Some(format!("{} is not a skirmish map", l.map.file_stem().unwrap_or_default().to_string_lossy()));
@@ -76,7 +75,7 @@ impl Menu {
         if self.lst.all.is_empty() { return; } // a LAN lobby: its own list (mp_menu.rs)
         let name = |p: &PathBuf| ui.map_or_else(|| p.file_stem().unwrap_or_default().to_string_lossy().into_owned(), |u| map_name(u, p)).to_lowercase();
         let f = self.lst.filter.to_lowercase();
-        let mut v: Vec<(String, &(PathBuf, MapInfo, bool))> = self.lst.all.iter().map(|e| (name(&e.0), e)).filter(|(n, _)| n.contains(&f)).collect();
+        let mut v: Vec<(String, &(PathBuf, MapInfo, skirmish::MapSrc))> = self.lst.all.iter().map(|e| (name(&e.0), e)).filter(|(n, _)| n.contains(&f)).collect();
         let asc = self.lst.asc;
         let dir = |o: std::cmp::Ordering| if asc { o } else { o.reverse() };
         v.sort_by(|a, b| dir(a.0.cmp(&b.0)));
@@ -194,12 +193,12 @@ impl Menu {
         None
     }
 
-    /// Under the map list: the include boxes (user maps, built-in maps; Workshop drawn, nothing to include), the
+    /// Under the map list: the include boxes (user maps, built-in maps, Workshop maps), the
     /// search box (TEXT_NEW_TEXT2_126 while empty) and its clear button.
     pub(super) fn lobby_list_bar(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, cursor: [f32; 2]) {
         for (k, (x, icon)) in [(50.0, "user"), (110.0, "ff"), (170.0, "steam")].into_iter().enumerate() {
             let on = self.lst.include.get(k).copied().unwrap_or(true);
-            self.checkbox(out, x, 666.0, on, (k < 2).then_some(Act::Lobby(A::Include(k as u8))));
+            self.checkbox(out, x, 666.0, on, Some(Act::Lobby(A::Include(k as u8))));
             ui.img_fit(out, icon, self.r(x + 22.0, 661.0, 30.0, 30.0), [1.0; 4]);
         }
         self.search_box(ui, out, 260.0, 660.0, false, cursor);

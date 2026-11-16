@@ -160,6 +160,7 @@ impl Ui {
         if !st.lords.merit_button { self.merit = None; }
         if self.merit.is_some() { self.merit_panel(st, out, cursor); }
         if self.fb.is_some() { self.free_build(st, out, cursor); }
+        crate::achievements::toast(self, out); // an achievement just unlocked (achievements.rs)
     }
 
     // ---- extreme powers
@@ -167,10 +168,20 @@ impl Ui {
     /// HUD_ExtremePowers (IngameUIScreens: a Viewbox 400 high, top-right, margin 0,120 around the 240 px grid): the
     /// charge bar (ExtremePoints = min(236, extremeCount · 242 / 7000)), a tick and a button per power, power k usable
     /// from 636 · (k + 1) (GameData.cs:2254); a click is ExtremePower (1068, k). Only while extremeEnabled.
-    /// ponytail: the 25 s "Click on an Icon to use Tactical Powers" hint (Settings_ShowExtremeHelp) is not shown.
+    /// The first time power 1 becomes usable (GameData: ExtremePower1_Enabled False -> True with
+    /// Settings_ShowExtremeHelp, which is then saved False) Story_ShowExtremeHelp shows TEXT_EXTREME_DEMO_008 and the
+    /// extreme arrow left of the bar for 25 s; using a power skips it to 24 s.
     fn extreme_bar(&mut self, st: &HudState, out: &mut Vec<HudTri>, cursor: [f32; 2]) {
         let (on, count) = (st.extreme.0, st.extreme.1 as i32);
         if on == 0 { return; }
+        let usable = count >= 636;
+        if extreme_help_starts(self.extreme_help.0, usable, || crate::skirmish::Settings::load().flag("ShowExtremeHelp", true)) {
+            self.extreme_help.1 = Some(std::time::Instant::now());
+            let mut cfg = crate::skirmish::Settings::load();
+            cfg.set("ShowExtremeHelp", "False");
+            if let Err(e) = cfg.save() { self.message = Some(format!("settings.cfg: {e}")); }
+        }
+        self.extreme_help.0 = usable;
         let k = self.s * 400.0 / 240.0;
         let (w, top) = (self.w, 120.0 * self.s);
         let r = |right: f32, y: f32, bw: f32, bh: f32| [w - (right + bw) * k, top + y * k, w - right * k, top + (y + bh) * k];
@@ -190,6 +201,19 @@ impl Ui {
                 self.hits.push((p, Hit::Panel));
             }
             if Self::inside(p, cursor) { self.panel_tip = Some(self.text_of(&format!("TEXT_EXTREME_POWERS_{n:03}"))); }
+        }
+        if self.extreme_help.1.is_some_and(|t| t.elapsed().as_secs_f32() >= 25.0) { self.extreme_help.1 = None; }
+        if self.extreme_help.1.is_some() {
+            // ExtremeHelpText: 150 wide, right-aligned at margin 0,200,65 (white, HUD drop shadow, default 12 px);
+            // ExtremeHelpArrow: 30 wide at margin 0,210,40
+            self.img(out, "extreme arrow", r(40.0, 210.0, 30.0, 16.0), white);
+            let size = 12.0 * k / self.s;
+            let lines = self.wrap(&self.text_of("TEXT_EXTREME_DEMO_008"), size, 150.0 * k / self.s);
+            let lh = self.font.horizontal_line_metrics(size).map_or(size * 1.2, |m| m.new_line_size) * self.s;
+            for (i, l) in lines.iter().enumerate() {
+                let [x0, y0, ..] = r(65.0 + 150.0, 200.0, 150.0, 0.0);
+                self.top_text(out, l, [x0, y0 + i as f32 * lh], size, 0.0, white, true);
+            }
         }
     }
 
@@ -772,6 +796,36 @@ mod tests {
         assert!(u.fb.is_none());
     }
 
+    /// KeyManager's HUD keys (`Ui::hotkey`): the goods bar starts shown (ours), K hides / shows it, J opens the
+    /// objectives over it (with goals) and closing them brings it back, F1 opens the Free Build menu only in Free Build.
+    #[test]
+    fn hud_hotkeys() {
+        let Some(mut u) = ui() else { return };
+        let mut st = HudState::default();
+        assert!(u.goods_on, "the goods bar is on from the start, stockpile or not");
+        assert!(u.hotkey("ToggleGoods", &st) && !u.goods_on, "K hides it");
+        u.hotkey("ToggleGoods", &st);
+        assert!(u.goods_on);
+        u.hotkey("ToggleObjectives", &st);
+        assert!(u.goods_on && !u.goals, "no goals: no objectives");
+        st.ev.goals = vec![crate::hud::Goal { id: 4, ..Default::default() }];
+        u.hotkey("ToggleObjectives", &st);
+        assert!(u.goods_on && u.goals, "objectives cover the bar without switching it off");
+        u.hotkey("ToggleObjectives", &st);
+        assert!(u.goods_on && !u.goals, "closing them brings the bar back");
+        press(&mut u, &st, Hit::Goods);
+        assert!(!u.goods_on, "the Resources button hides it");
+        u.hotkey("ToggleObjectives", &st);
+        press(&mut u, &st, Hit::Goods);
+        assert!(u.goods_on && !u.goals, "the Resources button shows it and shuts the objectives");
+        u.hotkey("FreeBuildEvents", &st);
+        assert!(u.fb.is_none());
+        st.lords.free_build = true;
+        u.hotkey("FreeBuildEvents", &st);
+        assert!(u.fb.is_some());
+        assert!(!u.hotkey("Pause", &st));
+    }
+
     /// Control groups: the troops panel's toggle shows the list; row "0" is group 0, Create / Select send GroupTroops0 /
     /// SelectClan0 (19 / 29).
     #[test]
@@ -788,4 +842,16 @@ mod tests {
         assert_eq!(press(&mut u, &st, Hit::Cg(0, 0)).0, vec![[29, -1, 0]]);
         assert_eq!(press(&mut u, &st, Hit::Cg(3, 0)).0, vec![[19, 20, 0]]);
     }
+}
+
+/// GameData: Story_ShowExtremeHelp begins when power 1 turns usable (was not last frame) and the setting is still on
+/// (`show` is read only then).
+fn extreme_help_starts(was: bool, usable: bool, show: impl FnOnce() -> bool) -> bool { !was && usable && show() }
+
+#[test]
+fn extreme_help_once_on_the_edge() {
+    assert!(extreme_help_starts(false, true, || true));
+    assert!(!extreme_help_starts(true, true, || panic!("not read while it stays usable")));
+    assert!(!extreme_help_starts(false, false, || panic!("not read below 636")));
+    assert!(!extreme_help_starts(false, true, || false), "Settings_ShowExtremeHelp off after the first time");
 }

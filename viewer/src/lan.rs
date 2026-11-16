@@ -1780,7 +1780,7 @@ impl ChatUi {
 fn insult(t: &str) -> Option<usize> { t.strip_prefix('\u{1}').and_then(|n| n.parse().ok()).filter(|n| (1..=20).contains(n)) }
 
 /// SFXManager.insultSpeech: Insult1..5.wav, insult6..10.wav, Insult11..20.wav.
-fn insult_wav(n: usize) -> String { if (6..=10).contains(&n) { format!("insult{n}.wav") } else { format!("Insult{n}.wav") } }
+pub(crate) fn insult_wav(n: usize) -> String { if (6..=10).contains(&n) { format!("insult{n}.wav") } else { format!("Insult{n}.wav") } }
 
 const CREAM: [f32; 4] = [0xef as f32 / 255.0, 0xf3 as f32 / 255.0, 0xc6 as f32 / 255.0, 1.0];
 
@@ -1943,6 +1943,20 @@ pub(crate) fn ask_speed(rate: f32) -> bool {
     UI.lock().unwrap().as_ref().map(|st| st.lock().unwrap().speed = Some(rate as i32)).is_some()
 }
 
+/// A LAN game runs (Director.MultiplayerGame).
+pub(crate) fn in_game() -> bool { UI.lock().unwrap().is_some() }
+
+/// main.rs insult keys in a LAN game: insult `n` to every player (SendIngameChatInsult to all of
+/// GetMultiplayerChatInfo's players); it shows here through the chat log like a sent one (speech, MuteInsults).
+pub(crate) fn send_insult(n: usize) {
+    if let Some(st) = UI.lock().unwrap().clone() { send_insult_to(&st, n) }
+}
+fn send_insult_to(st: &Mutex<Status>, n: usize) {
+    let mut s = st.lock().unwrap();
+    let to = s.players.iter().fold(0, |m, (p, _)| m | 1 << (*p).clamp(0, 31));
+    s.say.push((format!("\u{1}{n}"), to));
+}
+
 /// main.rs Options changed: in a LAN game only a moved GameSpeed slider asks for a speed (another option keeps the
 /// game's). True = in a LAN game.
 pub(crate) fn speed_setting(cfg: f32) -> bool {
@@ -2096,6 +2110,8 @@ mod tests {
         assert_eq!(ui.mask(&st), 0b1000);
         ui.click(&m, crate::menu::chat_panel::INSULT + 3);
         assert_eq!(m.lock().unwrap().say, vec![("\u{1}3".to_string(), 0b1000)]);
+        send_insult_to(&m, 12); // the insult key: to everyone, whatever the panel picked
+        assert_eq!(m.lock().unwrap().say[1], ("\u{1}12".to_string(), 0b1110));
         assert_eq!((insult("\u{1}3"), insult("\u{1}21"), insult("hi")), (Some(3), None, None));
         assert_eq!(insult_wav(7), "insult7.wav");
     }
@@ -2589,6 +2605,21 @@ mod tests {
         let force = |l: &Live| crate::koth::tests::force(l.mem_ref(), ai).0;
         assert!(!force(&ls[0]).is_empty() && force(&ls[0]) == force(&ls[1]), "{:?} / {:?}", force(&ls[0]), force(&ls[1]));
         assert_eq!((sums(&mut ls[0]), ls[0].hill.clone()), (sums(&mut ls[1]), ls[1].hill.clone()), "in sync with the AI's orders");
+    }
+
+    /// MPPing (Alt+P, KeyFunctions 202): the sender's chore 0x66 (0x7f, its view centre) reaches the others; a teammate
+    /// gets a camera spot (FUN_1800f3eb0: the HUD's action-point button), an enemy and the sender none.
+    #[cfg(feature = "live")]
+    #[test]
+    fn ally_ping_reaches_teammate() {
+        if !maps() { return; }
+        let mut ls = start_with(2, 10, |l| { l.humans[0].team = 1; l.humans[1].team = 1; l.humans[2].team = 2; });
+        for l in &mut ls { l.centre = [200, 210, 30, 30]; }
+        let t0 = ls[0].tick();
+        let mut ls = run_all(ls, t0 + 20);
+        ls[0].game_action(202, -1, 0);
+        let ls = run_all(ls, t0 + 200); // past the lockstep delay, however far it adapted
+        assert_eq!(ls.iter().map(|l| l.action_point()).collect::<Vec<_>>(), [None, Some((200, 210)), None], "teammate only");
     }
 
     /// A player drops out and comes back (its app lost the game: it gets the host's state); everyone waited for it.

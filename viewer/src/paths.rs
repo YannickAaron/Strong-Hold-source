@@ -12,8 +12,7 @@ use std::path::PathBuf;
 
 const GAME: &str = "Stronghold Crusader Definitive Edition";
 const APP: &str = "Strong Hold";
-#[cfg(not(any(target_os = "macos", windows)))]
-const STEAM_APP: &str = "3024040";
+const STEAM_APP: &str = "3024040"; // SteamManager.AppID
 
 /// `fs::write` through a temp file and a rename: a crash or a full disk mid-write leaves the old file whole, never an
 /// empty or half one (saves, settings.cfg with the campaign progress, maps).
@@ -30,6 +29,17 @@ pub fn home() -> PathBuf { env_dir("HOME").or_else(|| env_dir("USERPROFILE")).un
 fn steam() -> PathBuf {
     let roots = steam_roots();
     roots.iter().find(|r| r.join("steamapps/common").join(GAME).is_dir()).unwrap_or(&roots[0]).clone()
+}
+/// Steam Workshop item folders of DE (steamapps/workshop/content/<app id>/<item>), what
+/// Platform_Workshop.GetListOfSubscribedItemsPaths returns: under the Steam roots and next to the game's steamapps.
+pub fn workshop_items() -> Vec<PathBuf> {
+    let game = game();
+    let apps = steam_roots().into_iter().map(|r| r.join("steamapps")).chain(game.parent().and_then(|c| c.parent()).map(PathBuf::from));
+    let mut v: Vec<PathBuf> = apps.map(|a| a.join("workshop/content").join(STEAM_APP))
+        .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_dir())).collect();
+    v.sort();
+    v.dedup();
+    v
 }
 fn steam_roots() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]

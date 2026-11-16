@@ -88,14 +88,10 @@ pub fn ported(_: i32) -> bool { false }
 #[cfg(feature = "live")]
 pub fn is_drag(tool: i32) -> bool { shc_sim::mapaction::is_drag(tool) }
 
-/// The assembly-point flag tools (eMappers MAPPER_PLACE_ASSEMBLY_POINT*) of a building panel (app sub mode): barracks,
-/// mercenary post, Bedouin stockade, engineers' and tunnellers' guild, cathedral, as KeyManager picks them there.
-pub fn rally_tools(sub: i32) -> Vec<i32> {
-    match sub { 1 => (332..=338).collect(), 44 => (360..=366).collect(), 63 => (391..=398).collect(), 23 => vec![367, 368], 24 => vec![369], 96 => vec![370], _ => vec![] }
-}
-
-/// KeyManager's number keys (SelectClan `n`, key "0" first) with such a panel open: the flag tool of one troop type,
-/// in the original's order per panel (barracks, mercenary post, stockade, the guilds, the cathedral).
+/// KeyManager's number keys with a building panel open (app mode 16): SelectClan `n` picks flag tool `n - 1` of the
+/// panel (key 1 the first, key 0 none: `keyFunctions - 30`), the assembly-point tools (eMappers
+/// MAPPER_PLACE_ASSEMBLY_POINT*) in the original's order per panel: barracks, mercenary post, Bedouin stockade,
+/// engineers' and tunnellers' guild, cathedral.
 pub fn rally_key(sub: i32, n: usize) -> Option<i32> {
     let t: &[i32] = match sub {
         1 => &[332, 334, 335, 333, 336, 337, 338],
@@ -106,17 +102,20 @@ pub fn rally_key(sub: i32, n: usize) -> Option<i32> {
         96 => &[370],
         _ => &[],
     };
-    t.get(n).copied()
+    t.get(n.checked_sub(1)?).copied()
 }
 
 #[test]
 fn rally_keys_cover_each_panel() {
-    for sub in [1, 44, 63, 23, 24, 96] {
-        let mut keys: Vec<i32> = (0..9).filter_map(|n| rally_key(sub, n)).collect();
+    for (sub, tools) in [(1, 332..=338), (44, 360..=366), (63, 391..=398), (23, 367..=368), (24, 369..=369), (96, 370..=370)] {
+        let mut keys: Vec<i32> = (0..10).filter_map(|n| rally_key(sub, n)).collect();
         keys.sort();
-        assert_eq!(keys, rally_tools(sub), "panel {sub}: one key per flag tool");
+        assert_eq!(keys, tools.collect::<Vec<_>>(), "panel {sub}: one key per flag tool");
     }
-    assert_eq!(rally_key(4, 0), None); // a granary has no flag
+    // KeyManager: key 1 = the panel's first button (archer / Arabian bow / skirmisher), key 4 the crossbow, key 0 nothing
+    assert_eq!([rally_key(1, 1), rally_key(1, 4), rally_key(44, 1), rally_key(63, 1), rally_key(1, 0), rally_key(1, 8)],
+        [Some(332), Some(333), Some(360), Some(395), None, None]);
+    assert_eq!(rally_key(4, 1), None); // a granary has no flag
 }
 #[cfg(not(feature = "live"))]
 pub fn is_drag(_: i32) -> bool { false }
@@ -405,17 +404,6 @@ mod sim {
             ma::start(&mut self.m, mapper) >= 0
         }
 
-        /// Ours: every assembly point of the open panel's building to tile (x, y), each through its own flag tool as
-        /// the panel's buttons place them (mapaction `rally`: the spot must be reachable; chore 0x66 per point).
-        /// Returns the chores queued; the tool is dropped afterwards.
-        pub fn rally(&mut self, x: i32, y: i32) -> usize {
-            let tools = rally_tools(self.hud().app_sub_mode);
-            let mut n = 0;
-            for t in tools { if self.set_tool(t) { n += ma::click(&mut self.m, x, y, self.me).len(); } }
-            self.set_tool(0);
-            n
-        }
-
         /// DLL_MapAction hover (mouse state 0): the original validator FUN_1800770d0 on the footprint around (x, y).
         /// The ghost (FUN_18005cfe0, inside mapaction's hover) goes to `mapaction::PREVIEW`: the building's tile
         /// graphics on a valid spot, red / green tile marks otherwise. The draw pass shows and clears it every frame,
@@ -623,8 +611,10 @@ mod sim {
             (0..big * big).map(|k| out[(k / big) * n / big * n + (k % big) * n / big]).collect()
         }
 
-        /// GameAction RadarClicked (1028 → FUN_1800f6090, not ported: it reads the front end's radar index map):
-        /// the game tile under radar pixel (x, y) (top-down, as displayed) of the last `radar` call.
+        /// The game tile under radar pixel (x, y) (top-down, as displayed) of the last `radar` call. Same lookup as
+        /// GameAction RadarClicked (1028 → FUN_1800f6090, ported in `frontend` 0x404): the same tile on every click
+        /// (test `radar_click_vs_gameaction`), without its whole-map render-order scan (FUN_18004f480) or its
+        /// writes to the engine's view object.
         pub fn radar_tile(&self, x: i32, y: i32) -> Option<(i32, i32)> {
             if !(0..RADAR_N).contains(&x) || !(0..RADAR_N).contains(&y) { return None; }
             let n = self.radar_n;
@@ -744,6 +734,55 @@ mod sim {
         let locked = (0..h.available.len()).filter(|&i| !h.available[i]).count();
         println!("mission 1: {locked} mappers locked");
         assert!(locked > 0);
+    }
+
+    /// Our minimap click (`radar_tile`) against DE's GameAction 1028 (FUN_1800f6090 + FUN_18004f480, `frontend`
+    /// 0x404, fed the same radar index map) over maps of several sizes, all four rotations, three radar sizes and a
+    /// pixel grid. The only difference allowed: a tile with x = 0, where DE's camera result (y * 1000 + x, x <= 0 =
+    /// no move) answers 0 (none seen: no valid tile has x = 0).
+    #[test]
+    fn radar_click_vs_gameaction() {
+        let dir = std::env::temp_dir().join(format!("shc-radar-click-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.cfg"), "||SETTINGS||\nNativeRadarWholeMap:True\n||SETTINGS||\n").unwrap();
+        crate::skirmish::set_test_profile(&dir);
+        let mut maps: Vec<(String, Live)> = [1, 4, 9, 13].iter().filter_map(|&id| crate::skirmish::start_mission(id, 1).ok().map(|m| (format!("mission {id}"), Live::from_mem(m)))).collect();
+        let p = crate::paths::test_save("Crater Lake-1test.sav");
+        if std::path::Path::new(&p).exists() { maps.push(("Crater Lake".into(), Live::load(&p))); }
+        if maps.is_empty() { return; } // needs the game's Maps folder
+        let (mut same, mut x0, mut sizes) = (0, 0, std::collections::BTreeSet::new());
+        for (name, mut l) in maps {
+            let size = l.m.i32(0x1860ab524);
+            sizes.insert(size);
+            l.records();
+            l.step();
+            let max = l.radar_n;
+            for rot in [0, 2, 4, 6] {
+                l.rotate(rot, size / 2, size / 2);
+                l.step();
+                for n in [max, 124, (max + 124) / 2] {
+                    l.radar_n = n;
+                    shc_sim::hudstate::set_radar_size(&mut l.m, n);
+                    l.radar([size / 2 + 37, size / 2 - 21, 30, 30]);
+                    shc_sim::frontend::set_radar_idx(&l.idx);
+                    // ponytail: 23 px grid; FUN_18004f480 scans the render order per click (~0.3M reads)
+                    for py in (0..RADAR_N).step_by(23) {
+                        for px in (0..RADAR_N).step_by(23) {
+                            let ours = l.radar_tile(px, py);
+                            let r = l.game_action(1028, px * n / RADAR_N, py * n / RADAR_N);
+                            let de = (r > 0).then_some((r % 1000, r / 1000));
+                            match (ours, de) {
+                                (a, b) if a == b => same += 1,
+                                (Some((0, _)), None) => x0 += 1,
+                                _ => panic!("{name} rot {rot} radar {n} px ({px}, {py}): ours {ours:?} DE {de:?}"),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!("radar clicks: {same} equal, {x0} on x = 0 tiles (DE: no move); map sizes {sizes:?}");
+        assert!(same > 10_000);
     }
 
     /// Hover with a building the player can't pay for: the verdict says what is missing ("Wood needed") before any
@@ -1004,7 +1043,6 @@ impl Live {
     pub fn step(&mut self) -> Vec<Rec> { vec![] }
     pub fn hud(&mut self) -> HudState { HudState::default() }
     pub fn set_tool(&mut self, _: i32) -> bool { false }
-    pub fn rally(&mut self, _: i32, _: i32) -> usize { 0 }
     pub fn hover(&mut self, t: i32, x: i32, y: i32) -> Verdict { Verdict::unported(t, x, y) }
     pub fn clear_preview(&mut self) {}
     pub fn click(&mut self, t: i32, x: i32, y: i32) -> (Verdict, usize) { (Verdict::unported(t, x, y), 0) }
@@ -1058,8 +1096,8 @@ pub fn camera(r: [f32; 4]) -> [i32; 4] {
 /// camera goes to that tile (`Frame::goto`); `Save`: write a .sav there (pause menu); `Rotate(rot, x, y)`:
 /// DLL_SetMapRotation, the camera centres on game tile (x, y) once the map has turned.
 pub enum Cmd { Run { playing: bool, rate: f32 }, View([i32; 4], [f32; 4]), Step, Tool(i32), Hover(i32, i32), Click(i32, i32), Drag(i32, i32, i32), Action([i32; 3]), Action4([i32; 4]), Mouse(i32, i32), Delete(i32), Tax(i32), Rations, Troops(TroopIn), Radar(i32, i32), Save(std::path::PathBuf), SaveReplay, Rotate(i32, i32, i32), Tutorial(i32, i32), ViewPos([i32; 2]), Flatten(bool), AppMode(i32, i32), RadarZoom(i32),
-    /// Ours: the open panel's assembly points to a tile (`Live::rally`); every own unit of the selection's types.
-    Rally(i32, i32), SelectTypes,
+    /// Ours: every own unit of the selection's types.
+    SelectTypes,
     /// The map editor (editor.rs): DLL_MapAction in mouse state 0..3 (`EdIn`), DLL_SetEditorPlayer, the map saved there.
     Editor(EdIn), EditorPlayer(i32), SaveMap(std::path::PathBuf) }
 
@@ -1256,12 +1294,6 @@ impl Thread {
                             println!("click mapper {} at tile {x},{y}: {v:?}, {n} chore(s)", tool.0);
                             if v.why == DONE { tool = (0, false); } // until the UI drops it too (Cmd::Tool(0))
                             set(v, !playing);
-                        }
-                        Ok(Cmd::Rally(x, y)) => {
-                            input = true;
-                            let n = l.rally(x, y);
-                            if tool.1 { l.set_tool(tool.0); } // the flag tools replaced the build tool
-                            println!("rally points to {x},{y}: {n} chore(s)");
                         }
                         #[cfg(feature = "live")]
                         Ok(Cmd::SelectTypes) => { input = true; println!("select all of the selection's types: {}", crate::military::select_types(l.mem())); }

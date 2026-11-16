@@ -4,7 +4,7 @@
 //! decoded in the background. Layout as the XAML (1920 grid): a picture 1042×748 at the left, changing every 10 s
 //! with a 1 s fade out / in; the 800 wide column on the right scrolling up at 50 px/s from below the screen, looping;
 //! 100 px fades at its top and bottom; Back (B005) bottom left, and a click anywhere leaves (LeaveCredits).
-//! Music 15 ("sandalmaker"). ponytail: Space / Down fast scroll not ported.
+//! Music 15 ("sandalmaker"). Space / Down held scroll at ms / 3 instead of ms / 20 (FRONT_Credits.Update).
 use super::{pic, quad, Act, Menu, SCREEN, SCREEN_H};
 use crate::hud::{HudTri, Ui};
 use std::sync::Mutex;
@@ -23,8 +23,9 @@ static DATA: Mutex<Data> = Mutex::new(Data { items: None, pictures: Vec::new(), 
 const PIC: (usize, usize, usize, usize) = (30, 166, 1042, 748); // x, y, w, h in the 1920 grid
 const LINE: f32 = 30.0; // a 24 px Junicode line
 
+/// `off` = the column's scroll (px, before the wrap), `last` = its last step, `fast` = Space / Down held.
 #[derive(Clone, Copy)]
-pub(super) struct Credits { t0: Instant }
+pub(super) struct Credits { t0: Instant, off: f32, last: Instant, fast: bool }
 
 impl Credits {
     /// FRONT_Credits.init: from the top, picture 1, music 15; the data loads in the background once.
@@ -32,8 +33,16 @@ impl Credits {
         crate::audio::music("fx\\music\\sandalmaker.raw", 1.0);
         let mut d = DATA.lock().unwrap();
         if !std::mem::replace(&mut d.started, true) { std::thread::spawn(load); }
-        Credits { t0: Instant::now() }
+        Credits { t0: Instant::now(), off: 0.0, last: Instant::now(), fast: false }
     }
+    /// FRONT_Credits.Update: offset += ms since the last frame / 3 with Space or Down held (KeyManager.IsKeyHeldDown), else / 20.
+    pub fn step(&mut self) {
+        let now = Instant::now();
+        self.off += now.duration_since(self.last).as_millis() as f32 / if self.fast { 3.0 } else { 20.0 };
+        self.last = now;
+    }
+    /// Space / Down pressed or let go (main.rs).
+    pub fn hold(&mut self, on: bool) { self.fast = on; }
     /// The picture shown now (0..6) and its alpha: shown 10 s, 1 s out, the next 1 s in.
     fn picture(&self) -> (usize, f32) {
         let t = self.t0.elapsed().as_secs_f32() + 1.0; // the first one starts fully in
@@ -159,7 +168,7 @@ impl Menu {
                 // the stack's height, then the scroll (offset += ms / 20, back to 0 at the end)
                 let total: f32 = items.iter().map(|i| match i { Item::Logo { top, .. } => top + 202.0, Item::Text { top, .. } => top + LINE }).sum();
                 let len = (total - 1080.0).max(1.0);
-                let off = (c.t0.elapsed().as_millis() as f32 / 20.0) % (len - 5.0).max(1.0);
+                let off = c.off % (len - 5.0).max(1.0);
                 let mut y = -off;
                 for i in items {
                     match i {
@@ -222,4 +231,17 @@ fn credits_xaml() {
         Item::Text { top: 30.0, title: false, sh: true, text: "Simon Bradbury".into() },
     ]);
     assert_eq!(from_tsv(&to_tsv(&v)), v);
+}
+
+#[test]
+fn credits_fast_scroll() {
+    let t = Instant::now() - std::time::Duration::from_millis(600);
+    let mut c = Credits { t0: t, off: 0.0, last: t, fast: false };
+    c.step();
+    assert!((30.0..40.0).contains(&c.off), "600 ms / 20 = 30 px, got {}", c.off);
+    c.hold(true);
+    c.last = Instant::now() - std::time::Duration::from_millis(600);
+    let before = c.off;
+    c.step();
+    assert!((200.0..215.0).contains(&(c.off - before)), "600 ms / 3 = 200 px held");
 }

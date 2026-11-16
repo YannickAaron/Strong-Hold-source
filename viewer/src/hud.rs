@@ -80,6 +80,7 @@ pub struct HudState {
     pub coords: Table<i32>,      // by eMappers id: DLL_GetMapperCoord, x << 16 | y or 0x55555555 (--live; empty = XAML)
     pub sassanid: Option<i32>,   // ours: the open stables panel is a Sassanid Stable's; its recruit's refusal (0 = ok, shc_sim::ext::can_recruit)
     pub game_paused: u8, // +2200: the pause latch GameAction Game_Paused (1048) sets (OST_GAME_PAUSED)
+    pub free_cheat: u8,  // +2196 free_buildingCheat: SH1Cheats 1 / 0 (Options > Cheats, the cheat key)
     pub keep_storage: [i32; 25], // +1436: starting goods still in the keep (OST_STARTING_GOODS rows)
     pub left: [i16; 10],         // +1984: editor counts / limits: people, buildings, vegetation, rocks, tribes (OST_PEOPLE_LEFT)
     pub got_market: u8,          // +2587: bits 4 granary, 8 armoury placed (the starting goods' speech)
@@ -235,7 +236,7 @@ impl HudState {
             eunuch_cost: u(2833), siege: std::array::from_fn(|k| if k < 6 { u(1025 + k) } else { u(2609) }), patrol_mode: u(1037), get_ammo: u(1031), cows: u(1032), attack_here: u(1033), rocks: u(1034), weapon_avail: std::array::from_fn(|k| u(1047 + k)), costs: Table::default(), coords: Table::default(), sassanid: None,
             keep_storage: std::array::from_fn(|k| i32::from_le_bytes(std::array::from_fn(|j| u(1436 + 4 * k + j)))),
             left: std::array::from_fn(|k| s2(1984 + 2 * k)), got_market: u(2587), lord_only_selected: u(2586),
-            game_paused: b.get(2200).copied().unwrap_or(0), report: reports::Data::decode(b), mouse_selector_state: u(2812), speed: 0.0, end: None, ev: Events::default(),
+            game_paused: b.get(2200).copied().unwrap_or(0), free_cheat: u(2196), report: reports::Data::decode(b), mouse_selector_state: u(2812), speed: 0.0, end: None, ev: Events::default(),
             gate_state: i(976), dog_cage: s(968), hp: [s(982), s(984), s(986)],
             inn: [i(1008), s(1012) as i32, s(1014) as i32, s(1016) as i32, s(1018) as i32, s(1020) as i32, s(1022) as i32],
             weapon: [b[1038], b[1043], b[1044]], can_make: [u(2597), b[1040], u(2599), b[1042], u(2598), b[1041]],
@@ -397,7 +398,7 @@ const PRESSED: [f32; 4] = [0.8, 0.8, 0.8, 1.0]; // a held button's bar (ours: Is
 pub(crate) struct Button { pub(crate) screen: usize, pub(crate) name: String, pub(crate) structure: String, pub(crate) s1: String, pub(crate) s2: String, pub(crate) x: f32, pub(crate) y: f32, pub(crate) w: f32, pub(crate) h: f32, pub(crate) help: String, pub(crate) mapper: i32 }
 struct Glyph { uv: [f32; 4], m: fontdue::Metrics }
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Hit { Tab(usize), Build(usize), Stance(usize), Order(usize), Panel, Act(i32, i32, i32), Delete(i32), Rally(i32), TradeType(i32), TradeGood(i32, i32), Trade(i32, i32), Radar, Engi(bool), Recruit(i32, Option<&'static str>), Goals, Options, Mode(i32), Help(i32),
+enum Hit { Tab(usize), Build(usize), Stance(usize), Order(usize), Panel, Act(i32, i32, i32), Delete(i32), Flag(i32), TradeType(i32), TradeGood(i32, i32), Trade(i32, i32), Radar, Engi(bool), Recruit(i32, Option<&'static str>), Goals, Goods, Options, Mode(i32), Help(i32),
     Workshop(i32, i32), Slider(u8, i32), Auto(u8, i32, i32), Confirm(u8), Briefing,
     Ally(u8, i32), Fb(i32), Cg(u8, i32), Merit(u8, i32) } // overlays.rs: allies panel, Free Build menu, control groups, standings
 
@@ -445,6 +446,31 @@ const TUNNELLER: [Recruit; 1] = [(5, 300.0, 20.0, 103.0, 47.0, 28)];
 const SASSANID_KNIGHT: i32 = 0x5a;
 const SASSANID: [Recruit; 1] = [(SASSANID_KNIGHT, 430.0, 20.0, 125.0, 0.0, 19)];
 const MONK: [Recruit; 1] = [(37, 310.0, 20.0, 113.0, 0.0, 55)];
+
+/// HUD_Buildings.xaml "assembly points": 19×19 flag Buttons (`UI-Buttons L018`, hover L019), ButtonCreateTroop with
+/// MAPPER_PLACE_ASSEMBLY_POINT* → EditorDirector.placeBuildingInteraction (the flag tool, held like a build tool).
+/// (eChimps whose Show_* binding they share (0: always), mapper, left, bottom, hover text (ButtonEnterCreateTroop's
+/// TroopCostText / TroopNameCostText, lookUpText index + 1)). The troop panels' flags stand above their troop at
+/// bottom 150, the guilds' and cathedral's at bottom 5.
+type Flag = (i32, i32, f32, f32, &'static str);
+fn flags(sub: i32, arab: bool) -> &'static [Flag] {
+    match sub {
+        1 => &[(22, 332, 70.0, 150.0, "TEXT_NEW_TEXT2_087"), (24, 334, 147.0, 150.0, "TEXT_NEW_TEXT2_088"), (26, 335, 224.0, 150.0, "TEXT_NEW_TEXT2_089"),
+            (23, 333, 301.0, 150.0, "TEXT_NEW_TEXT2_090"), (25, 336, 378.0, 150.0, "TEXT_NEW_TEXT2_091"), (27, 337, 455.0, 150.0, "TEXT_NEW_TEXT2_092"),
+            (28, 338, 532.0, 150.0, "TEXT_NEW_TEXT2_093")],
+        44 => &[(70, 360, 60.0, 150.0, "TEXT_NEW_CTEXT_001"), (71, 362, 139.0, 150.0, "TEXT_NEW_CTEXT_002"), (72, 364, 218.0, 150.0, "TEXT_NEW_CTEXT_003"),
+            (73, 363, 297.0, 150.0, "TEXT_NEW_CTEXT_004"), (74, 361, 376.0, 150.0, "TEXT_NEW_CTEXT_005"), (75, 366, 455.0, 150.0, "TEXT_NEW_CTEXT_006"),
+            (76, 365, 534.0, 150.0, "TEXT_NEW_CTEXT_007")],
+        63 => &[(78, 391, 188.0, 150.0, "TEXT_NEW_CTEXT_179"), (79, 392, 464.0, 150.0, "TEXT_NEW_CTEXT_180"), (80, 393, 395.0, 150.0, "TEXT_NEW_CTEXT_181"),
+            (81, 394, 533.0, 150.0, "TEXT_NEW_CTEXT_182"), (82, 395, 50.0, 150.0, "TEXT_NEW_CTEXT_183"), (83, 396, 257.0, 150.0, "TEXT_NEW_CTEXT_184"),
+            (84, 397, 119.0, 150.0, "TEXT_NEW_CTEXT_185"), (85, 398, 326.0, 150.0, "TEXT_NEW_CTEXT_186")],
+        23 => &[(0, 367, 312.0, 5.0, "TEXT_NEW_TEXT2_094"), (0, 368, 390.0, 5.0, "TEXT_NEW_TEXT2_095")],
+        24 => &[(0, 369, 312.0, 5.0, "TEXT_NEW_TEXT2_096")],
+        96 if arab => &[(0, 370, 340.0, 5.0, "TEXT_NEW_CTEXT_260")], // AssemblyK1: temple guards
+        96 => &[(0, 370, 340.0, 5.0, "TEXT_NEW_CTEXT_016")],
+        _ => &[],
+    }
+}
 
 /// HUD_Buildings.xaml TroopNameText: centred in Margin 20 .. right 150 (barracks), Arab* / Bedouin*TroopNameText
 /// in 20 .. right 300 (merc post 44, bedouin stockade 63): the strip's centre x in the 800 px panel.
@@ -563,7 +589,6 @@ pub struct Ui {
     pub open_menu: bool,         // SideTabs' options button (HUD_Main.InGameOptions): main.rs opens the in-game menu
     pub help: Option<String>,    // a building panel's help button: the page main.rs opens (menu/help.rs)
     pub ctrl: bool,              // Ctrl held (main.rs): recruit as many as possible
-    pub rally_all: bool,   // the held flag tool came from the rally button: the map click moves all of the panel's points
     stance: Option<usize>, // troops panel: last clicked stance / order button (display only, no chore sent)
     engi: bool,            // troops panel: the engineers' siege build buttons are up (HUD_Troops.SelectedEngiBuild)
     order: Option<usize>,
@@ -571,6 +596,7 @@ pub struct Ui {
     bar: Option<(String, std::time::Instant)>, // OST_MESSAGE_BAR: text, when posted (shown 10 s)
     seen: (u32, u32),                          // serials of the last message / pick event taken from `Events`
     goals: bool,                               // the objectives popup is open (Show_HUD_Objectives)
+    goods_on: bool,                            // the goods bar is shown (ours: on at a game's start, DE hides it)
     pub edge_mask: f32, // MapLowerEdgeMaskHeight (design px, 0 = hidden): main.rs's camera limit sets it
     pub rclick: Option<RightClick>, // the right-click menu while the right button is held (HUD_RightClick)
     pub hidden: bool,               // the in-game UI is hidden (MainControls.IsUIVisible false; right-click menu left)
@@ -585,6 +611,7 @@ pub struct Ui {
     last_panel: (i32, i32),         // (app_mode, app_sub_mode) drawn last: a panel change resets its view state
     panel_tip: Option<String>,      // a building panel button's hover text, shown as the tooltip
     pub down: bool,                 // the left mouse button is held (main.rs): the button under it looks pressed
+    extreme_help: (bool, Option<std::time::Instant>), // ExtremePower1_Enabled last frame; Story_ShowExtremeHelp started at
     pub(crate) s: f32, pub(crate) w: f32, pub(crate) h: f32,    // Viewbox scale, window logical size
 }
 
@@ -618,8 +645,8 @@ impl Ui {
         let mut font_rgba = vec![0u8; (FONT_PX * FONT_PX * 4) as usize];
         white_block(&mut font_rgba);
         Some(Self { rects, colour_rects, colour: 1, strings, goods, build, tabs, troops, titles, font, glyphs: HashMap::new(), font_rgba, pen: (4, 0, 0), font_dirty: true,
-            hits: vec![], screen: 1, selected: None, tent: None, radar: false, actions: vec![], actions4: vec![], drag: None, allies: None, merit: None, fb: None, cg: false, lords: Lords::default(), delete: None, radar_click: None, radar_at: [0.0; 4], message: None, sub_mode: None, shift: false, open_menu: false, help: None, ctrl: false, rally_all: false, stance: None, engi: false, order: None, ost: Default::default(), bar: None, seen: (0, 0), goals: false, edge_mask: 0.0, rclick: None, hidden: false, flat: false,
-            open_briefing: false, confirm: None, auto: None, auto_goods: ([[0; 25]; 2], [0; 25]), prev_trade: 0, trade_err: None, seen_ret: 0, last_panel: (0, 0), panel_tip: None, down: false, s: 1.0, w: 0.0, h: 0.0 })
+            hits: vec![], screen: 1, selected: None, tent: None, radar: false, actions: vec![], actions4: vec![], drag: None, allies: None, merit: None, fb: None, cg: false, lords: Lords::default(), delete: None, radar_click: None, radar_at: [0.0; 4], message: None, sub_mode: None, shift: false, open_menu: false, help: None, ctrl: false, stance: None, engi: false, order: None, ost: Default::default(), bar: None, seen: (0, 0), goals: false, goods_on: true, edge_mask: 0.0, rclick: None, hidden: false, flat: false,
+            open_briefing: false, confirm: None, auto: None, auto_goods: ([[0; 25]; 2], [0; 25]), prev_trade: 0, trade_err: None, seen_ret: 0, last_panel: (0, 0), panel_tip: None, down: false, extreme_help: (false, None), s: 1.0, w: 0.0, h: 0.0 })
     }
 
     pub(crate) fn text_of(&self, key: &str) -> String {
@@ -738,11 +765,11 @@ impl Ui {
     pub fn selected_mapper(&self) -> Option<i32> { self.selected.map(|i| self.build[i].mapper).filter(|&m| m > 0).or(self.tent) }
 
     /// No build tool any more (MainControls StopAllPlacement / EditorDirector.CancelPlacement).
-    pub fn drop_tool(&mut self) { (self.selected, self.tent, self.rally_all) = (None, None, false); }
+    pub fn drop_tool(&mut self) { (self.selected, self.tent) = (None, None); }
 
-    /// A recruit panel's number key (live::rally_key): that troop type's flag tool, held like a build tool; the map
-    /// click places just that flag (the sim drops the tool afterwards).
-    pub fn hold_flag(&mut self, tool: i32) { (self.selected, self.tent, self.rally_all) = (None, Some(tool), false); }
+    /// A recruit panel's flag button or number key (`flags`, live::rally_key): that troop type's flag tool, held like a
+    /// build tool; the map click places just that flag (the sim drops the tool afterwards).
+    pub fn hold_flag(&mut self, tool: i32) { (self.selected, self.tent) = (None, Some(tool)); }
 
     /// A build hotkey (keys.rs PLACE, EditorDirector.placeBuildingInteraction): mapper `m`'s button picked, its tab shown.
     pub fn pick_mapper(&mut self, m: i32) {
@@ -759,6 +786,19 @@ impl Ui {
     pub fn rclick(&mut self, c: [f32; 2]) -> bool {
         let Some(&(_, Hit::Act(1022, _, t))) = self.hits.iter().rev().find(|(p, _)| Self::inside(*p, c)) else { return false };
         self.actions.push([1021, 0, t]);
+        true
+    }
+
+    /// KeyManager.Update's HUD keys (main.rs `hotkey`): K = ToggleGoods (not while no stockpile stands), J =
+    /// ToggleObjectives (while the Objectives button shows), F1 = FreeBuildEvents (HUD_FreebuildMenu.ToggleMenu, in a
+    /// Free Build game). True = `f` is one of them.
+    pub fn hotkey(&mut self, f: &str, st: &HudState) -> bool {
+        match f {
+            "ToggleGoods" => (self.goals, self.goods_on) = (false, !self.goods_on),
+            "ToggleObjectives" => if st.ev.has_goals() { self.goals = !self.goals },
+            "FreeBuildEvents" => if st.lords.free_build { self.fb_click(-100) },
+            _ => return false,
+        }
         true
     }
 
@@ -802,7 +842,11 @@ impl Ui {
             Hit::Stance(k) => { self.stance = Some(k); self.actions.push([1020, -1, 287 + k as i32]); }
             Hit::Order(k) => { self.order = Some(k); self.actions.push([[1011, 1010, 1019][k], 0, 0]); }
             Hit::Panel => {}
-            Hit::Act(a, s, v) => self.actions.push([a, s, v]),
+            Hit::Act(a, s, v) => {
+                // ButtonExtremeClick: a power used while the hint shows seeks it to 24 s (one more second)
+                if a == 1068 { if let (Some(t), Some(seek)) = (&mut self.extreme_help.1, std::time::Instant::now().checked_sub(std::time::Duration::from_secs(24))) { *t = (*t).min(seek); } }
+                self.actions.push([a, s, v])
+            }
             // MainViewModel.ButtonNewTradeType: 0 = back to the post (25) from a category / the price list, 1..3 =
             // food / resources / weapons (54..56), 4 = the price list (53)
             Hit::TradeType(n) => {
@@ -814,13 +858,11 @@ impl Ui {
             // ButtonBuySell 1 / 2: BuyGoods 1024 / SellGoods 1025, one lot (Shift: five), v = trading_current_goods
             Hit::Trade(a, g) => self.actions.push([a, self.shift as i32, g]),
             Hit::Delete(id) => self.delete = Some(id),
-            Hit::Rally(t) => { // a second click lets go
-                self.rally_all = !(self.rally_all && self.tent == Some(t));
-                (self.selected, self.tent) = (None, self.rally_all.then_some(t));
-            }
+            Hit::Flag(t) => self.hold_flag(t),
             // RadarClicked (1028): the radar pixel; the sim thread turns it into the camera tile
             Hit::Engi(on) => self.engi = on,
             Hit::Goals => self.goals = !self.goals, // ButtonExtendedFeaturesFunction "Objectives"
+            Hit::Goods => (self.goals, self.goods_on) = (false, !self.goods_on), // ... "Goods"
             Hit::Options => self.open_menu = true,
             Hit::Help(t) => self.help = crate::menu::help::building_page(t), // HUD_Help.OpenHelpForCurrentBuildingOrChimmp
             Hit::Mode(s) => self.mode_click(s), // reports book: DLL_SetAppMode(16, s) (reports.rs)
@@ -871,16 +913,6 @@ impl Ui {
         let hl = on || hit.is_some() && Self::inside(p, cursor);
         self.img_fit(out, if hl { s2 } else { s1 }, p, [1.0; 4]);
         if let Some(h) = hit { self.hits.push((p, h)); }
-    }
-
-    /// Rally point (ours: DE only has the 1..7 keys for a panel's flags): on the barracks, mercenary post, stockade and
-    /// guild panels. It holds the panel's first flag tool, so the sim shows the flag at the cursor; main.rs's map click
-    /// then moves every point of the panel there (live::Cmd::Rally). Lit while held, a second click lets go.
-    fn rally_button(&mut self, out: &mut Vec<HudTri>, p: [f32; 4], sub: i32, cursor: [f32; 2]) {
-        let Some(&tool) = crate::live::rally_tools(sub).first() else { return };
-        let keys = match crate::live::rally_tools(sub).len() { 1 => "", 2 => " Keys 0 and 1: one troop type.", n => if n == 8 { " Keys 0 to 7: one troop type." } else { " Keys 0 to 6: one troop type." } };
-        if Self::inside(p, cursor) { self.panel_tip = Some(format!("Rally point: click, then click the map where new troops gather.{keys}")); }
-        self.button(out, p, "UI-Buildings H025", "UI-Buildings H026", self.rally_all && self.tent == Some(tool), cursor, Some(Hit::Rally(tool)));
     }
 
     /// The panel's help button where HUD_Buildings.GetBuildingShowHelp has one (not on panels 53, 66-79; the game's
@@ -994,10 +1026,6 @@ impl Ui {
             let hover = self.recruit(st, out, o, 195.0, table, cursor);
             if st.app_sub_mode == 1 { self.weapon_row(st, out, o, hover); }
             self.help_button(st, out, self.pr(o, 546.0, 172.0, 19.0, 19.0), ["UI-Buttons L016", "UI-Buttons L017"], cursor); // Building*HelpButton
-            // the troop frames are full: the rally flag stands at their left foot, on a dark tile like the texts above
-            let p = self.pr(o, -48.0, 195.0 - 46.0, 44.0, 44.0);
-            Self::fill(out, p, [0.0, 0.0, 0.0, 0.6]);
-            self.rally_button(out, p, st.app_sub_mode, cursor);
             return;
         }
         let o = [1120.0, 1080.0 - 170.0];
@@ -1059,7 +1087,6 @@ impl Ui {
             if Self::inside(p, cursor) { self.panel_tip = Some(self.text_of("TEXT_BUBBLE_HELP_TEXT_146")); }
             self.button(out, p, "UI-Buttons A041", "UI-Buttons A042", false, cursor, Some(Hit::Delete(id)));
         }
-        self.rally_button(out, self.pr(o, 508.0, 38.0, 36.0, 35.0), sub, cursor);
         self.help_button(st, out, self.pr(o, 508.0, 131.0, 36.0, 35.0), ["UI-Buttons L011", "UI-Buttons L013"], cursor); // BuildingHelpButton
         // ShowWorkersPanel: two 16 px lines at (160, bottom 22 / 2)
         let (l1, l2) = self.workers_text(st);
@@ -1073,13 +1100,18 @@ impl Ui {
     /// refuses what the player can't pay, as with the game's overlay Button.
     fn recruit(&mut self, st: &HudState, out: &mut Vec<HudTri>, o: [f32; 2], ph: f32, table: &[Recruit], cursor: [f32; 2]) -> Option<i32> {
         let mut hover = None;
+        // the panel's assembly-point flags (`flags`), drawn over the troop buttons they overlap
+        let arab = matches!(st.lord_type, 1 | 2 | 6 | 7);
+        let fl: Vec<([f32; 4], i32, &str)> = flags(st.app_sub_mode, arab).iter().filter(|f| f.0 == 0 || recruit_why(f.0, st).is_some())
+            .map(|&(_, m, x, b, k)| (self.pr(o, x, ph - b - 19.0, 19.0, 19.0), m, k)).collect();
+        let on_flag = fl.iter().find(|f| Self::inside(f.0, cursor)).map(|f| f.2);
         for &(t, x, b, h, w, n) in table {
             let Some(why) = recruit_why(t, st) else { continue };
             let ok = why.is_none();
             let key = |k: u32| format!("UI-Buttons O{k:03}");
             let w = if w > 0.0 { w } else { self.sprite(&key(n)).map_or(h / 2.0, |(_, r, _)| h * r[2] / r[3]) };
             let p = self.pr(o, x, ph - b - h, w, h);
-            let over = Self::inside(p, cursor);
+            let over = Self::inside(p, cursor) && on_flag.is_none();
             if over { hover = Some(t); }
             match (ok, over) {
                 (true, _) => self.img_fit(out, &key(n + over as u32), p, [1.0; 4]),
@@ -1092,6 +1124,12 @@ impl Ui {
         // the guilds and the cathedral (EngineersCostsText & co.): "Name xN  Cost N [gold]" in one strip at (20, -20)
         // and the hotkey amounts as two black lines at x 130 (TroopShiftCostText bottom 24, TroopCtrlCostText bottom 0)
         let guild = matches!(st.app_sub_mode, 23 | 24 | 96);
+        for &(p, m, _) in &fl { self.button(out, p, "UI-Buttons L018", "UI-Buttons L019", false, cursor, Some(Hit::Flag(m))); }
+        // ButtonEnterCreateTroop "Assembly*": "Set Archer Assembly Point" in TroopHelpText (the guilds: *HelpText)
+        if let Some(k) = on_flag {
+            let t = self.text_of(k);
+            if guild { self.strip_at(out, o, 20.0, -20.0, &t, 0.0, None, None) } else { self.strip(out, o, 10.0, &t, 0.0, None, None) }
+        }
         if let Some(t) = hover {
             let max = recruit_max(t, st);
             let n = if self.shift { max.min(5) } else if self.ctrl { max } else { 1 };
@@ -2095,10 +2133,13 @@ impl Ui {
         // ---- Reports book (MainHUD.xaml "Reports Book"): scribe C001 holds the book, values are printed on its pages
         // ScribeImage 202×207, margin 0,0,-73,-10 (73 px past the right edge, as in the game): Stretch=Uniform draws
         // the sprite at its fitted size flush right / bottom in that box (WPF aligns the image's render size)
-        if let Some(&[_, _, sw, sh]) = self.rects.get("UI-Scribe C001") {
+        // FatControler: ScribeHeadImage by Options' Pick your Scribe, "UI-Scribe B001" classic / C001 modern (frame 1:
+        // scribe_frame isn't read)
+        let face = if crate::menu::scribe() == 0 { "UI-Scribe B001" } else { "UI-Scribe C001" };
+        if let Some(&[_, _, sw, sh]) = self.rects.get(face) {
             let k = (202.0 / sw).min(207.0 / sh);
             let [x0, y0] = self.br(1920.0 + 73.0 - sw * k, 1080.0 + 10.0 - sh * k);
-            self.img(&mut out, "UI-Scribe C001", [x0, y0, x0 + sw * k * self.s, y0 + sh * k * self.s], white);
+            self.img(&mut out, face, [x0, y0, x0 + sw * k * self.s, y0 + sh * k * self.s], white);
         }
         self.book(&mut out, cursor); // the book button (reports.rs)
         // the text grid: 200 wide, right margin 26 (x 1694..1894), bottom-aligned, 95 high (popularity 50 + 45) -> top 985
@@ -2126,14 +2167,18 @@ impl Ui {
         let (bx, by) = (1855.0 - tw / 2.0, 1048.0 - lh);
         self.text_xf(&mut out, &pop, bx, by, 16.0, [bx, by], -25.0, [0.8, 1.2], if st.overcrowding_popularity == 0 { GREEN } else { RED });
 
-        // ---- Goods bar (HUD_Goods.xaml, 400×120, bottom-left, shown state): icon 25 px + amount per good; the
-        // objectives popup takes its place (SetGoodsPopupState(false))
-        let [x0, y0] = self.bl(0.0, 1080.0 - 120.0);
-        let goods = !(self.goals && st.ev.has_goals());
-        if goods { Self::fill(&mut out, [x0, y0, x0 + 400.0 * self.s, h], [0.0, 0.0, 0.0, 0x77 as f32 / 255.0]); }
+        // ---- Goods popup (HUD_Goods.xaml, 400×120 at x 36, bottom-left; Border 480×150 at -80,0,0,-30): icon 25 px +
+        // amount per good. IngameUIScreens' Resources button (36×34, bottom-left) toggles it (ButtonExtendedFeatures
+        // "Goods"). Ours, not DE's: shown from a game's start and without a stockpile (DE hides it until the player
+        // opens it and disables the button while no stockpile stands); the objectives popup covers it while open.
+        // ponytail: its Trading button (GotMarketVis: every good, tradeable ones clickable) is not ported
+        let [bx, by] = self.bl(0.0, 1080.0 - 34.0);
+        self.button(&mut out, [bx, by, bx + 36.0 * self.s, by + 34.0 * self.s], "Resources_Normal", "Resources_Highlight", self.goods_on, cursor, Some(Hit::Goods));
+        let goods = self.goods_on && !self.goals;
+        if goods { let (a, b) = (self.bl(-44.0, 1080.0 - 120.0), self.bl(436.0, 1110.0)); Self::fill(&mut out, [a[0], a[1], b[0], b[1]], [0.0, 0.0, 0.0, 0x77 as f32 / 255.0]); }
         for g in (0..self.goods.len()).filter(|_| goods) {
             let (idx, left, bottom, icon) = self.goods[g].clone();
-            let [gx, gy] = self.bl(left, 1080.0 - bottom - 50.0); // 50×50 cell
+            let [gx, gy] = self.bl(36.0 + left, 1080.0 - bottom - 50.0); // 50×50 cell
             let ip = [gx + 12.5 * self.s, gy - 5.0 * self.s, gx + 37.5 * self.s, gy + 20.0 * self.s];
             self.img_fit(&mut out, &icon, ip, white);
             self.text_sh(&mut out, &st.resources[idx].to_string(), gx + 25.0 * self.s, gy + 44.0 * self.s, 16.0, 0.5, CREAM);
@@ -2756,15 +2801,24 @@ fn skirmish_build_buttons() {
         let at: Vec<[f32; 4]> = u.hits.iter().filter_map(|&(p, hit)| match hit { Hit::Build(i) if u.build[i].name.contains("Gatehouse") => Some(p), _ => None }).collect();
         assert!(at.len() == 2 && at[0][2] <= at[1][0], "screen {screen}: gatehouse buttons at {at:?}");
     }
-    // ours: the barracks panel has the rally flag button; a click holds the panel's first flag tool, a second lets go
-    let st = HudState { app_mode: 16, app_sub_mode: 1, ..h.clone() };
+    // the barracks panel: one assembly-point flag per troop type it offers (Show_Barracks*), at the top of that troop's
+    // button; a click on the archers' flag holds MAPPER_PLACE_ASSEMBLY_POINT1, no recruit
+    let st = HudState { app_mode: 16, app_sub_mode: 1, troop_avail: [1; 8], ..h.clone() };
     u.draw(&st, 1920.0, 1080.0, [0.0; 2], 0, None);
-    let p = u.hits.iter().find(|(_, hit)| *hit == Hit::Rally(332)).expect("no rally button on the barracks panel").0;
+    let fl: Vec<([f32; 4], i32)> = u.hits.iter().filter_map(|&(p, hit)| match hit { Hit::Flag(m) => Some((p, m)), _ => None }).collect();
+    assert_eq!(fl.iter().map(|f| f.1).collect::<Vec<_>>(), [332, 334, 335, 333, 336, 337, 338], "barracks flags, left to right");
+    let p = fl[0].0;
     let c = [(p[0] + p[2]) / 2.0, (p[1] + p[3]) / 2.0];
-    assert!(u.click(c) && u.selected_mapper() == Some(332) && u.rally_all);
-    assert!(u.click(c) && u.selected_mapper().is_none() && !u.rally_all);
-    u.hold_flag(334); // the "1" key: one troop type's flag, placed by the tool's own click
-    assert!(u.selected_mapper() == Some(334) && !u.rally_all);
+    assert!(u.click(c) && u.selected_mapper() == Some(332) && u.actions.is_empty(), "the flag tool, no recruit");
+    // only the troops the map allows get a flag; the guilds and the cathedral have theirs at the bottom
+    let st = HudState { troop_avail: [1, 0, 0, 0, 0, 0, 1, 0], ..st };
+    u.draw(&st, 1920.0, 1080.0, [0.0; 2], 0, None);
+    let n = |u: &Ui| u.hits.iter().filter_map(|&(_, hit)| match hit { Hit::Flag(m) => Some(m), _ => None }).collect::<Vec<_>>();
+    assert_eq!(n(&u), [332, 338]);
+    for (sub, want) in [(23, vec![367, 368]), (24, vec![369]), (96, vec![370])] {
+        u.draw(&HudState { app_sub_mode: sub, guild_avail: [1; 3], resources: [1000; 25], ..st.clone() }, 1920.0, 1080.0, [0.0; 2], 0, None);
+        assert_eq!(n(&u), want, "panel {sub}");
+    }
 }
 
 /// Extended rules: the Military build screen has the Sassanid Stable button (tinted stables icon); picking it and

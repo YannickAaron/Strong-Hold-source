@@ -59,17 +59,32 @@ pub fn map_info(map: &Path) -> Option<MapInfo> {
 }
 
 /// A single-player map for FRONT_StandaloneMission: `size` = world_size (header block 5 +80), `animals` = hostileAnimals
-/// (block 5 +100, when present), `user` = from a user Maps folder.
+/// (block 5 +100, when present), `src` = where it is from (`MapSrc`).
 #[derive(Clone, Copy, Debug)]
-pub struct SoloInfo { pub size: i32, pub animals: i32, pub user: bool }
+pub struct SoloInfo { pub size: i32, pub animals: i32, pub src: MapSrc }
+
+/// A map list's source, the include boxes' order: a user Maps folder, the game's, the Steam Workshop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MapSrc { User, BuiltIn, Workshop }
+impl MapSrc {
+    /// The list row's type icon (FRONT_StandaloneMission / FRONT_Multiplayer: user, ff, steam).
+    pub fn icon(self) -> &'static str { match self { MapSrc::User => "user", MapSrc::BuiltIn => "ff", MapSrc::Workshop => "steam" } }
+}
+
+/// The folders behind the include boxes (user, built-in, Workshop), each with its source.
+pub fn map_dirs(include: [bool; 3]) -> Vec<(PathBuf, MapSrc)> {
+    let user = user_map_dirs().into_iter().filter(|_| include[0]).map(|d| (d, MapSrc::User));
+    let ws = include[2].then(crate::paths::workshop_items).unwrap_or_default().into_iter().map(|d| (d, MapSrc::Workshop));
+    user.chain(include[1].then(|| (maps_dir(), MapSrc::BuiltIn))).chain(ws).collect()
+}
 
 /// MapFileManager's single-player lists: maps whose header scnMissionSiegeOrInvasion (block 4 +4) is `kind`
 /// (3 = Free Build, 1 = Invasion / Custom Scenarios), not multiplayer or trail (mapType 1 / < 0), not a campaign mission
 /// or the tutorial (missionLockType 2 or the name), 35 kB..9 MB. User maps (the app's and the real game's Maps
-/// folders) first, then the built-in ones, each by file name. ponytail: no Workshop maps.
-pub fn solo_maps(kind: i32, user: bool, builtin: bool) -> Vec<(PathBuf, SoloInfo)> {
-    let dirs = user_map_dirs().into_iter().filter(|_| user).map(|d| (d, true)).chain(builtin.then(|| (maps_dir(), false)));
-    dirs.flat_map(|(d, u)| list(&d, "map").into_iter().map(move |p| (p, u))).filter_map(|(p, user)| {
+/// folders) first, then the built-in ones, then the Workshop items' (Platform_Workshop), each by file name.
+pub fn solo_maps(kind: i32, user: bool, builtin: bool) -> Vec<(PathBuf, SoloInfo)> { solo_maps_in(kind, [user, builtin, false]) }
+pub fn solo_maps_in(kind: i32, include: [bool; 3]) -> Vec<(PathBuf, SoloInfo)> {
+    map_dirs(include).into_iter().flat_map(|(d, u)| list(&d, "map").into_iter().map(move |p| (p, u))).filter_map(|(p, src)| {
         let stem = p.file_stem()?.to_string_lossy().to_lowercase();
         if stem.starts_with("crusaders_mission") || stem.starts_with("crusader_tutorial") { return None; }
         if !(35_000..=9_000_000).contains(&std::fs::metadata(&p).ok()?.len()) { return None; }
@@ -77,7 +92,7 @@ pub fn solo_maps(kind: i32, user: bool, builtin: bool) -> Vec<(PathBuf, SoloInfo
         let int = |k: usize, o: usize| b.get(k).and_then(|b| b.get(o..o + 4)).map(|v| i32::from_le_bytes(v.try_into().unwrap()));
         let ty = int(3, 0)?;
         if ty == 1 || ty < 0 || int(4, 4)? != kind || int(4, 8) == Some(2) { return None; }
-        Some((p, SoloInfo { size: int(5, 80).unwrap_or(-1), animals: int(5, 100).unwrap_or(0), user }))
+        Some((p, SoloInfo { size: int(5, 80).unwrap_or(-1), animals: int(5, 100).unwrap_or(0), src }))
     }).collect()
 }
 
@@ -213,6 +228,7 @@ impl Progress {
             let c = k.to_lowercase().strip_prefix("campaign").and_then(|c| c.parse::<usize>().ok());
             if let Some(c) = c.filter(|c| (1..=7).contains(c)) { p.unlocked[c - 1] = v.parse::<i32>().unwrap_or(1).clamp(1, 5); }
         }
+        if crate::menu::temp_unlock() { p.unlocked = [5; 7]; } // ConfigSettings.TempMissionUnlock: Settings_Progress_HistoricalNCampaign = 5
         for (k, v) in std::fs::read_to_string(dir.join("missions.cfg")).unwrap_or_default().lines().filter_map(|l| l.split_once(':')) {
             match (k.trim().strip_prefix("mission").and_then(|i| i.parse().ok()), v.trim().parse()) {
                 (Some(id), Ok(d)) => { p.done.insert(id, d); }
@@ -777,4 +793,12 @@ fn lobby_options_reach_engine() {
     assert_eq!((m.i32(O + 0x279fd8), m.i32(O + 0x27a004), m.i32(0x183663f4c)), (1, 3, 1), "pre-build, enemy HP, sieging X");
     assert_eq!((m.i32(O + 0x27a008), m.i32(O + 0x27a00c), m.i32(O + 0x27a010)), (1, 0, 1), "barracks, merc post, stockade");
     assert_eq!((0..4u64).map(|k| m.u8(O + 0x27b7dc + k) as i8).collect::<Vec<_>>(), [2, 0, 3, 1], "start positions");
+}
+
+#[test]
+fn workshop_include_box() {
+    let dirs = |i| map_dirs(i).into_iter().map(|d| d.1).collect::<Vec<_>>();
+    assert!(dirs([false, false, true]).iter().all(|&s| s == MapSrc::Workshop), "the Workshop box alone: only Workshop items (none without a folder, no error)");
+    assert!(!dirs([true, true, false]).contains(&MapSrc::Workshop));
+    assert_eq!(MapSrc::Workshop.icon(), "steam");
 }

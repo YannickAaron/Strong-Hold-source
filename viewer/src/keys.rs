@@ -94,9 +94,10 @@ pub fn code(f: &str) -> Option<i32> { lines(MODERN).position(|l| l.0 == f).map(|
 
 /// Whether a key on `f` does something in the port (main.rs `hotkey`); the F1 sheet leaves F1 / Shift+F1 to these.
 pub fn runs(f: &str) -> bool {
-    const RUN: [&str; 28] = ["Pause", "IncreaseEngineSpeed", "DecreaseEngineSpeed", "ZoomIn", "ZoomOut", "MapRotateLeft", "MapRotateRight", "RadarZoomIn", "RadarZoomOut",
+    const RUN: [&str; 37] = ["Pause", "IncreaseEngineSpeed", "DecreaseEngineSpeed", "ZoomIn", "ZoomOut", "MapRotateLeft", "MapRotateRight", "RadarZoomIn", "RadarZoomOut",
         "QuickSave", "QuickLoad", "ToggleStats", "Save", "Load", "FlattenLandscape", "ToggleUI", "ToggleFrameRate", "ToggleMuteSounds",
-        "RotateBuilding", "Up", "Down", "Left", "Right", "OptionsMenu", "Cathedral", "SelectAllOfType", "DeleteTool", "SwitchOutput"];
+        "RotateBuilding", "Up", "Down", "Left", "Right", "OptionsMenu", "Cathedral", "SelectAllOfType", "DeleteTool", "SwitchOutput",
+        "FreeBuildEvents", "ToggleGoods", "ToggleObjectives", "ToggleHealthBars", "Cheat_freestuff", "Cheat_gold", "EditorHoldTime", "EditorRespawnLord", "EditorWipeAnimals"];
     RUN.contains(&f) || PLACE.iter().any(|p| p.0 == f) || game_action(f, &Ctx { mode: 14, sub: 61, sh1_centre: true, attack_here: true, centre: None }).is_some()
 }
 
@@ -276,7 +277,7 @@ fn keys_game_actions() {
     // ours: Shift+Ctrl+n adds to group n (GroupTroops with a = 10)
     assert_eq!((go("Alpha3,shift,ctrl", &field), go("Alpha0,shift,ctrl", &field)), (Some([0x16, 10, 0]), Some([0x13, 10, 0])));
     assert_eq!((go("Alpha2,ctrl,alt", &field), go("Alpha2,alt", &field)), (Some([0x29, 120, 250]), Some([0x33, -1, 0])));
-    assert_eq!(go("Alpha1", &Ctx { mode: 16, sub: 1, ..field }), None); // barracks panel: assembly points (not ported)
+    assert_eq!(go("Alpha1", &Ctx { mode: 16, sub: 1, ..field }), None); // barracks panel: no GameAction, key 1 holds the archer flag (live::rally_key)
     // stances R / T / Y, Stop (Backspace), Patrol (Shift+F7): troops panel only (patrol: always, like the original)
     assert_eq!([go("R", &troops), go("T", &troops), go("Y", &troops), go("Backspace", &troops), go("F7,shift", &field)],
         [Some([1020, -1, 287]), Some([1020, -1, 288]), Some([1020, -1, 289]), Some([1010, 0, 0]), Some([1019, 0, 0])]);
@@ -286,7 +287,7 @@ fn keys_game_actions() {
     assert_eq!([m.action("F1,shift"), m.action("F2,shift"), m.action("Space"), m.action("Z,alt"), m.action("F"), m.action("M,ctrl"), m.action("Tab")],
         [Some("Save"), Some("Load"), Some("FlattenLandscape"), Some("ToggleUI"), Some("ToggleFrameRate"), Some("ToggleMuteSounds"), Some("RotateBuilding")]);
     assert_eq!(m.action("C").and_then(|f| PLACE.iter().find(|p| p.0 == f)).map(|p| p.1), Some(25));
-    assert!(runs("Save") && runs("SelectClan4") && runs("PlaceHouse") && runs("StanceStand") && !runs("FreeBuildEvents") && !runs("ToggleGoods"));
+    assert!(runs("Save") && runs("SelectClan4") && runs("PlaceHouse") && runs("StanceStand") && runs("FreeBuildEvents") && runs("ToggleGoods") && !runs("ShowPings"));
     // rebinding moves the function: SelectClan1 on Shift+1 takes it from ExtremePower1, plain 1 is free afterwards
     let mut k = m.clone();
     k.set("SelectClan1", 0, "Alpha1,shift");

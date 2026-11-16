@@ -31,6 +31,7 @@ mod update; // "new version available" notice (update.rs)
 mod video;
 mod speed; // game speeds above 90 ticks/s, one Frame per display frame (speed.rs)
 mod stats; // per-player stats over time: F3 overlay + end screen (stats.rs)
+mod achievements; // DE's achievements, kept locally (achievements.rs)
 mod loader; // start-up loading off the UI thread (loader.rs)
 #[cfg(test)]
 mod perf; // load-time / game-speed measurements
@@ -259,6 +260,32 @@ impl MapBox {
 // heights: West-frame tile index -> GameMapTile.testHeight ×32 (empty = flat); bld: px a building / tall tile sprite
 // stands above it (buildingHeight ×64, else sprite height − 32); both kept by tick_replay for the cursor pick.
 // use_bld: CalcMapTileFromMousePos's useBuildingHeight (no build tool held, see `bld_pick`)
+
+/// GameMap.healthbarsTopMost (ToggleHealthBars, Ctrl+H): health and recharge bars drawn over everything.
+static HEALTH_TOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// KeyManager's cheat keys as DLL_GameAction SH1Cheats (1044): Cheat_freestuff toggles free buildings by the HUD's
+/// free_buildingCheat (a = 1 on / 0 off), Cheat_gold sends 3 then 2 (frontend 0x414).
+fn cheat(f: &str, free: u8) -> Vec<[i32; 3]> {
+    match f {
+        "Cheat_freestuff" => vec![[1044, (free == 0) as i32, 0]],
+        "Cheat_gold" => vec![[1044, 3, 0], [1044, 2, 0]],
+        _ => vec![],
+    }
+}
+
+/// Insult1..Insult20 -> 1..20.
+fn insult_no(f: &str) -> Option<usize> { f.strip_prefix("Insult")?.parse().ok().filter(|n| (1..=20).contains(n)) }
+
+#[test]
+fn cheat_and_insult_keys() {
+    assert_eq!((cheat("Cheat_freestuff", 0), cheat("Cheat_freestuff", 1)), (vec![[1044, 1, 0]], vec![[1044, 0, 0]]));
+    assert_eq!(cheat("Cheat_gold", 0), vec![[1044, 3, 0], [1044, 2, 0]]);
+    assert_eq!([insult_no("Insult1"), insult_no("Insult20"), insult_no("Insult21"), insult_no("Pause")], [Some(1), Some(20), None, None]);
+    // the "mp" keys key_event looks up: F1 = Insult1, Ctrl+F3 = Insult13, Alt+P stays MPPing
+    let k = keys::Keys::modern();
+    assert_eq!([k.owner("F1,mp"), k.owner("F3,ctrl,mp"), k.action("P,alt"), k.action("F1")], [Some("Insult1"), Some("Insult13"), Some("MPPing"), Some("FreeBuildEvents")]);
+}
 
 /// PerfectPixelWithZoom.Zoom: the scale of each zoomPos (index = zoomPos × 2); scale 1 = one game pixel per device pixel.
 const ZOOM_LEVELS: [f32; 11] = [0.125, 0.175, 0.25, 0.35, 0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0];
@@ -620,6 +647,7 @@ impl App {
         #[cfg(feature = "live")]
         if !l.tap.as_ref().is_some_and(|t| t.playing()) { self.rp = None; } // any other game ends a replay
         self.trail = None; // any other game start leaves the trail (Go::Trail sets it again after this)
+        achievements::mission_start(); // AchievementsCommon.ResetOnMissionStart
         self.solo = None; // and the Sandbox map (Go::FreeBuild / Scenario set it again)
         self.tutorial = None; // and the tutorial (Go::Tutorial sets it again)
         self.editor = None; // and the map editor (start_editor sets it again)
@@ -701,17 +729,6 @@ impl App {
     fn right_button(&mut self, pressed: bool) {
         if self.editor_right(pressed) { return; } // the map editor (menu/editor.rs)
         let over = self.ui.as_ref().is_some_and(|u| u.over(self.cam.cursor));
-        // ours: with a barracks / mercenary post / stockade / guild panel open, a right click on the map moves all its
-        // assembly points there (the panel's flag tools, live::Live::rally); the panel stays, Esc closes it
-        if let (false, Some(p)) = (over, self.play.as_ref()) {
-            if let (Some(l), Some(h)) = (p.live.as_ref(), p.huds.first()) {
-                if h.app_mode == 16 && !live::rally_tools(h.app_sub_mode).is_empty() {
-                    let t = self.cam.tile_at(l.rot);
-                    if pressed { l.send(live::Cmd::Rally(t[0], t[1])); }
-                    return;
-                }
-            }
-        }
         if !pressed {
             if let Some(u) = &mut self.ui { u.rclick = None; } // HUD_RightClick closes with the button
             if let (Some(l), false) = (self.play.as_ref().and_then(|p| p.live.as_ref()), over) {
@@ -914,6 +931,8 @@ impl App {
                 let moat = menu::opt("Moat", false) as i32;
                 if let Some(l) = self.play.as_ref().and_then(|p| p.live.as_ref()) { l.send(live::Cmd::Action([1067, moat, moat])); }
             }
+            // Options > Cheats in a game (HUD_Options 104..106): DLL_GameAction
+            menu::Go::Action(a) => if let Some(l) = self.play.as_ref().and_then(|p| p.live.as_ref()) { l.send(live::Cmd::Action(a)); },
             // Sandbox Play: Free Build / Custom Scenarios (FRONT_StandaloneMission.StartMap)
             #[cfg(feature = "live")]
             menu::Go::FreeBuild(..) | menu::Go::Scenario(..) => {
@@ -1188,7 +1207,10 @@ impl App {
             if r[0] == 2 {
                 let b = base;
                 let v = replay::pivot((r[20] & 0xff) as i32);
-                let slot = |k: i32| (key.0, key.1 + k, key.2, key.3);
+                // ToggleHealthBars (GameMap.healthbarsTopMost): the health bar (+12) and a recharge bar (k11 > 400) at
+                // sortingOrder 32767, over everything
+                let top = HEALTH_TOP.load(std::sync::atomic::Ordering::Relaxed);
+                let slot = |k: i32| match k { 4 | 15 if top => (i32::MAX, 12, key.2, key.3), 15 => (key.0, key.1 + 5, key.2, key.3), _ => (key.0, key.1 + k, key.2, key.3) };
                 let mut add = |k: i32, file: i16, img: i16, at: [f32; 2], a: f32, team: [f32; 4]| match p.gm.body(file, img) {
                     Some(s) if img > 0 => objs.push((slot(k), s, at, [1.0, 1.0, 1.0, a], team, 1.0)),
                     _ => {}
@@ -1204,7 +1226,7 @@ impl App {
                     let at = |x: i16, y: i16| [b[0] + x as f32 * 2.0, b[1] + y as f32 * 2.0];
                     add(3, 189, m[4], at(m[1], m[2]), alpha, p.gm.team(189, m[7], &p.world.colours));
                     add(4, 16, m[10], at(m[8], m[9]), 1.0, [0.0; 4]);
-                    if m[11] > 400 { add(5, 16, m[11] - 400, at(m[8], m[12]), 1.0, [0.0; 4]) }
+                    if m[11] > 400 { add(15, 16, m[11] - 400, at(m[8], m[12]), 1.0, [0.0; 4]) }
                     else { add(5, 172, m[11], at(0, m[12]), if m[11] == 332 { 0.5 } else { 1.0 }, [0.0; 4]) }
                     add(6, 172, m[17], at(m[18], m[19]), 1.0, [0.0; 4]);
                 }
@@ -1295,6 +1317,9 @@ impl App {
                 }
                 p.huds[0] = f.hud;
                 applied = true;
+                // achievements (achievements.rs): the engine's messages, gold / population, a won skirmish-mode game; not a replay
+                #[cfg(feature = "live")]
+                if self.rp.is_none() { achievements::frame(&f.recs, &p.huds[0], self.last_lobby.is_some() || self.trail.is_some_and(|t| !(21..=23).contains(&t.0))); }
                 // trail mission won: GameData's trail branch (best time, next mission unlocked), once
                 if let (Some((t, id, d, false)), Some(1)) = (self.trail, p.huds[0].end.as_ref().map(|e| e.result)) {
                     menu::trail_menu::record_win(t, id, p.huds[0].month as i32, p.huds[0].year as i32, f.tick);
@@ -1305,6 +1330,7 @@ impl App {
                     let mut pr = skirmish::Progress::load();
                     pr.won(id, d);
                     if let Err(e) = pr.save() { eprintln!("campaign progress: {e}"); }
+                    achievements::campaign_won(id);
                     self.campaign = Some((id, d, true));
                 }
                 // Custom Scenario won: HUD_MissionOver.LoadVictoryScreen's ManageScores(currentMapName), once
@@ -1398,7 +1424,6 @@ impl App {
         // --live with a building picked in the build menu: a map press is DLL_MapAction mouse state 1 (no pan);
         // the sim validates it and queues the chore only on a valid, affordable spot
         let mapper = self.ui.as_ref().and_then(|u| u.selected_mapper());
-        let sub = self.play.as_ref().and_then(|p| p.huds.first()).map_or(0, |h| h.app_sub_mode as i32);
         let tool = !on_hud && match (mapper, self.play.as_mut().and_then(|p| Some((p.live.as_mut()?, &p.world.drawn)))) {
             (Some(mp), Some((l, _))) => {
                 let t = self.cam.tile_at(l.rot);
@@ -1407,10 +1432,6 @@ impl App {
                     if down { self.drag_from = Some(t); l.send(live::Cmd::Drag(1, t[0], t[1])); }
                     else if self.drag_from.take().is_some() { l.send(live::Cmd::Drag(3, t[0], t[1])); }
                     l.hover_at = t;
-                } else if down && self.ui.as_ref().is_some_and(|u| u.rally_all) && live::rally_tools(sub).contains(&mp) {
-                    // the panel's rally button holds a flag tool: all of the panel's points go to the click
-                    l.send(live::Cmd::Rally(t[0], t[1]));
-                    if let Some(u) = self.ui.as_mut() { u.drop_tool(); }
                 } else if down {
                     l.send(live::Cmd::Click(t[0], t[1]));
                 }
@@ -1507,11 +1528,13 @@ impl App {
             Some(f) => self.hotkey(&f),
             None => if let Some(c) = c { self.char_key(c) },
         }
+        // KeyManager matches every function on the key, its "mp" bindings too (the insults on F1..F10, Ctrl+F1..F10)
+        if let Some(f) = self.keys.owner(&format!("{k},mp")).filter(|f| f.starts_with("Insult")).map(str::to_string) { self.hotkey(&f) }
     }
 
     /// KeyManager.Update's in-game functions (keys.rs: the table, `game_action` for the DLL_GameAction ones, PLACE).
-    /// Not ported: FreeBuildEvents (F1 = the port's key sheet), ToggleGoods / ToggleObjectives, ToggleHealthBars (no HP
-    /// bars yet), RadarZoom, insults, cheats, editor keys.
+    /// F1 is FreeBuildEvents in game (the key sheet: Cmd+/, F1 in the menus). Not ported: ShowPings (OST_PINGS, the
+    /// peers' network latency), Special (the scenario editor's special start), EditorShowConnections (a debug layer).
     fn hotkey(&mut self, f: &str) {
         #[cfg(feature = "live")]
         if f == "Pause" && self.lan_pause() { return; } // a LAN game: pause / resume for everyone (lan.rs)
@@ -1528,7 +1551,34 @@ impl App {
         let place = keys::PLACE.iter().find(|q| q.0 == f).map(|q| q.1);
         let flag = f.strip_prefix("SelectClan").and_then(|n| n.parse().ok()).filter(|_| ctx.mode == 16).and_then(|n| live::rally_key(ctx.sub, n));
         let available = |m: i32| st.is_none_or(|h| h.available.get(m as usize).copied().unwrap_or(true));
+        let lan = lan::in_game();
         match f {
+            // K / J / F1: the goods popup, the objectives popup, the Free Build menu (hud.rs `Ui::hotkey`)
+            "ToggleGoods" | "ToggleObjectives" | "FreeBuildEvents" => if let (Some(u), Some(h), false) = (self.ui.as_mut(), st, self.editor.is_some()) { u.hotkey(f, h); },
+            // Ctrl+H: GameMap.ToggleHealthBars, the health bars over everything (the draw pass reads HEALTH_TOP)
+            "ToggleHealthBars" => { HEALTH_TOP.fetch_xor(true, std::sync::atomic::Ordering::Relaxed); }
+            // Alt+K / Alt+X with Options' cheat keys on, not in a multiplayer game (`cheat`)
+            "Cheat_freestuff" | "Cheat_gold" if !lan && menu::opt("CheatKeysEnabled", false) => if let Some(l) = &p.live {
+                if f == "Cheat_gold" { audio::ui(326, 1.0) }
+                for a in cheat(f, st.map_or(0, |h| h.free_cheat)) { l.send(live::Cmd::Action(a)) }
+            },
+            // F1..F10 (+ Ctrl), "mp" keys (key_event): an insult in a skirmish or LAN game. LAN: to every player, shown
+            // here through the chat log (lan.rs); skirmish: GameAction SkirmishInsult, the line and its speech here
+            // (MuteInsults / MuteInsultSpeech). ponytail: the skirmish line shows as a notice, without the player's name
+            _ if f.starts_with("Insult") => if let (Some(n), true) = (insult_no(f), st.is_some_and(|h| h.lords.merit_button)) {
+                if lan { lan::send_insult(n); }
+                else if let Some(l) = &p.live {
+                    l.send(live::Cmd::Action([1069, 0, 0]));
+                    if !menu::opt("MuteInsults", false) {
+                        if let Some(u) = &self.ui { self.ux.note(u.text_of(&format!("TEXT_INSULTS_{:03}", n + 1))) }
+                        if !menu::opt("MuteInsultSpeech", false) { audio::speech(1, &lan::insult_wav(n)) }
+                    }
+                }
+            },
+            // the map editor: Alt+H HoldTime, Alt+V RespawnLord, Alt+E WipeAnimals (GameAction 2018 / 2016 / 2017)
+            "EditorHoldTime" | "EditorRespawnLord" | "EditorWipeAnimals" => if let (Some(l), true) = (&p.live, self.editor.is_some()) {
+                l.send(live::Cmd::Action([match f { "EditorHoldTime" => 2018, "EditorRespawnLord" => 2016, _ => 2017 }, 0, 0]));
+            },
             "Pause" => { p.playing = !p.playing; self.tick_replay(0.0, 0) }
             // F5 / F9 (and Home): Saves/Quicksave.sav, written in the background (saves.rs)
             "QuickSave" => if let Some(l) = &p.live { l.send(live::Cmd::Save(saves::quick_path())) },
@@ -1981,6 +2031,9 @@ impl App {
                 && event.logical_key != Key::Named(NamedKey::Escape) => {
                 if let Some(go) = keys::unity_key(&event, self.mods).and_then(|k| self.menu.as_mut().unwrap().key(&k)) { self.menu_go(go, el) }
             }
+            // FRONT_Credits: Space / Down held scroll fast
+            WindowEvent::KeyboardInput { event, .. } if matches!(event.logical_key, Key::Named(NamedKey::Space | NamedKey::ArrowDown)) && self.menu.as_ref().is_some_and(|m| m.is_credits()) =>
+                self.menu.as_mut().unwrap().hold_key(event.state == ElementState::Pressed),
             WindowEvent::MouseInput { .. } | WindowEvent::KeyboardInput { .. } if self.menu.as_ref().is_some_and(|m| !m.is_pause()) && !matches!(&ev,
                 WindowEvent::KeyboardInput { event, .. } if event.logical_key == Key::Named(NamedKey::Escape)) => {}
             #[cfg(feature = "live")]
@@ -2302,7 +2355,10 @@ impl App {
                         if let (false, false, Some(h)) = (m.is_pause(), video::full_busy(), &g.hud) { self.menu_loop.update(&g.queue, &h.video); }
                         let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
                         // a briefing lists the running game's objectives (FatControler.UpdateObjectiveRows)
-                        if let Some(st) = self.play.as_ref().and_then(|p| p.huds.get(p.at.saturating_sub(1))) { m.goals = (st.ev.goals.clone(), st.ev.campaign, st.ev.timer); }
+                        if let Some(st) = self.play.as_ref().and_then(|p| p.huds.get(p.at.saturating_sub(1))) {
+                            m.goals = (st.ev.goals.clone(), st.ev.campaign, st.ev.timer);
+                            m.free_build.get_or_insert(st.free_cheat != 0); // Options > Cheats' Free Buildings label
+                        }
                         [hud, m.draw(u, sz.width, sz.height, self.cam.cursor)].concat()
                     }
                     _ => hud,

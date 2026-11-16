@@ -130,7 +130,9 @@ impl Progress {
         for (k, v) in cfg.get(&kt).unwrap_or("").split(':').filter_map(|v| v.trim().parse::<i32>().ok()).take(n).enumerate() {
             times[k] = v;
         }
-        let next = cfg.get(&kp).and_then(|v| v.parse().ok()).unwrap_or(1);
+        // ConfigSettings.TempMissionUnlock: Settings_Progress_Trail* read as all done. ponytail: a trail mission won while
+        // it is on saves it as the frontier (DE keeps the real field underneath)
+        let next = if crate::menu::temp_unlock() { n as i32 + 1 } else { cfg.get(&kp).and_then(|v| v.parse().ok()).unwrap_or(1) };
         let difficulty = cfg.get(&kd).and_then(|v| v.parse().ok()).unwrap_or(1);
         Progress { trail, next, times, difficulty }
     }
@@ -268,6 +270,9 @@ pub fn record_win(trail: i32, id: i32, month: i32, year: i32, ticks: i32) {
     p.won(id, time);
     if trail >= 11 && time != i32::MAX { board_add(trail, id, &player_name(), time / 40); } // UploadSandsScore (seconds)
     if let Err(e) = p.save() { eprintln!("trail progress: {e}"); }
+    // ManageGameOver's trail achievements: a classic trail all done; TestSandsRankAchievement (timed only)
+    let rank = timed(time).zip(sands_target(trail, id)).map(|(t, target)| sands_rank(t, target));
+    crate::achievements::trail_won(trail, p.completed() == p.len(), rank, sands_total(&p).map(|(t, target)| sands_rank(t, target)));
 }
 
 /// HUD_MissionOver's continue for a trail mission: won → the next mission at once (the trail map after the last),

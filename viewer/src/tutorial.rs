@@ -41,7 +41,10 @@ impl Tutorial {
                 }
             }
             1 if line < 0 => self.buttons = [None; 2],
-            1 => self.buttons[if r[13] == 1 { 0 } else { 1 }] = Some((section, line)),
+            1 => {
+                if r[13] != 1 { crate::achievements::complete(1); } // HUD_Tutorial.showTutorialButton: the second button = done
+                self.buttons[if r[13] == 1 { 0 } else { 1 }] = Some((section, line))
+            }
             _ => {}
         }
     }

@@ -451,13 +451,13 @@ fn sheet(ui: &mut Ui, out: &mut Vec<HudTri>, keys: &Keys, w: f32, h: f32, s: f32
     #[cfg(target_os = "macos")]
     let (os, mac) = ("Mac", [("Save game", "Cmd+S"), ("Load game", "Cmd+O"), ("Options", "Cmd+,"), ("Full screen", "Ctrl+Cmd+F"),
         ("Minimize", "Cmd+M"), ("Hide", "Cmd+H"), ("Bigger / smaller UI", "Cmd+= / Cmd+-"), ("Normal UI size", "Cmd+0"),
-        ("This sheet", "F1 / Cmd+/"), ("Quit", "Cmd+Q")]);
+        ("This sheet", "Cmd+/ (F1 in menus)"), ("Quit", "Cmd+Q")]);
     #[cfg(not(target_os = "macos"))]
     let (os, mac) = ("Shortcuts", [("Save game", "Ctrl+S"), ("Load game", "Ctrl+O"), ("Options", "Ctrl+,"), ("Full screen", "F11 / Alt+Enter"),
-        ("Bigger / smaller UI", "Ctrl+= / Ctrl+-"), ("This sheet", "F1 / Ctrl+/")]);
+        ("Bigger / smaller UI", "Ctrl+= / Ctrl+-"), ("This sheet", "Ctrl+/ (F1 in menus)")]);
     let mac: Vec<(String, String)> = mac.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     let pad: Vec<(String, String)> = [("Zoom", "Pinch / wheel"), ("Pan", "Two-finger scroll (View menu: or zoom)"), ("Pan", "Middle-drag / edges"),
-        ("Turn the map", "Rotate two fingers"), ("Cancel tool", "Right click"), ("Rally point", "Right click, barracks open")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        ("Turn the map", "Rotate two fingers"), ("Cancel tool", "Right click")].iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
     // (title, rows, label width, key width) in design px
     let cols = [("Game", game, 250.0, 190.0), (os, mac, 220.0, 180.0), ("Trackpad & mouse", pad, 160.0, 200.0)];
     let gap = 60.0;

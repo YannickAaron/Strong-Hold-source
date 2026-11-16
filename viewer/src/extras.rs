@@ -2,12 +2,16 @@
 //! (update.rs, which also installs the new version) and the custom lords: the ones installed and the published ones
 //! (Get / Update), and importing a lord's .zip (lord_share.rs; a .zip dropped on the window lands here too). Imported lords simply join the skirmish's Add-AI faces. Load Game's dark panel and
 //! text buttons. A switch over the right column shows the published maps instead (map_share.rs; a dropped .map lands
-//! in the player folder's Maps). A child module of menu.rs.
+//! in the player folder's Maps). The Achievements button shows the local achievements (achievements.rs) on the whole
+//! panel. A child module of menu.rs.
 use super::*;
 
 /// The screen's own clicks.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum A { Open, Folder, Check, Notes, Import, Replace(bool), Lord(u8), Maps(bool), Map(u8), MapsFolder }
+pub enum A { Open, Folder, Check, Notes, Import, Replace(bool), Lord(u8), Maps(bool), Map(u8), MapsFolder, Ach(bool) }
+
+/// The achievements list is up instead of the columns.
+static ACH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Lords listed (more: "+n more").
 const SHOWN: usize = 5;
@@ -51,6 +55,7 @@ impl Menu {
                 crate::lord_share::fetch_online();
                 crate::map_share::fetch_online();
                 *crate::lord_share::MESSAGE.lock().unwrap() = None;
+                ACH.store(false, std::sync::atomic::Ordering::Relaxed);
                 *self = Menu { screen: Screen::Extras, ..Self::main() };
             }
             A::Folder => {
@@ -59,6 +64,7 @@ impl Menu {
                 let _ = std::process::Command::new("open").arg(&dir).spawn();
             }
             A::Check => crate::update::check_now(),
+            A::Ach(on) => ACH.store(on, std::sync::atomic::Ordering::Relaxed),
             A::Notes => { self.open_options(); if let Screen::Options(op) = &mut self.screen { op.page = 5; } }
             A::Import => if let Some(f) = crate::lord_share::pick_zip() { crate::lord_share::import_ui(&f, false) },
             A::Lord(k) => if let Some((name, _)) = lord_rows().get(k as usize) { crate::lord_share::get(name) },
@@ -79,6 +85,7 @@ impl Menu {
 
     pub(super) fn extras_screen(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, cursor: [f32; 2]) {
         self.panel(ui, out, 300.0, 110.0, 1320.0, 880.0);
+        if ACH.load(std::sync::atomic::Ordering::Relaxed) { return self.extras_achievements(ui, out, cursor); }
         self.text(ui, out, "Extras", 960.0, 185.0, 56.0, 0.5, GOLD);
 
         // ---- this build
@@ -92,6 +99,7 @@ impl Menu {
             y = self.para(ui, out, &short(&p), x + 140.0, y, 400.0, 18.0, CREAM) + 6.0;
         }
         self.button(ui, out, "Open player folder", x, y + 8.0, 300.0, 48.0, Act::Extras(A::Folder), cursor);
+        self.button(ui, out, "Achievements", x + 320.0, y + 8.0, 220.0, 48.0, Act::Extras(A::Ach(true)), cursor);
 
         // ---- updates
         self.text(ui, out, "Updates", x, 610.0, 34.0, 0.0, GOLD);
@@ -164,6 +172,22 @@ impl Menu {
         self.button(ui, out, "Back", 840.0, 910.0, 240.0, 56.0, Act::Back, cursor);
     }
 
+    /// The achievements (achievements::LIST) in two columns: the title (gold once unlocked), what it asks, a counted
+    /// one's progress; Back returns to Extras.
+    fn extras_achievements(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, cursor: [f32; 2]) {
+        let snap = crate::achievements::snapshot();
+        let n = snap.iter().filter(|s| s.0).count();
+        self.text(ui, out, "Achievements", 960.0, 185.0, 56.0, 0.5, GOLD);
+        self.label(ui, out, &format!("{n} of {} unlocked \u{b7} kept in the player folder, not on Steam", snap.len()), 960.0, 222.0, 18.0, 0.5, DIM);
+        for (k, (a, (done, v))) in crate::achievements::LIST.iter().zip(snap).enumerate() {
+            let (x, y) = (360.0 + 630.0 * (k / 20) as f32, 262.0 + 32.0 * (k % 20) as f32);
+            self.label(ui, out, a.title, x, y - 7.0, 17.0, 0.0, if done { GOLD } else { CREAM });
+            let text = if a.max > 0 && !done { format!("{} ({} / {})", a.text, v.min(a.max), a.max) } else { a.text.to_string() };
+            self.label(ui, out, &text, x, y + 9.0, 13.0, 0.0, if done { CREAM } else { DIM });
+        }
+        self.button(ui, out, "Back", 840.0, 910.0, 240.0, 56.0, Act::Extras(A::Ach(false)), cursor);
+    }
+
     /// The right column's maps: the published ones with Get / Update (map_share.rs), the maps folder, the last result.
     fn extras_maps(&mut self, ui: &mut Ui, out: &mut Vec<HudTri>, x: f32, cursor: [f32; 2]) {
         let rows = crate::map_share::online();
@@ -214,7 +238,13 @@ fn extras_screen_opens() {
     let p = m.hits.iter().find(|h| h.1 == Act::Extras(A::Open)).expect("the Extras shield").0;
     assert!(m.click([(p[0] + p[2]) / 2.0, (p[1] + p[3]) / 2.0]).is_none() && matches!(m.screen, Screen::Extras));
     m.draw(&mut u, 1920.0, 1080.0, [0.0; 2]);
-    for a in [A::Check, A::Import, A::Folder, A::Notes] { assert!(m.hits.iter().any(|h| h.1 == Act::Extras(a)), "{a:?}"); }
+    for a in [A::Check, A::Import, A::Folder, A::Notes, A::Ach(true)] { assert!(m.hits.iter().any(|h| h.1 == Act::Extras(a)), "{a:?}"); }
+    // the achievements list and back
+    assert!(m.extras_click(A::Ach(true)).is_none());
+    m.draw(&mut u, 1920.0, 1080.0, [0.0; 2]);
+    assert!(m.hits.iter().any(|h| h.1 == Act::Extras(A::Ach(false))) && !m.hits.iter().any(|h| h.1 == Act::Extras(A::Check)));
+    assert!(m.extras_click(A::Ach(false)).is_none());
+    m.draw(&mut u, 1920.0, 1080.0, [0.0; 2]);
     assert!(m.back().is_none() && matches!(m.screen, Screen::Main));
     crate::lord_share::SHOW.store(true, std::sync::atomic::Ordering::Relaxed);
     m.draw(&mut u, 1920.0, 1080.0, [0.0; 2]);
