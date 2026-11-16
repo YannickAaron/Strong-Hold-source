@@ -7,8 +7,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 DMG=0; [ "${1:-}" = "--dmg" ] && { DMG=1; shift; }
+# --ios-builder: "Strong Hold iPhone Builder.app", the same app plus the iOS app shell (bundle_ios.sh); after the
+# setup it packs an .ipa with the player's game files instead of starting the game (src/ipa.rs)
+IOS=0; [ "${1:-}" = "--ios-builder" ] && { IOS=1; shift; }
 OUT="${1:-$HOME/Applications}"
-NAME="Strong Hold"
+NAME="Strong Hold"; ID=local.shc.rust
+[ $IOS = 1 ] && { NAME="Strong Hold iPhone Builder"; ID=local.shc.rust.ipa-builder; }
 VERSION="${SHC_VERSION:-0.1.0}" # scripts/publish.sh sets it
 APP="$OUT/$NAME.app"
 # DepotDownloader 3.4.0 (SteamRE, GPL-2.0): self-contained macOS arm64 build, pinned by hash
@@ -47,9 +51,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Strong Hold</string>
-    <key>CFBundleDisplayName</key><string>Strong Hold</string>
-    <key>CFBundleIdentifier</key><string>local.shc.rust</string>
+    <key>CFBundleName</key><string>$NAME</string>
+    <key>CFBundleDisplayName</key><string>$NAME</string>
+    <key>CFBundleIdentifier</key><string>$ID</string>
     <key>CFBundleExecutable</key><string>shc-viewer</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -63,6 +67,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+[ $IOS = 1 ] && SHC_VERSION="$VERSION" ./bundle_ios.sh "$APP/Contents/Resources/ios"
 codesign --force --deep -s - "$APP" # ad-hoc: other Macs need right-click > Open once (README); notarizing needs a Developer ID
 echo "built $APP ($(du -sh "$APP" | cut -f1))"
 

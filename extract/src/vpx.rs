@@ -11,6 +11,7 @@ struct Image {
     stride: [i32; 4],
 }
 
+#[cfg(not(target_os = "ios"))]
 unsafe extern "C" {
     fn vpx_codec_vp8_dx() -> *const c_void;
     fn vpx_codec_dec_init_ver(ctx: *mut c_void, iface: *const c_void, cfg: *const c_void, flags: std::ffi::c_long, ver: i32) -> i32;
@@ -18,6 +19,20 @@ unsafe extern "C" {
     fn vpx_codec_get_frame(ctx: *mut c_void, iter: *mut *const c_void) -> *const Image;
     fn vpx_codec_destroy(ctx: *mut c_void) -> i32;
 }
+
+// ponytail: no libvpx on iOS (the Mac exports every game video before the IPA is built): init fails, so a custom lord's
+// new .webm stays unexported there. Cross-build libvpx for arm64-ios when that matters.
+#[cfg(target_os = "ios")]
+mod no_vpx {
+    use std::ffi::{c_long, c_void};
+    pub unsafe fn vpx_codec_vp8_dx() -> *const c_void { std::ptr::null() }
+    pub unsafe fn vpx_codec_dec_init_ver(_: *mut c_void, _: *const c_void, _: *const c_void, _: c_long, _: i32) -> i32 { -1 }
+    pub unsafe fn vpx_codec_decode(_: *mut c_void, _: *const u8, _: u32, _: *mut c_void, _: c_long) -> i32 { -1 }
+    pub unsafe fn vpx_codec_get_frame(_: *mut c_void, _: *mut *const c_void) -> *const super::Image { std::ptr::null() }
+    pub unsafe fn vpx_codec_destroy(_: *mut c_void) -> i32 { 0 }
+}
+#[cfg(target_os = "ios")]
+use no_vpx::*;
 
 const ABI: i32 = 12;
 const I420: i32 = 0x100 | 2;

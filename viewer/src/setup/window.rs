@@ -40,10 +40,14 @@ const CANCEL: usize = 9;
 const RETRY: usize = 10;
 const LOG: usize = 11;
 const QUIT: usize = 12;
-const TITLES: [&str; 13] = ["Use This Copy", "Download from Steam", "Choose Game Folder…", "Check Again", "Store Page",
-    "Sign In with Password Instead", "Use the QR Code Instead", "Sign In", "Continue", "Cancel", "Try Again", "Show Log", "Quit"];
+const SHOW: usize = 13;
+const NEW_DEVICES: usize = 14;
+const ALL_DEVICES: usize = 15;
+const TITLES: [&str; 16] = ["Use This Copy", "Download from Steam", "Choose Game Folder…", "Check Again", "Store Page",
+    "Sign In with Password Instead", "Use the QR Code Instead", "Sign In", "Continue", "Cancel", "Try Again", "Show Log", "Quit", "Show in Finder",
+    "New Devices", "All Devices"];
 /// Primary (crimson, Return) buttons.
-const PRIMARY: [usize; 6] = [USE_COPY, DOWNLOAD, SIGN_IN, SEND_CODE, RETRY, RECHECK];
+const PRIMARY: [usize; 8] = [USE_COPY, DOWNLOAD, SIGN_IN, SEND_CODE, RETRY, RECHECK, SHOW, NEW_DEVICES];
 
 const W: f64 = 680.0;
 const H: f64 = 560.0;
@@ -88,9 +92,7 @@ fn label(mtm: MainThreadMarker, view: &NSView, text: &str, f: Retained<NSFont>, 
 }
 
 impl Ui {
-    fn new(mtm: MainThreadMarker, target: &'static Target, update: bool) -> Ui {
-        let (title, sub) = if update { ("Strong Hold: New Game Files", "Definitive Edition, on your Mac. New game files.") }
-            else { ("Strong Hold: First-Time Setup", "Definitive Edition, on your Mac. First-time setup.") };
+    fn new(mtm: MainThreadMarker, target: &'static Target, (title, sub): (&str, &str)) -> Ui {
         let gold = rgb(0.86, 0.71, 0.38);
         let parchment = rgb(0.93, 0.88, 0.76);
         let dim = rgb(0.72, 0.65, 0.52);
@@ -262,7 +264,9 @@ pub fn run(d: &Dirs, update: Option<&super::Update>) -> bool {
     unsafe { app.finishLaunching(); }
     #[allow(deprecated)]
     app.activateIgnoringOtherApps(true);
-    let ui = Ui::new(mtm, target, update.is_some());
+    let ui = Ui::new(mtm, target, if update.is_some() { ("Strong Hold: New Game Files", "Definitive Edition, on your Mac. New game files.") }
+        else if crate::ipa::template().is_some() { ("Strong Hold iPhone Builder: Setup", "Definitive Edition, for your iPhone. First the game files.") }
+        else { ("Strong Hold: First-Time Setup", "Definitive Edition, on your Mac. First-time setup.") });
     let gold = rgb(0.86, 0.71, 0.38);
     let red = rgb(0.90, 0.38, 0.30);
     let dl_dir = crate::paths::downloaded();
@@ -525,5 +529,90 @@ pub fn run(d: &Dirs, update: Option<&super::Update>) -> bool {
                 }
             }
         }
+    }
+}
+
+/// The IPA builder (ipa.rs): this window again. First which devices (`job`'s bool: all devices = ASTC art; SHC_IPA_KIND
+/// = new / all skips the question), then one progress bar while `job` packs, then where the .ipa is and how to put it
+/// on the phone. Returns when the window closes or Quit.
+pub fn pack<J: FnOnce(bool, &mut dyn FnMut(&str, f32)) -> Result<PathBuf, String> + Send + 'static>(job: J) {
+    let mtm = MainThreadMarker::new().expect("the builder runs on the main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    let target: Retained<Target> = unsafe { msg_send_id![Target::class(), new] };
+    let target: &'static Target = Box::leak(Box::new(target));
+    menu(mtm, &app, target);
+    unsafe { app.finishLaunching(); }
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
+    let ui = Ui::new(mtm, target, ("Strong Hold iPhone Builder", "Definitive Edition, for your iPhone."));
+    if let Some(b) = super::find_game().as_deref().and_then(art_of) { Ui::image(&ui.art, &b); }
+    Ui::text(&ui.note, "The app stays on this Mac: nothing is uploaded.");
+    let st = Arc::new(Mutex::new(("Starting".to_string(), 0.0f32, None::<Result<PathBuf, String>>)));
+    let mut job = Some(job);
+    let mut all = None::<bool>;
+    let mut start = |all: bool, job: &mut Option<J>| {
+        Ui::text(&ui.body, if all { "Packing the game and your game files for any iPhone or iPad with iOS 16 (about 6 GB). Converting the art \
+            for older devices first: this takes a few minutes more." } else { "Packing the game and your game files into one app for your iPhone (about 6 GB). This takes a few minutes." });
+        ui.show(false, false, 0, true);
+        ui.buttons(&[QUIT]);
+        let (s2, job) = (st.clone(), job.take().unwrap());
+        std::thread::spawn(move || {
+            let r = job(all, &mut |l, f| { let mut g = s2.lock().unwrap(); g.0 = l.to_string(); g.1 = f; });
+            if let Err(e) = &r { eprintln!("ipa: {e}"); }
+            s2.lock().unwrap().2 = Some(r);
+        });
+    };
+    match std::env::var("SHC_IPA_KIND").as_deref() {
+        Ok(k @ ("new" | "all")) => { all = Some(k == "all"); start(k == "all", &mut job); }
+        _ => {
+            Ui::text(&ui.body, "Which devices is it for?\n\nNew Devices: iPhone 15 Pro and newer, iPads with an M chip. The game's art as it is; \
+                the quicker build.\n\nAll Devices: any iPhone or iPad with iOS 16 or newer. The art converted to a format older chips read \
+                (ASTC); a few minutes more to build, a slight loss in detail. Older devices with little memory may close \
+                the game in big battles.");
+            ui.show(false, false, 0, false);
+            ui.buttons(&[NEW_DEVICES, ALL_DEVICES, QUIT]);
+        }
+    }
+    let mut done: Option<Result<PathBuf, String>> = None;
+    loop {
+        loop {
+            let ev = unsafe { app.nextEventMatchingMask_untilDate_inMode_dequeue(NSEventMask::Any, Some(&NSDate::dateWithTimeIntervalSinceNow(0.05)), NSDefaultRunLoopMode, true) };
+            match ev { Some(e) => unsafe { app.sendEvent(&e) }, None => break }
+        }
+        if !ui.win.isVisible() { return; }
+        for c in std::mem::take(&mut *CLICKS.lock().unwrap()) {
+            match c as usize {
+                QUIT => return,
+                k @ (NEW_DEVICES | ALL_DEVICES) if all.is_none() => { all = Some(k == ALL_DEVICES); start(k == ALL_DEVICES, &mut job); }
+                SHOW => if let Some(Ok(p)) = &done { let _ = std::process::Command::new("open").arg("-R").arg(p).spawn(); },
+                RETRY => super::restart("SHC_SETUP_DONE", None), // the whole builder again
+                LOG => {
+                    let log = crate::paths::home().join("Library/Logs/Strong Hold.log");
+                    unsafe { NSWorkspace::sharedWorkspace().openURL(&NSURL::fileURLWithPath(&ns(&log.to_string_lossy()))); }
+                }
+                _ => {}
+            }
+        }
+        if done.is_some() || all.is_none() { continue; }
+        let (label, f, r) = st.lock().unwrap().clone();
+        unsafe { ui.bar.setDoubleValue(f as f64); }
+        Ui::text(&ui.status, &format!("{label}…  {:.0} %", f * 100.0));
+        match &r {
+            Some(Ok(p)) => {
+                Ui::text(&ui.body, &format!("Ready: {}\n\nPut it on your iPhone or iPad with Sideloadly or AltStore: they sign it with your Apple ID \
+                    (how: the website's iPhone page). {}", p.display(),
+                    if all == Some(true) { "Runs on any iPhone or iPad with iOS 16 or newer." } else { "Needs an iPhone 15 Pro or newer, or an M-chip iPad." }));
+                ui.show(false, false, 0, false);
+                ui.buttons(&[SHOW, QUIT]);
+            }
+            Some(Err(e)) => {
+                Ui::text(&ui.body, &format!("Couldn't build the app: {e}"));
+                ui.show(false, false, 0, false);
+                ui.buttons(&[RETRY, LOG, QUIT]);
+            }
+            None => {}
+        }
+        done = r;
     }
 }

@@ -2,6 +2,7 @@
 name = "shc-audio"
 version = "0.1.0"
 edition = "2021"
+publish = false # ours: about.toml skips it (no licence scan of target/)
 
 [dependencies]
 rodio = { version = "0.20", default-features = false, features = ["wav"] }

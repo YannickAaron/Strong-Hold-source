@@ -2,6 +2,7 @@
 name = "shc-formats"
 version = "0.1.0"
 edition = "2024"
+publish = false # ours: about.toml skips it (no licence scan of target/)
 
 [dependencies]
 lz4_flex = "0.11"

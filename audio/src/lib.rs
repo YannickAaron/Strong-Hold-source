@@ -155,7 +155,7 @@ impl Audio {
         let bytes = match self.files.get(path) {
             Some(b) => b.clone(),
             None => {
-                let b: Arc<[u8]> = std::fs::read(path).map_err(|e| eprintln!("audio: {}: {e}", path.display())).ok()?.into();
+                let b: Arc<[u8]> = std::fs::read(path).or_else(|e| read_any_case(path).ok_or(e)).map_err(|e| eprintln!("audio: {}: {e}", path.display())).ok()?.into();
                 self.files.insert(path.to_path_buf(), b.clone());
                 b
             }
@@ -400,4 +400,12 @@ mod tests {
         assert_eq!(levels(false, false, true), (0.3, 1.0)); // the game's own speech duck
         assert_eq!(levels(false, false, false), (1.0, 1.0));
     }
+}
+
+/// `path` with its file name matched ignoring case: the game asks for "streamlp_02" where the file is
+/// "Streamlp_02.wav", which only a case-insensitive disk (macOS) finds by itself; iOS's isn't.
+fn read_any_case(path: &Path) -> Option<Vec<u8>> {
+    let want = path.file_name()?.to_string_lossy().to_lowercase();
+    let p = std::fs::read_dir(path.parent()?).ok()?.flatten().find(|e| e.file_name().to_string_lossy().to_lowercase() == want)?.path();
+    std::fs::read(p).ok()
 }

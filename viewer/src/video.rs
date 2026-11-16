@@ -26,10 +26,12 @@ fn tex(device: &wgpu::Device, label: &str, w: u32, h: u32, format: wgpu::Texture
         dimension: wgpu::TextureDimension::D2, format, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
     })
 }
-/// The full-screen video texture for main.rs's HUD bind groups (BC1 sRGB like the atlases: the device has BC support).
-pub fn texture(device: &wgpu::Device) -> wgpu::Texture { tex(device, "video", W, H, wgpu::TextureFormat::Bc1RgbaUnormSrgb) }
+/// The frames' format: BC as the .vid holds them, RGBA8 where the GPU can't read BC (texfmt; decoded per frame).
+fn fmt(bc: wgpu::TextureFormat) -> wgpu::TextureFormat { if crate::texfmt::bc() { bc } else { wgpu::TextureFormat::Rgba8UnormSrgb } }
+/// The full-screen video texture for main.rs's HUD bind groups (BC1 sRGB like the atlases).
+pub fn texture(device: &wgpu::Device) -> wgpu::Texture { tex(device, "video", W, H, fmt(wgpu::TextureFormat::Bc1RgbaUnormSrgb)) }
 /// The in-game video texture (`SMALL`): BC3 for the banners' alpha.
-pub fn small_texture(device: &wgpu::Device) -> wgpu::Texture { tex(device, "video2", SMALL_W, SMALL_H, wgpu::TextureFormat::Bc3RgbaUnormSrgb) }
+pub fn small_texture(device: &wgpu::Device) -> wgpu::Texture { tex(device, "video2", SMALL_W, SMALL_H, fmt(wgpu::TextureFormat::Bc3RgbaUnormSrgb)) }
 
 /// After the last frame: start over, stop, or keep showing it.
 #[derive(Clone, Copy, PartialEq)]
@@ -105,8 +107,10 @@ impl Player {
         if self.at != Some(k) {
             self.seek(k)?;
             let [w, h, bpb] = self.size;
+            let bc = if bpb == 8 { wgpu::TextureFormat::Bc1RgbaUnormSrgb } else { wgpu::TextureFormat::Bc3RgbaUnormSrgb };
+            let (f, px) = crate::texfmt::fit(bc, &self.frame, w, h);
             queue.write_texture(wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d { x, y: 0, z: 0 }, aspect: wgpu::TextureAspect::All },
-                &self.frame, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w / 4 * bpb), rows_per_image: None },
+                &px, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(crate::texfmt::layout(f, w, h).0), rows_per_image: None },
                 wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 });
         }
         Some(k)
@@ -249,7 +253,7 @@ pub fn pump(queue: &wgpu::Queue, small: &wgpu::Texture, full: &wgpu::Texture) {
         if let Some(f) = want.take().filter(|f| now.as_ref() != Some(f)) {
             if let Some(px) = sketch_blocks(&f) {
                 queue.write_texture(wgpu::TexelCopyTextureInfo { texture: small, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: BANNER[1], z: 0 }, aspect: wgpu::TextureAspect::All },
-                    &px, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(SKETCH[0] / 4 * 16), rows_per_image: None },
+                    &px, wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(crate::texfmt::layout(small.format(), SKETCH[0], SKETCH[1]).0), rows_per_image: None },
                     wgpu::Extent3d { width: SKETCH[0], height: SKETCH[1], depth_or_array_layers: 1 });
             }
             *now = Some(f); // a missing file isn't retried every frame
@@ -262,11 +266,13 @@ fn sound(file: &str) -> Option<std::path::PathBuf> {
     Some(crate::cache_dir().join("video").join(file.strip_suffix(".vid")?.to_string() + ".wav")).filter(|p| p.exists())
 }
 
-/// Sketch `file` (Assets/GUI/Images, read straight from the game folder like the credits pictures) as `SKETCH` BC3.
+/// Sketch `file` (Assets/GUI/Images, read straight from the game folder like the credits pictures) as `SKETCH` BC3
+/// (RGBA where the GPU can't read BC).
 fn sketch_blocks(file: &str) -> Option<Vec<u8>> {
     let png = shc_extract::tex::Rgba::png(&crate::paths::game().join("Assets/GUI/Images").join(file)).map_err(|e| eprintln!("sketch {file}: {e}")).ok()?;
     let (w, h) = (SKETCH[0] as usize, SKETCH[1] as usize);
-    Some(shc_extract::bc::encode(&png.resize(w, h).px, w, h, true))
+    let px = png.resize(w, h).px;
+    Some(if crate::texfmt::bc() { shc_extract::bc::encode(&px, w, h, true) } else { px })
 }
 
 /// reports.rs: the sketch picture `file` (MainViewModel.imageFileNames, e.g. "woodcutter_sketch.png") into rect `p`.

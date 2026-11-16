@@ -97,7 +97,12 @@ pub fn ui_scale() -> f32 { ui_scale_pct() as f32 / 100.0 }
 /// screens up to 1366×768; that's k / dpr logical px. Times the player's UI size (⌘= / ⌘-), but the grid never
 /// narrower than the original's narrowest, 1360 design px: the HUD's two bottom blocks (goods bar 400 + building
 /// panel 800) keep a gap.
-pub fn hud_scale(w: f32, h: f32) -> f32 { scale(w, h, dpr(), ui_scale()) }
+pub fn hud_scale(w: f32, h: f32) -> f32 { 
+    // phone: bigger than the original's narrowest grid (1360 design px across): 1240 leaves the goods bar and the
+    // building panel a small gap; smaller is hard to read and tap
+    #[cfg(target_os = "ios")] { let _ = h; return w / 1240.0; }
+    #[cfg(not(target_os = "ios"))] scale(w, h, dpr(), ui_scale())
+}
 fn scale(w: f32, h: f32, d: f32, ui: f32) -> f32 {
     let (wd, hd) = (w * d, h * d);
     let k = if wd <= 1366.0 || hd <= 768.0 { 1.0 } else { (wd / 1360.0).min(hd / 768.0) };
@@ -225,7 +230,7 @@ impl App {
         crate::audio::set_volumes(if mute { 0.0 } else { m }, mu, sp, us, sfx, red);
     }
 
-    fn live(&self) -> bool { self.play.as_ref().is_some_and(|p| p.live.is_some()) }
+    pub(crate) fn live(&self) -> bool { self.play.as_ref().is_some_and(|p| p.live.is_some()) }
 
     /// Play / pause the live game (the sim thread hears it at once); returns whether it was playing.
     fn set_playing(&mut self, on: bool) -> bool {
@@ -245,7 +250,7 @@ impl App {
             // Lock Cursor on macOS: the cursor left the window, put it back just inside, where it went out
             WindowEvent::CursorLeft { .. } if self.cursor_locked() => {
                 if let Some(g) = &self.gfx {
-                    let sz = g.window.inner_size().to_logical::<f64>(g.window.scale_factor());
+                    let sz = crate::win_size(&g.window).to_logical::<f64>(g.window.scale_factor());
                     let [x, y] = self.cam.cursor.map(f64::from);
                     let _ = g.window.set_cursor_position(winit::dpi::LogicalPosition::new(x.clamp(2.0, sz.width - 3.0), y.clamp(2.0, sz.height - 3.0)));
                 }
@@ -306,7 +311,7 @@ impl App {
 
     /// Pinch: in game between the original's zoom levels (wheel / X / Z steps go on from the nearest one); the replay /
     /// map viewers zoom freely like their wheel.
-    fn pinch(&mut self, mag: f32, _phase: TouchPhase) {
+    pub(crate) fn pinch(&mut self, mag: f32, _phase: TouchPhase) {
         let Some(g) = &self.gfx else { return };
         if self.menu.is_some() || self.intro.is_some() { return; }
         let (w, h, sf) = (g.config.width as f32, g.config.height as f32, g.window.scale_factor() as f32);
@@ -355,7 +360,13 @@ impl App {
     pub(crate) fn ux_about_to_wait(&mut self, el: &ActiveEventLoop) {
         #[cfg(target_os = "macos")]
         for c in crate::macos::take() { self.cmd(c, el); }
+        #[cfg(target_os = "ios")]
+        self.touch_tick(el);
         match self.ux.interval() {
+            // iOS: winit's request_redraw is setNeedsDisplay, dropped when asked from inside the draw: ask here instead
+            #[cfg(target_os = "ios")]
+            None => { el.set_control_flow(ControlFlow::Poll); if let Some(g) = &self.gfx { g.window.request_redraw(); } }
+            #[cfg(not(target_os = "ios"))]
             None => el.set_control_flow(ControlFlow::Wait), // RedrawRequested asks for the next frame itself (vsync paces it)
             Some(iv) => {
                 let due = self.last + iv;
@@ -428,7 +439,7 @@ pub(crate) fn overlay(ux: &mut Ux, ui: Option<&mut Ui>, keys: &Keys, window: &Wi
     let Some(ui) = ui else { return hud };
     if ux.toast.as_ref().is_some_and(|t| t.1.elapsed() > Duration::from_millis(2500)) { ux.toast = None; }
     if !ux.help && ux.toast.is_none() { return hud; }
-    let sz = window.inner_size().to_logical::<f32>(window.scale_factor());
+    let sz = crate::win_size(&window).to_logical::<f32>(window.scale_factor());
     let (w, h, s) = (sz.width, sz.height, hud_scale(sz.width, sz.height));
     let keep = (ui.s, ui.w, ui.h); // the HUD drops its glyph cache when ui.s changes: put it back afterwards
     (ui.s, ui.w, ui.h) = (s, w, h);

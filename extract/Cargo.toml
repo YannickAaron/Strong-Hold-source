@@ -2,6 +2,7 @@
 name = "shc-extract"
 version = "0.1.0"
 edition = "2024"
+publish = false # ours: about.toml skips it (no licence scan of target/)
 
 # First-run export of the game's assets from the user's own install (README: "First run"). Replaces re/scripts/export_*.py.
 [dependencies]
@@ -12,3 +13,7 @@ fontdue = "0.9"
 lz4_flex = "0.11"
 crc32fast = "1.5"
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+# The iPhone Builder's ASTC conversion (astc.rs): Arm's astcenc, vendored and built from source; Mac only
+[target.'cfg(target_os = "macos")'.dependencies]
+ctt-astcenc = { version = "0.6.1", features = ["rayon"] }

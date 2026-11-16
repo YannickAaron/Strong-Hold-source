@@ -52,7 +52,10 @@ fn steam_roots() -> Vec<PathBuf> {
 }
 
 /// The game's install folder: SHC_GAME, else the setup's download, else Steam's (CrossOver's on macOS).
+/// iOS: the files the game reads at runtime, packed into the app by the Mac's IPA builder (ipa.rs).
 pub fn game() -> PathBuf {
+    #[cfg(target_os = "ios")]
+    if let Some(g) = env_dir("SHC_GAME").or_else(|| Some(bundle().join("game"))) { return g; }
     let has = |g: &PathBuf| g.join(format!("{GAME}_Data")).is_dir();
     env_dir("SHC_GAME").or_else(|| Some(downloaded()).filter(has))
         .or_else(|| std::fs::read_to_string(chosen_file()).ok().map(|s| PathBuf::from(s.trim())).filter(has))
@@ -79,15 +82,25 @@ pub fn game_user() -> PathBuf {
 }
 
 /// Our export folder `name` (shc-viewer, shc-audio): written once by the first-run setup.
-pub fn cache(name: &str) -> PathBuf { app_data().join(name) }
+/// iOS: inside the app (read-only), packed by the Mac's IPA builder.
+pub fn cache(name: &str) -> PathBuf {
+    #[cfg(target_os = "ios")]
+    return bundle().join(name);
+    #[cfg(not(target_os = "ios"))]
+    app_data().join(name)
+}
+
+/// iOS: the .app folder (the binary sits at its top).
+#[cfg(target_os = "ios")]
+pub fn bundle() -> PathBuf { std::env::current_exe().ok().and_then(|e| Some(e.parent()?.to_path_buf())).unwrap_or_default() }
 
 /// Our own data folder (settings.cfg, campaign progress, saves).
 pub fn app_data() -> PathBuf {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     return home().join("Library/Application Support").join(APP);
     #[cfg(windows)]
     return env_dir("APPDATA").unwrap_or_else(|| home().join("AppData/Roaming")).join(APP);
-    #[cfg(not(any(target_os = "macos", windows)))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios", windows)))]
     return env_dir("XDG_DATA_HOME").unwrap_or_else(|| home().join(".local/share")).join(APP);
 }
 
@@ -116,7 +129,19 @@ pub fn app_bundle_start() {
         unsafe { dup2(f.as_raw_fd(), 1); dup2(f.as_raw_fd(), 2); } // the fds stay open after `f` drops
     }
 }
-#[cfg(not(target_os = "macos"))]
+/// iOS: saves in the app's own container (HOME is the sandbox there).
+#[cfg(target_os = "ios")]
+pub fn app_bundle_start() {
+    if std::env::var_os("SHC_SAVES").is_none() { std::env::set_var("SHC_SAVES", app_data().join("Saves")); }
+    let _ = std::fs::create_dir_all(std::env::var_os("SHC_SAVES").unwrap());
+    // stdout/stderr (panics included) go nowhere on iOS: into app_data()/Strong Hold.log, like the Mac app's log
+    use std::os::fd::AsRawFd;
+    if let Ok(f) = std::fs::File::create(app_data().join("Strong Hold.log")) {
+        unsafe extern "C" { fn dup2(from: i32, to: i32) -> i32; }
+        unsafe { dup2(f.as_raw_fd(), 1); dup2(f.as_raw_fd(), 2); }
+    }
+}
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
 pub fn app_bundle_start() {}
 
 /// Tests: a save of the real game's (e.g. "Crater Lake-1test.sav").

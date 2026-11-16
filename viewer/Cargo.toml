@@ -2,8 +2,10 @@
 name = "shc-viewer"
 version = "0.1.0"
 edition = "2021"
+publish = false # ours: about.toml skips it (no licence scan of target/)
 
 [dependencies]
+texture2ddecoder = "0.1" # texfmt: BC decoded on GPUs without BC (iOS before the A17 Pro)
 wgpu = "25"
 winit = "0.30"
 pollster = "0.4"
@@ -41,3 +43,7 @@ libc = "0.2"
 [dev-dependencies]
 # setup/mod.rs steam_index_current: steam_files.txt patterns. Already in the lock (through wgpu): nothing new to download.
 regex = "1"
+
+# vendor/wgpu-hal: 25.0.2 with BC asked from the GPU on iOS (src/metal/adapter.rs `format_bc`); the iOS app's art is BC
+[patch.crates-io]
+wgpu-hal = { path = "vendor/wgpu-hal" }

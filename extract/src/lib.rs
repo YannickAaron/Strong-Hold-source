@@ -1,6 +1,8 @@
 //! First-run asset export from the user's own game install (replaces re/scripts/export_*.py; same files, same
 //! columns, so viewer/ and audio/ read them unchanged).
 pub mod atlases;
+#[cfg(target_os = "macos")]
+pub mod astc;
 pub mod audio;
 pub mod bc;
 pub mod video;

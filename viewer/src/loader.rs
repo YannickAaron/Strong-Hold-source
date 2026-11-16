@@ -59,15 +59,19 @@ impl Atlases {
                 let own = BUNDLED.iter().find(|b| b.0 == name);
                 // a custom lord's atlas (custom_lords::add_sprites: a full path) has its BC1 mask next to it
                 let custom = std::path::Path::new(&name).is_absolute() && std::path::Path::new(&format!("{name}_m.bc")).is_file();
+                // the export's: BC, or ASTC in an "all devices" IPA (texfmt); ours and a custom lord's: BC, decoded
+                // where the GPU can't read it
+                let fit = |f, d: &[u8], w, h| { let (f, d) = crate::texfmt::fit(f, d, w, h); upload(&dev, &name, &d, w, h, f) };
                 let mask = match own {
-                    Some(b) => Some(upload(&dev, &name, &inflate(b.2), w, h, wgpu::TextureFormat::Bc1RgbaUnorm, 8)),
-                    None => masks.iter().find(|m| m.0 == i).map(|&(_, mw, mh, f)| (mw, mh, f)).or(custom.then_some((w, h, 10))).map(|(mw, mh, f)| {
-                        let (f, b) = if f == 12 { (wgpu::TextureFormat::Bc3RgbaUnorm, 16) } else { (wgpu::TextureFormat::Bc1RgbaUnorm, 8) };
-                        upload(&dev, &name, &read(&format!("{name}_m")), mw, mh, f, b)
-                    }),
+                    Some(b) => Some(fit(wgpu::TextureFormat::Bc1RgbaUnorm, &inflate(b.2), w, h)),
+                    None if custom => Some(fit(wgpu::TextureFormat::Bc1RgbaUnorm, &read(&format!("{name}_m")), w, h)),
+                    None => masks.iter().find(|m| m.0 == i).map(|&(_, mw, mh, f)| upload(&dev, &name, &read(&format!("{name}_m")), mw, mh, crate::texfmt::mask(f == 12))),
                 };
-                let f = wgpu::TextureFormat::Bc7RgbaUnormSrgb;
-                let tex = match own { Some(b) => upload(&dev, &name, &inflate(&b.1[8..]), w, h, f, 16), None => upload(&dev, &name, &read(&name), w, h, f, 16) };
+                let tex = match own {
+                    Some(b) => fit(wgpu::TextureFormat::Bc7RgbaUnormSrgb, &inflate(&b.1[8..]), w, h),
+                    None if custom => fit(wgpu::TextureFormat::Bc7RgbaUnormSrgb, &read(&name), w, h),
+                    None => upload(&dev, &name, &read(&name), w, h, crate::texfmt::colour()),
+                };
                 if tx.send((i, group(&dev.0, &bgl, &screen, &sampler, &tex, mask.as_ref().unwrap_or(&black)))).is_err() { return; }
             }
             println!("uploaded {total} atlases + {} masks in {:.2}s (worker thread)", masks.len(), t0.elapsed().as_secs_f32());
@@ -96,26 +100,27 @@ fn group(d: &wgpu::Device, bgl: &wgpu::BindGroupLayout, screen: &wgpu::Buffer, s
     })
 }
 
-/// Raw BC blocks (export cache or BUNDLED) → texture, in `CHUNK`-sized bands of block rows. Unity row order = wgpu v
+/// Raw blocks (BC / ASTC / RGBA8, texfmt) → texture, in `CHUNK`-sized bands of block rows. Unity row order = wgpu v
 /// order (README).
-fn upload(dq: &(wgpu::Device, wgpu::Queue), name: &str, data: &[u8], w: u32, h: u32, format: wgpu::TextureFormat, block: u32) -> wgpu::TextureView {
+fn upload(dq: &(wgpu::Device, wgpu::Queue), name: &str, data: &[u8], w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::TextureView {
     let (device, queue) = dq;
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(name), size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
     });
-    let row = (w / 4 * block) as usize; // bytes per row of 4×4 blocks
+    let (row, rows, _) = crate::texfmt::layout(format, w, h);
+    let (row, bh) = (row as usize, format.block_dimensions().1);
     let band = (CHUNK / row).max(1) as u32;
     let mut y = 0;
-    while y < h / 4 {
-        let n = band.min(h / 4 - y);
+    while y < rows {
+        let n = band.min(rows - y);
         let off = y as usize * row;
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: y * 4, z: 0 }, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: y * bh, z: 0 }, aspect: wgpu::TextureAspect::All },
             &data[off..off + n as usize * row],
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row as u32), rows_per_image: Some(n) },
-            wgpu::Extent3d { width: w, height: n * 4, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width: w, height: n * bh, depth_or_array_layers: 1 },
         );
         y += n;
         queue.submit([]);
@@ -275,7 +280,7 @@ pub fn overlay(l: &Loading, g: &crate::Gfx, ui: Option<&mut crate::hud::Ui>, mut
     let busy = { let _ = l; false };
     let gfx = g.loading.as_ref().and_then(|a| a.progress());
     if !busy && gfx.is_none() { return hud; }
-    let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+    let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
     let s = crate::ux::hud_scale(sz.width, sz.height); // the HUD's scale (Ui::draw drops glyphs when ui.s changes)
     (ui.s, ui.w, ui.h) = (s, sz.width, sz.height);
     let text = match gfx { Some(p) if busy => format!("Loading...   graphics {:.0} %", p * 100.0), Some(p) => format!("Loading graphics {:.0} %", p * 100.0), None => "Loading...".into() };

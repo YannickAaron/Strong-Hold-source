@@ -1,10 +1,13 @@
 //! Minimal SHC DE sprite viewer: real BC7 atlases from the export cache, drawn as instanced quads.
+#[cfg(target_os = "macos")]
+mod ipa; // "Strong Hold iPhone Builder" (ipa.rs)
 mod audio;
 mod cursor;
 mod endgame;
 mod koth; // the King of the Hill game mode (koth.rs)
 mod extended; // Extended rules beside a save (extended.rs)
 mod gestures;
+mod texfmt;
 #[cfg(feature = "live")]
 mod game_replay; // game replays (game_replay.rs)
 mod saves; // save browser, quick / auto saves (saves.rs)
@@ -506,6 +509,8 @@ struct App {
     loading: loader::Loading, // a game start whose sim setup runs on a worker thread (loader.rs)
     fps: Option<(Instant, u32, i32, [String; 2])>, // ToggleFrameRate on: since, frames, sim tick then, the text (fps_text)
     editor: Option<menu::editor::Hud>, // the map editor runs (menu/editor.rs): its panel instead of the HUD
+    #[cfg(target_os = "ios")]
+    touches: (gestures::Touches, Option<winit::event::DeviceId>), // fingers -> mouse / pan / pinch (window_event)
 }
 
 /// --replay state. Tiles live in fixed 4-triangle slots of the static buffer (cliff side + tile, every tile mesh
@@ -556,7 +561,7 @@ impl App {
         println!("{} sprites, {} animations, hunter has {} frames", named.len(), anims.len(), hero.len());
         let now = Instant::now();
         let names: Vec<String> = named.iter().map(|(n, _)| n.clone()).collect();
-        let mut app = Self { atlases, sprites: named.into_iter().map(|(_, s)| s).collect(), cells, hero, gfx: None, scene: None, scene_rows: vec![], sheet: false,
+        let mut app = Self { #[cfg(target_os = "ios")] touches: Default::default(), atlases, sprites: named.into_iter().map(|(_, s)| s).collect(), cells, hero, gfx: None, scene: None, scene_rows: vec![], sheet: false,
             cam: Cam { zoom: 1.0, use_bld: true, zoom_pos: 3.0, ..Default::default() }, start: now, last: now, frame_times: vec![], frames: 0, play: None, ui: None, focus: None, drag_from: None, menu: None, last_lobby: None, campaign: None, scenario: None, trail: None, solo: None, tutorial: None, screen_image: None, names: names.clone(), end: Default::default(), intro: None, menu_loop: video::MenuLoop::new(), cursors: None, mods: Default::default(), keys: keys::Keys::load(), #[cfg(feature = "live")] rp: None, ux: Default::default(), stats: Default::default(), loading: Default::default(), fps: None, editor: None };
         let args: Vec<String> = std::env::args().collect();
         let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
@@ -709,14 +714,14 @@ impl App {
     /// The cursor is on the tutorial panel (its clicks don't reach the map).
     fn on_tutorial(&self) -> bool {
         let (Some(t), Some(g)) = (&self.tutorial, &self.gfx) else { return false };
-        let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+        let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
         t.over(sz.width, sz.height, self.cam.cursor)
     }
     /// HUD_Tutorial.ButtonClicked: Continue = TutorialAction 20 (and the panel closes once Exit shows: the end), Exit =
     /// back to the front end.
     fn tutorial_click(&mut self, el: &ActiveEventLoop) {
         let (Some(t), Some(g)) = (&self.tutorial, &self.gfx) else { return };
-        let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+        let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
         match t.hit(sz.width, sz.height, self.cam.cursor) {
             Some(menu::tutorial::Button::Continue) => {
                 let end = t.buttons[1].is_some();
@@ -754,7 +759,7 @@ impl App {
     /// centre); left = North -> East (+2), right = North -> West (+6).
     fn rotate_map(&mut self, right: bool) {
         let (Some(g), Some(l)) = (&self.gfx, self.play.as_ref().and_then(|p| p.live.as_ref())) else { return };
-        let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+        let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
         let [x, y] = self.cam.centre_ground([sz.width / 2.0, sz.height / 2.0], l.rot);
         l.send(live::Cmd::Rotate((l.rot as i32 + if right { 6 } else { 2 }) % 8, x, y));
         self.tutorial_action(2, -1); // GameMap.RotateMapLeft / Right
@@ -1297,7 +1302,7 @@ impl App {
             if steps > 0 { l.send(live::Cmd::Step); }
             if let Some(g) = &self.gfx {
                 // radar camera rectangle: game tile at the window centre, tiles across (GameMap.screenTilesWide = px/64)
-                let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+                let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
                 let [cx, cy] = self.cam.centre_flat([sz.width / 2.0, sz.height / 2.0], l.rot);
                 let c = &self.cam;
                 let rect = [-c.off[0] / c.zoom, -c.off[1] / c.zoom, (sz.width - c.off[0]) / c.zoom, (sz.height - c.off[1]) / c.zoom];
@@ -1349,7 +1354,7 @@ impl App {
                 }
                 // minimap click (GameAction RadarClicked → cameraMovedRecalcBounds): centre on that tile
                 if let (Some((x, y)), Some(g)) = (f.goto, &self.gfx) {
-                    let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+                    let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
                     self.cam.centre_on(sz.width, sz.height, &p.world, f.rot, x, y);
                 }
                 // not under a menu: its map preview (lobby, briefing, Load Game) lives in the same texture's corner, and
@@ -1547,7 +1552,7 @@ impl App {
         if f == "Pause" && self.lan_pause() { return; } // a LAN game: pause / resume for everyone (lan.rs)
         // the screen-centre tile (SetBookmark: CalcMapTileFromMousePos at the centre, no building heights)
         let centre = match (&self.gfx, self.play.as_ref().and_then(|p| p.live.as_ref())) {
-            (Some(g), Some(l)) => { let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor()); Some(self.cam.centre_ground([sz.width / 2.0, sz.height / 2.0], l.rot)) }
+            (Some(g), Some(l)) => { let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor()); Some(self.cam.centre_ground([sz.width / 2.0, sz.height / 2.0], l.rot)) }
             _ => None,
         };
         let Some(p) = self.play.as_mut() else { return };
@@ -1923,6 +1928,13 @@ impl ApplicationHandler for App {
             _ => attrs.with_fullscreen(Some(Fullscreen::Borderless(None))),
         };
         let window = Arc::new(el.create_window(attrs).unwrap());
+        // iOS full screen: home bar hidden, edge swipes need a second swipe (not the game's drags)
+        #[cfg(target_os = "ios")] {
+            use winit::platform::ios::{WindowExtIOS, ScreenEdge};
+            window.set_prefers_home_indicator_hidden(true);
+            window.set_prefers_status_bar_hidden(true);
+            window.set_preferred_screen_edges_deferring_system_gestures(ScreenEdge::ALL);
+        }
         if !fixed && std::env::var_os("SHC_WINDOW").is_none() && window.fullscreen().is_none() { set_windowed(&window, true); }
         // Options > Sound: the saved volumes (ConfigSettings; the game's defaults without a settings.cfg)
         let (m, mu, sp, us, sfx, red) = skirmish::Settings::load().volumes();
@@ -1936,6 +1948,22 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, ev: WindowEvent) {
+        // iOS: fingers -> the mouse, pan and pinch (gestures::Touches); an iPad trackpad sends real mouse events
+        #[cfg(target_os = "ios")]
+        if let WindowEvent::Touch(t) = ev {
+            let p = t.location.to_logical::<f32>(self.gfx.as_ref().map_or(1.0, |g| g.window.scale_factor()));
+            self.touches.1 = Some(t.device_id);
+            let tool = match self.ui.as_ref().and_then(|u| u.selected_mapper()) {
+                Some(m) if self.live() && self.menu.is_none() => if live::is_drag(m) { gestures::Tool::Drag } else { gestures::Tool::Place },
+                _ => gestures::Tool::None,
+            };
+            self.touches.0.tool(tool);
+            // a touch that starts on a HUD button clicks it, whatever is in the hand
+            let on_hud = t.phase == winit::event::TouchPhase::Started && self.ui.as_ref().is_some_and(|u| u.over([p.x, p.y]));
+            let tool = if on_hud { gestures::Tool::None } else { tool };
+            let out = self.touches.0.feed(t.id, t.phase, [p.x, p.y], START.elapsed().as_secs_f32(), tool);
+            return self.touch(el, out);
+        }
         self.event(el, ev)
     }
 
@@ -1954,7 +1982,7 @@ impl App {
             // fit the scene's bounding box into the window
             let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
             for v in raw.iter().flatten() { for k in 0..2 { lo[k] = lo[k].min(v.pos[k]); hi[k] = hi[k].max(v.pos[k]); } }
-            let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+            let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
             let z = (sz.width / (hi[0] - lo[0])).min(sz.height / (hi[1] - lo[1])).min(1.0);
             self.cam.zoom = z;
             self.cam.off = [(sz.width - (hi[0] + lo[0]) * z) / 2.0, (sz.height - (hi[1] + lo[1]) * z) / 2.0];
@@ -1993,6 +2021,7 @@ impl App {
                 eprintln!("lord import {}: {:?}", p.display(), lord_share::MESSAGE.lock().unwrap());
             }
             WindowEvent::Resized(sz) => if let Some(g) = &mut self.gfx {
+                let sz = crate::win_size(&g.window); // iOS: Resized carries the safe area, the surface is the whole screen
                 g.config.width = sz.width.max(1);
                 g.config.height = sz.height.max(1);
                 g.surface.configure(&g.device, &g.config);
@@ -2015,7 +2044,7 @@ impl App {
             // the cursor left through a window edge (a notch MacBook's camera band above a full-screen game, the menu
             // bar, a window's title bar): edge scrolling goes on in that direction until it is back (edge_snap)
             WindowEvent::CursorLeft { .. } => {
-                let sz = self.gfx.as_ref().map(|g| g.window.inner_size().to_logical::<f32>(g.window.scale_factor()));
+                let sz = self.gfx.as_ref().map(|g| crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor()));
                 match sz.and_then(|s| edge_snap(self.cam.cursor, s.width, s.height)) {
                     Some(c) => self.cam.cursor = c,
                     None => self.cam.cursor_in = false,
@@ -2131,7 +2160,7 @@ impl App {
                 };
                 if let (Some((from, to, t0)), Some(g)) = (self.cam.zoom_anim, &self.gfx) {
                     let t = (clock.saturating_duration_since(t0).as_secs_f32() / 0.2).min(1.0); // smoovZoomDuration
-                    let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+                    let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
                     let c = &mut self.cam;
                     let nz = from + (to - from) * t;
                     for (k, m) in [sz.width / 2.0, sz.height / 2.0].into_iter().enumerate() { c.off[k] = m - (m - c.off[k]) * nz / c.zoom; }
@@ -2140,12 +2169,12 @@ impl App {
                 }
                 // in game: scrolling (arrows, window edges) and the original's camera limits after every move / zoom
                 if let (Some(g), true, None) = (&self.gfx, self.play.is_some(), &self.menu) {
-                    let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+                    let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
                     let (sf, dt) = (g.window.scale_factor() as f32, step);
                     let before = self.cam.off;
                     // Options > Controls: Scroll speed 0..15 = 0.5×..2× (GetScrollSpeed), Push map scrolling
                     let speed = menu::opt_num("ScrollSpeed", 5.0) * 0.1 + 0.5;
-                    self.cam.scroll(sz.width, sz.height, sf, self.mods.shift_key(), dt, speed, menu::opt("PushMapScrolling", true));
+                    self.cam.scroll(sz.width, sz.height, sf, self.mods.shift_key(), dt, speed, menu::opt("PushMapScrolling", true) && !cfg!(target_os = "ios")); // phone: a finger near the edge is no push
                     if self.cam.off != before { self.tutorial_action(1, -1) } // CameraControls2D: the camera scrolled
                     self.cam.ui_hidden = self.ui.as_ref().is_some_and(|u| u.hidden);
                     self.cam.limit(sz.width, sz.height, sf, ux::hud_scale(sz.width, sz.height));
@@ -2253,7 +2282,7 @@ impl App {
                     .map(|p| p.replace('#', &format!("{:05}", self.frames)));
                 let hud = match (&mut self.ui, &self.play) {
                     (Some(u), Some(p)) => {
-                        let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+                        let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
                         let t = p.at - 1;
                         let label = p.live.as_ref().map_or(t, |l| l.tick as usize);
                         u.edge_mask = self.cam.edge_mask;
@@ -2283,7 +2312,7 @@ impl App {
                 { self.end.trail = self.trail.map(|t| (t.0, t.1, self.play.as_ref().and_then(|p| p.live.as_ref()).map_or(0, |l| l.tick))); }
                 let hud = match (&mut self.ui, &self.play) {
                     (Some(u), Some(p)) if self.menu.is_none() => {
-                        let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+                        let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
                         let st = p.huds.get(p.at - 1).cloned().unwrap_or_default();
                         [hud, self.end.draw(&st, u, sz.width, sz.height, self.cam.cursor, self.last_lobby.is_some() || self.campaign.is_some() || self.trail.is_some())].concat()
                     }
@@ -2292,7 +2321,7 @@ impl App {
                 // the tutorial's panel (tutorial.rs)
                 let hud = match (&self.tutorial, &mut self.ui, &self.play) {
                     (Some(t), Some(u), Some(p)) if self.menu.is_none() => {
-                        let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+                        let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
                         let st = p.huds.get(p.at - 1).cloned().unwrap_or_default();
                         [hud, t.draw(u, &st, sz.width, sz.height, self.cam.cursor)].concat()
                     }
@@ -2307,7 +2336,7 @@ impl App {
                 // Options > Show Local Time / Show Play Time (menu.rs)
                 let hud = match &mut self.ui {
                     Some(u) if self.menu.is_none() && self.play.as_ref().is_some_and(|p| p.live.is_some()) => {
-                        let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+                        let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
                         [hud, menu::clock_overlay(u, sz.width, sz.height)].concat()
                     }
                     _ => hud,
@@ -2316,7 +2345,7 @@ impl App {
                 #[cfg(feature = "live")]
                 let hud = match (&mut self.rp, &mut self.ui, &self.play) {
                     (Some(c), Some(u), Some(p)) if self.menu.is_none() => {
-                        let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+                        let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
                         [hud, c.draw(u, sz.width, sz.height, self.cam.cursor, p.playing, p.rate)].concat()
                     }
                     _ => hud,
@@ -2360,7 +2389,7 @@ impl App {
                     (Some(m), Some(u)) if self.intro.is_none() => {
                         // front end: its backdrop video's frame due now (menu.rs draws it)
                         if let (false, false, Some(h)) = (m.is_pause(), video::full_busy(), &g.hud) { self.menu_loop.update(&g.queue, &h.video); }
-                        let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+                        let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
                         // a briefing lists the running game's objectives (FatControler.UpdateObjectiveRows)
                         if let Some(st) = self.play.as_ref().and_then(|p| p.huds.get(p.at.saturating_sub(1))) {
                             m.goals = (st.ev.goals.clone(), st.ev.campaign, st.ev.timer);
@@ -2374,7 +2403,7 @@ impl App {
                 // start-up intro (video.rs) instead of the menu until it's over
                 let intro = match (&mut self.intro, &g.hud) {
                     (Some(i), Some(h)) => {
-                        let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+                        let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
                         Some(i.draw(&g.queue, &h.video, sz.width, sz.height))
                     }
                     _ => None,
@@ -2389,13 +2418,16 @@ impl App {
                 // the Sands of Time timer / results (trail_menu.rs), not under a menu
                 #[cfg(feature = "live")]
                 let hud = {
-                    let (p, sz) = (self.play.as_ref(), g.window.inner_size().to_logical::<f32>(g.window.scale_factor()));
+                    let (p, sz) = (self.play.as_ref(), crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor()));
                     let over = p.and_then(|p| p.huds.first()).is_some_and(|h| h.end.is_some());
                     menu::trail_menu::sands_overlay(self.trail.filter(|_| self.menu.is_none()), p.and_then(|p| p.live.as_ref()).map(|l| l.tick), over, [sz.width, sz.height], self.ui.as_mut(), hud)
                 };
                 if let Some(h) = &g.hud { video::pump(&g.queue, &h.small, &h.video); } // the in-game videos the HUD / end screen asked for
                 let tick = self.play.as_ref().and_then(|p| p.live.as_ref()).map_or(0, |l| l.tick);
-                let hud = if self.menu.is_none() { Self::fps_text(&mut self.fps, self.ui.as_mut(), tick, g.window.inner_size().to_logical::<f32>(g.window.scale_factor()).width, hud) } else { hud }; // F: fps / sim rate
+                let hud = if self.menu.is_none() { Self::fps_text(&mut self.fps, self.ui.as_mut(), tick, crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor()).width, hud) } else { hud }; // F: fps / sim rate
+                #[cfg(target_os = "ios")] // a wall's pinned start (gestures::Touches)
+                let hud = { let mut hud = hud; if let Some(at) = self.touches.0.pin().filter(|_| self.live() && self.menu.is_none()) { gestures::ring(&mut hud, at, 1.0); } // a wall's pinned start
+                    hud };
                 let hud = ux::overlay(&mut self.ux, self.ui.as_mut(), &self.keys, &g.window, hud); // F1 sheet, notices
                 let t_pre = Instant::now();
                 draw(g, &self.cam, tris, rows, &hud, shot.as_deref());
@@ -2436,12 +2468,12 @@ async fn init_gfx(window: Arc<Window>, atlases: &[Atlas], with_hud: bool) -> Gfx
     }).await.unwrap();
     println!("adapter: {:?}", adapter.get_info().name);
     let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor {
-        required_features: wgpu::Features::TEXTURE_COMPRESSION_BC,
+        required_features: texfmt::features(&adapter).unwrap_or_else(|e| panic!("{e}")), // BC, or the IPA builder's ASTC
         required_limits: adapter.limits(),
         ..Default::default()
-    }).await.expect("BC texture compression unsupported");
+    }).await.unwrap();
 
-    let size = window.inner_size();
+    let size = crate::win_size(&window);
     let caps = surface.get_capabilities(&adapter);
     let format = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
     let present_mode = ux::present_mode(); // Options > VSync; SHC_NOVSYNC=1 = uncapped
@@ -2514,16 +2546,18 @@ async fn init_gfx(window: Arc<Window>, atlases: &[Atlas], with_hud: bool) -> Gfx
             dimension: wgpu::TextureDimension::D2, format, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
         });
         // UI-MasterAtlas: 8192² BC7, 14 mips back to back (re/scripts/export_ui_atlas.py); the HUD draws it at ~0.4×
+        // (BC7, or ASTC 4×4 in an "all devices" IPA: texfmt)
         let bc7 = |name, w: u32, mips: u32| {
             let data = std::fs::read(cache_dir().join(format!("ui/{name}.bc"))).unwrap();
-            let t = tex(name, w, mips, wgpu::TextureFormat::Bc7RgbaUnormSrgb);
+            let f = texfmt::colour();
+            let t = tex(name, w, mips, f);
             let mut off = 0;
             for m in 0..mips {
-                let blocks = (w >> m).div_ceil(4);
-                let len = (blocks * blocks * 16) as usize;
+                let mw = (w >> m).max(1);
+                let (row, rows, len) = texfmt::layout(f, mw, mw);
                 queue.write_texture(wgpu::TexelCopyTextureInfo { texture: &t, mip_level: m, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                    &data[off..off + len], wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(blocks * 16), rows_per_image: Some(blocks) },
-                    wgpu::Extent3d { width: (w >> m).max(1), height: (w >> m).max(1), depth_or_array_layers: 1 }.physical_size(wgpu::TextureFormat::Bc7RgbaUnormSrgb));
+                    &data[off..off + len], wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(rows) },
+                    wgpu::Extent3d { width: mw, height: mw, depth_or_array_layers: 1 }.physical_size(f));
                 off += len;
             }
             t
@@ -2532,7 +2566,7 @@ async fn init_gfx(window: Arc<Window>, atlases: &[Atlas], with_hud: bool) -> Gfx
         // hud::COLOUR_TEX..: UI-Colour1/2Atlas, the player-colour sprites (4096², 13 mips); 4×4 when the export lacks them
         let colour = [shc_extract::ui::ATLASES[1], shc_extract::ui::ATLASES[2]].map(|a| match hud::colour_atlas(&cache_dir().join("ui"), a) {
             Some((w, mips, _)) => bc7(a, w, mips),
-            None => tex(a, 4, 1, wgpu::TextureFormat::Bc7RgbaUnormSrgb),
+            None => tex(a, 4, 1, wgpu::TextureFormat::Rgba8UnormSrgb),
         });
         let font = tex("font", hud::FONT_PX, 1, wgpu::TextureFormat::Rgba8Unorm);
         let screen_buf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 32, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -2661,6 +2695,10 @@ fn main() {
     if let Some(f) = std::env::var_os("SHC_TRACE") { *TRACE.lock().unwrap() = std::fs::File::create(f).ok().map(std::io::BufWriter::new); }
     paths::app_bundle_start();
     setup::ensure();
+    // "Strong Hold iPhone Builder": after the setup, pack the iOS app instead of starting the game
+    #[cfg(target_os = "macos")]
+    if let Some(t) = ipa::template() { ipa::run(t); }
+    #[cfg(not(target_os = "ios"))] // iOS: a new .ipa from the iPhone Builder, not the Mac update
     update::start();
     lord_share::fetch_online();
     let mut app = App::new();
@@ -2867,3 +2905,41 @@ fn recording_types_drawn() {
     }
 }
 
+
+/// The drawable size. iOS: winit's inner_size is the safe area (notch, home bar) while the view and touches cover the
+/// whole screen, so the game draws edge to edge.
+pub fn win_size(w: &winit::window::Window) -> winit::dpi::PhysicalSize<u32> {
+    #[cfg(target_os = "ios")] return w.outer_size();
+    #[cfg(not(target_os = "ios"))] w.inner_size()
+}
+
+#[cfg(target_os = "ios")]
+static START: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+
+#[cfg(target_os = "ios")]
+impl App {
+    /// gestures::Touches' output as the game's mouse events (in-game pan / pinch / turn straight to the camera; in a
+    /// menu a pan scrolls like a wheel).
+    fn touch(&mut self, el: &ActiveEventLoop, out: Vec<gestures::Touch>) {
+        use gestures::Touch::*;
+        let Some(device_id) = self.touches.1 else { return };
+        let sf = self.gfx.as_ref().map_or(1.0, |g| g.window.scale_factor());
+        for o in out {
+            match o {
+                Move(p) => self.event(el, WindowEvent::CursorMoved { device_id, position: winit::dpi::LogicalPosition::new(p[0], p[1]).to_physical(sf) }),
+                Down | Up => self.event(el, WindowEvent::MouseInput { device_id, state: if o == Down { ElementState::Pressed } else { ElementState::Released }, button: MouseButton::Left }),
+                Right => for state in [ElementState::Pressed, ElementState::Released] { self.event(el, WindowEvent::MouseInput { device_id, state, button: MouseButton::Right }) },
+                Pan(d) if self.live() && self.menu.is_none() => self.cam.pan(d),
+                Pan(d) => self.event(el, WindowEvent::MouseWheel { device_id, delta: MouseScrollDelta::PixelDelta(winit::dpi::LogicalPosition::new(d[0] as f64, d[1] as f64).to_physical(sf)), phase: winit::event::TouchPhase::Moved }),
+                Pinch(m) => self.pinch(m, winit::event::TouchPhase::Moved),
+                Turn(left) => if self.live() && self.menu.is_none() { self.hotkey(if left { "MapRotateLeft" } else { "MapRotateRight" }) },
+                Esc => self.escape(el),
+            }
+        }
+    }
+    /// Every frame (ux_about_to_wait): a held finger's right click.
+    pub(crate) fn touch_tick(&mut self, el: &ActiveEventLoop) {
+        let out = self.touches.0.tick(START.elapsed().as_secs_f32());
+        if !out.is_empty() { self.touch(el, out); }
+    }
+}

@@ -66,7 +66,7 @@ pub fn overlay(p: &mut Panel, ui: Option<&mut Ui>, play: &Option<crate::Play>, m
     if end && !p.end_seen { p.on = true; }
     p.end_seen = end;
     if !p.on || menu_open { p.hits.clear(); p.area = [0.0; 4]; return hud; }
-    let sz = g.window.inner_size().to_logical::<f32>(g.window.scale_factor());
+    let sz = crate::win_size(&g.window).to_logical::<f32>(g.window.scale_factor());
     let h = live.stats.lock().unwrap();
     [hud, p.draw(&h, ui, sz.width, sz.height, cursor, end)].concat()
 }

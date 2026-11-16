@@ -1,5 +1,6 @@
 // libvpx for VP8 decoding (src/vpx.rs), linked statically so the app needs no dylib: VPX_LIB_DIR, else Homebrew's.
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios") { return; } // src/vpx.rs: no libvpx on iOS
     let dir = std::env::var("VPX_LIB_DIR").unwrap_or_else(|_| "/opt/homebrew/opt/libvpx/lib".into());
     println!("cargo:rerun-if-env-changed=VPX_LIB_DIR");
     println!("cargo:rustc-link-search=native={dir}");

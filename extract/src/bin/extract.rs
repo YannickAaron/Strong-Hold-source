@@ -7,6 +7,9 @@ fn main() -> shc_extract::Result<()> {
     let t = std::time::Instant::now();
     match step.as_str() {
         "atlases" => shc_extract::atlases::export(&data, out)?,
+        // astc <export dir> <out dir>: the iPhone Builder's "all devices" art (astc.rs)
+        #[cfg(target_os = "macos")]
+        "astc" => shc_extract::astc::convert(game, out, &mut |f| eprint!("\rastc {:3.0}%", f * 100.0)).map_err(|e| e.to_string())?,
         "audio" => { let n = shc_extract::audio::export(&data, out)?; eprintln!("{n} clips failed"); }
         "webm" => {
             let w = shc_extract::webm::parse(&std::fs::read(out)?)?;

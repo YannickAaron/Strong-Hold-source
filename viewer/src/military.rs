@@ -193,9 +193,11 @@ impl Troop {
     /// grabTroopsOnScreen's chimpsUnderCursor: units whose body holds the cursor, front-most (lowest) first.
     fn under(&self, m: &Mem, rot: i16) -> Vec<i32> {
         let c = self.cursor;
+        // phone: a fingertip, not a pixel: each body counts PAD world px bigger all round (ponytail: fixed, not by zoom)
+        const PAD: f32 = if cfg!(target_os = "ios") { 12.0 } else { 0.0 };
         let mut v: Vec<(f32, i32)> = self.units.iter().filter_map(|(&i, rec)| {
             let b = self.body_px(m, rot, i, rec);
-            (c[0] >= b[0] && c[0] <= b[2] && c[1] >= b[1] && c[1] <= b[3]).then_some((b[3], i))
+            (c[0] >= b[0] - PAD && c[0] <= b[2] + PAD && c[1] >= b[1] - PAD && c[1] <= b[3] + PAD).then_some((b[3], i))
         }).collect();
         v.sort_by(|a, b| b.0.total_cmp(&a.0));
         v.into_iter().map(|e| e.1).collect()

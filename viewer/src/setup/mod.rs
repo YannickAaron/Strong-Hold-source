@@ -4,7 +4,7 @@
 //! (window.rs), then the app restarts itself into the game. Elsewhere: the export runs in the terminal.
 pub mod steam;
 #[cfg(target_os = "macos")]
-mod window;
+pub mod window;
 
 use std::path::{Path, PathBuf};
 use crate::paths;
@@ -37,6 +37,9 @@ pub fn ensure() {
     let d = dirs();
     #[cfg(feature = "live")]
     if d.cache.join("dll").is_dir() { shc_sim::data::set_dir(d.cache.join("dll")); }
+    // iOS: the Mac's IPA builder ran this setup and packed its exports into the app; nothing to download or export here
+    #[cfg(target_os = "ios")]
+    return;
     // the main menu's "New game files available — Download" (start_update): the setup window in update mode, then the game
     #[cfg(target_os = "macos")]
     if std::env::var_os("SHC_SETUP_UPDATE").is_some() {
@@ -46,7 +49,7 @@ pub fn ensure() {
     #[cfg(target_os = "macos")]
     std::thread::spawn(|| { let _ = PENDING.set(update_todo()); });
     // SHC_CACHE: a developer's own export folder (re/scripts/export_*.py or `extract`): never re-exported
-    if std::env::var_os("SHC_CACHE").is_some() || ready(&d) { colour_atlases(&d); more(&d); drop_sc2(&d); return; }
+    if std::env::var_os("SHC_CACHE").is_some() || ready(&d) { colour_atlases(&d); *MORE.lock().unwrap() = more(&d); drop_sc2(&d); return; }
     if std::env::var_os("SHC_SETUP_DONE").is_some() {
         eprintln!("setup: finished but the data still isn't complete ({}); giving up", d.cache.display());
         std::process::exit(1);
@@ -133,6 +136,11 @@ pub fn filelist(files: &[String]) -> String {
     let esc = |p: &str| p.chars().fold(String::new(), |mut s, c| { if r"\.+*?()|[]{}^$#".contains(c) { s.push('\\'); } s.push(c); s });
     files.iter().map(|f| format!("regex:^{}$\n", esc(f))).collect()
 }
+
+static MORE: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(None);
+/// The IPA builder (ipa.rs): until ensure()'s background videos (`more`) are all there.
+#[cfg(target_os = "macos")]
+pub fn wait_more() { if let Some(h) = MORE.lock().unwrap().take() { let _ = h.join(); } }
 
 /// Files added to the export after the first release (extract::video::export_more: the minimap's character / event /
 /// lord videos, the mission-over videos), made in the background on an export that lacks them; the game runs
