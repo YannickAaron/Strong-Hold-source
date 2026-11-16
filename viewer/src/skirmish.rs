@@ -245,7 +245,8 @@ impl Progress {
     /// Into the app's folder, in the original's formats: the Campaign keys merged into settings.cfg, missions.cfg.
     pub fn save(&self) -> std::io::Result<()> {
         let mut cfg = Settings::load();
-        for (c, v) in self.unlocked.iter().enumerate() { cfg.set(&format!("Campaign{}", c + 1), v); }
+        // TempMissionUnlock: the real Settings_Progress_Historical*Campaign underneath stays (GameData doesn't advance it)
+        if !crate::menu::temp_unlock() { for (c, v) in self.unlocked.iter().enumerate() { cfg.set(&format!("Campaign{}", c + 1), v); } }
         cfg.save()?;
         crate::paths::write_atomic(&profile_dir().join("missions.cfg"), self.done.iter().map(|(id, d)| format!("mission{id}:{d}\n"))
             .chain(self.maps.iter().map(|(m, d)| format!("{m}:{d}\n"))).collect::<String>())

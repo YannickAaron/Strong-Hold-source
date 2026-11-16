@@ -3,8 +3,11 @@
 //! on Extras (extras.rs). The conditions are DE's where the port sees them; titles and texts are ours, plain (Steam
 //! keeps DE's names and descriptions, not the game files). Not observable here, listed but never unlocked: Map_Uploaded_To_Workshop
 //! (no Workshop upload) and Scribe_Unlock (the newsletter sign-up on Firefly's server).
-//! ponytail: the per-mission store counters (wood / food / weapons) start at 0 on every game start, a loaded save's
-//! (UpdateAfterLoadingASave's achFood / achWood / achWeapons) is not restored.
+//! The per-game store counters (food / wood / weapons) travel in the save like DE's: StoreValuesInEngine's
+//! DLL_SetAchValues puts them at 0x183663fe0 / fe4 / fe2 (i16), DLL_SaveSaveGame writes those 6 bytes into header
+//! block 4 and DLL_LoadSaveGame reads them back (`world::load_save`); `save_loaded` takes them from there. The engine
+//! never counts them itself (only the Stored messages' amounts), so the count stays ours and `to_save` writes it into
+//! the save's memory copy.
 use crate::hud::{HudState, HudTri, Ui};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -170,6 +173,29 @@ pub fn mission_start() {
     });
 }
 
+/// The store counters as DLL_SetAchValues leaves them in the engine (food 0x183663fe0, weapons +2, wood +4):
+/// into a save's memory copy (saves.rs) - StoreValuesInEngine without touching the running sim.
+#[cfg(feature = "live")]
+pub fn to_save(m: &mut shc_sim::mem::Mem) {
+    with(|s| for (id, a) in [(114, 0x183663fe0), (115, 0x183663fe2), (116, 0x183663fe4)] { m.set_i16(a, s.value[idx(id).unwrap()] as i16) });
+}
+
+/// A loaded save's store counters (header block 4, at 0x183663fe0 in the loaded memory): food, weapons, wood; None on
+/// a multiplayer map (0x183666170, the LoadMapReturnData's multiplayerMap). Read before the game starts (`save_loaded`).
+#[cfg(feature = "live")]
+pub fn saved_counters(m: &shc_sim::mem::Mem) -> Option<[i32; 3]> {
+    (m.i32(0x183666170) == 0).then(|| [0, 2, 4].map(|o| m.i16(0x183663fe0 + o) as i32))
+}
+
+/// UpdateAfterLoadingASave (EditorDirector's load, after the game start's reset): the save's food / weapons / wood
+/// counters back (`saved_counters`); a multiplayer map's, gold and population stay at 0. ponytail: DE's SetValue keeps
+/// a counter above the save's (left over from the game before); ours is the save's.
+#[cfg(feature = "live")]
+pub fn save_loaded(c: Option<[i32; 3]>) {
+    mission_start();
+    if let Some(c) = c { with(|s| for (id, v) in [114, 115, 116].into_iter().zip(c) { s.count(idx(id).unwrap(), v, false); }); }
+}
+
 /// A live game's frame (main.rs): the engine's achievement messages, the gold and population (GameData.UpdateGameState),
 /// a won skirmish-mode game (`skirmish`: a lobby or trail game, not co-op / LAN) once its statistics are captured.
 /// Counters are written at most every 10 s.
@@ -280,4 +306,22 @@ fn achievements_count_save_and_unlock() {
     assert!(!done(67) && !done(65));
     mission_start();
     assert_eq!(with(|s| s.value[idx(118).unwrap()]), 300, "done ones keep their value");
+    // the store counters survive a save / load (DE: DLL_SetAchValues -> save header block 4 -> UpdateAfterLoadingASave)
+    #[cfg(feature = "live")] {
+    let v = |id| with(|s| s.value[idx(id).unwrap()]);
+    message(2, 400); // food
+    message(1, 7_000); // wood
+    message(3, 250); // weapons
+    let mut m = shc_sim::mem::Mem::default();
+    to_save(&mut m);
+    mission_start();
+    assert_eq!((v(114), v(116), v(115)), (0, 0, 0));
+    save_loaded(saved_counters(&m));
+    assert_eq!((v(114), v(116), v(115)), (400, 7_000, 250));
+    message(2, 600);
+    assert!(done(114), "1,000 food over the load");
+    m.set_i32(0x183666170, 1); // a multiplayer map: not restored
+    save_loaded(saved_counters(&m));
+    assert_eq!((v(116), v(115)), (0, 0));
+    }
 }

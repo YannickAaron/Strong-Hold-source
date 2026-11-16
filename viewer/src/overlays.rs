@@ -211,7 +211,7 @@ impl Ui {
             let lines = self.wrap(&self.text_of("TEXT_EXTREME_DEMO_008"), size, 150.0 * k / self.s);
             let lh = self.font.horizontal_line_metrics(size).map_or(size * 1.2, |m| m.new_line_size) * self.s;
             for (i, l) in lines.iter().enumerate() {
-                let [x0, y0, ..] = r(65.0 + 150.0, 200.0, 150.0, 0.0);
+                let [x0, y0, ..] = r(65.0, 200.0, 150.0, 0.0); // the 150 px block ends 65 from the right, just left of the arrow
                 self.top_text(out, l, [x0, y0 + i as f32 * lh], size, 0.0, white, true);
             }
         }

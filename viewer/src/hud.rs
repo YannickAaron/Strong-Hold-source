@@ -589,6 +589,7 @@ pub struct Ui {
     pub open_menu: bool,         // SideTabs' options button (HUD_Main.InGameOptions): main.rs opens the in-game menu
     pub help: Option<String>,    // a building panel's help button: the page main.rs opens (menu/help.rs)
     pub ctrl: bool,              // Ctrl held (main.rs): recruit as many as possible
+    pub paused: bool,            // the game is paused (main.rs, before a click): EditorDirector.placeBuildingInteraction does nothing
     stance: Option<usize>, // troops panel: last clicked stance / order button (display only, no chore sent)
     engi: bool,            // troops panel: the engineers' siege build buttons are up (HUD_Troops.SelectedEngiBuild)
     order: Option<usize>,
@@ -645,7 +646,7 @@ impl Ui {
         let mut font_rgba = vec![0u8; (FONT_PX * FONT_PX * 4) as usize];
         white_block(&mut font_rgba);
         Some(Self { rects, colour_rects, colour: 1, strings, goods, build, tabs, troops, titles, font, glyphs: HashMap::new(), font_rgba, pen: (4, 0, 0), font_dirty: true,
-            hits: vec![], screen: 1, selected: None, tent: None, radar: false, actions: vec![], actions4: vec![], drag: None, allies: None, merit: None, fb: None, cg: false, lords: Lords::default(), delete: None, radar_click: None, radar_at: [0.0; 4], message: None, sub_mode: None, shift: false, open_menu: false, help: None, ctrl: false, stance: None, engi: false, order: None, ost: Default::default(), bar: None, seen: (0, 0), goals: false, goods_on: true, edge_mask: 0.0, rclick: None, hidden: false, flat: false,
+            hits: vec![], screen: 1, selected: None, tent: None, radar: false, actions: vec![], actions4: vec![], drag: None, allies: None, merit: None, fb: None, cg: false, lords: Lords::default(), delete: None, radar_click: None, radar_at: [0.0; 4], message: None, sub_mode: None, shift: false, open_menu: false, help: None, ctrl: false, paused: false, stance: None, engi: false, order: None, ost: Default::default(), bar: None, seen: (0, 0), goals: false, goods_on: true, edge_mask: 0.0, rclick: None, hidden: false, flat: false,
             open_briefing: false, confirm: None, auto: None, auto_goods: ([[0; 25]; 2], [0; 25]), prev_trade: 0, trade_err: None, seen_ret: 0, last_panel: (0, 0), panel_tip: None, down: false, extreme_help: (false, None), s: 1.0, w: 0.0, h: 0.0 })
     }
 
@@ -836,6 +837,7 @@ impl Ui {
             }
             Hit::Build(b) => match submenu(&self.build[b].name) {
                 Some(s) => { if self.screen != s { crate::audio::ui(crate::audio::ui_id::SWISH, 1.0); } self.screen = s; self.drop_tool(); }
+                None if self.paused => {} // ButtonBuildingSelect → placeBuildingInteraction: nothing while paused
                 None => (self.selected, self.tent) = (Some(b), None),
             },
             // Troops_ChangeStance (1020, v = 287..289); Troops_Disband 1011 / Stop 1010 / Patrol 1019
@@ -858,6 +860,7 @@ impl Ui {
             // ButtonBuySell 1 / 2: BuyGoods 1024 / SellGoods 1025, one lot (Shift: five), v = trading_current_goods
             Hit::Trade(a, g) => self.actions.push([a, self.shift as i32, g]),
             Hit::Delete(id) => self.delete = Some(id),
+            Hit::Flag(_) if self.paused => {} // placeBuildingInteraction: nothing while paused
             Hit::Flag(t) => self.hold_flag(t),
             // RadarClicked (1028): the radar pixel; the sim thread turns it into the camera tile
             Hit::Engi(on) => self.engi = on,
@@ -2809,7 +2812,22 @@ fn skirmish_build_buttons() {
     assert_eq!(fl.iter().map(|f| f.1).collect::<Vec<_>>(), [332, 334, 335, 333, 336, 337, 338], "barracks flags, left to right");
     let p = fl[0].0;
     let c = [(p[0] + p[2]) / 2.0, (p[1] + p[3]) / 2.0];
+    u.drop_tool();
+    u.paused = true;
+    assert!(u.click(c) && u.selected_mapper().is_none(), "paused: the click is taken, no flag tool");
+    u.paused = false;
     assert!(u.click(c) && u.selected_mapper() == Some(332) && u.actions.is_empty(), "the flag tool, no recruit");
+    // a build button too: placeBuildingInteraction does nothing while paused (sub-menu buttons still switch)
+    u.drop_tool();
+    u.screen = 1;
+    u.draw(&HudState { app_mode: 0, ..h.clone() }, 1920.0, 1080.0, [0.0; 2], 0, None);
+    let bp = u.hits.iter().find_map(|&(p, hit)| match hit { Hit::Build(i) if submenu(&u.build[i].name).is_none() => Some(p), _ => None }).expect("a build button");
+    let bc = [(bp[0] + bp[2]) / 2.0, (bp[1] + bp[3]) / 2.0];
+    u.paused = true;
+    assert!(u.click(bc) && u.selected_mapper().is_none(), "paused: no building tool");
+    u.paused = false;
+    assert!(u.click(bc) && u.selected_mapper().is_some(), "running: the building tool");
+    u.drop_tool();
     // only the troops the map allows get a flag; the guilds and the cathedral have theirs at the bottom
     let st = HudState { troop_avail: [1, 0, 0, 0, 0, 0, 1, 0], ..st };
     u.draw(&st, 1920.0, 1080.0, [0.0; 2], 0, None);

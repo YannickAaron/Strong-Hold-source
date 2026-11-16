@@ -178,12 +178,16 @@ impl Menu {
         let snap = crate::achievements::snapshot();
         let n = snap.iter().filter(|s| s.0).count();
         self.text(ui, out, "Achievements", 960.0, 185.0, 56.0, 0.5, GOLD);
-        self.label(ui, out, &format!("{n} of {} unlocked \u{b7} kept in the player folder, not on Steam", snap.len()), 960.0, 222.0, 18.0, 0.5, DIM);
+        // dark ink on the parchment like the other parchment pages (lord_info.rs / trail_menu.rs INK), unlocked titles in a
+        // deep red (between trail_menu's #A2362C and lord_info's, linear); cream / gold washed out on it
+        const INK: [f32; 4] = [0.0, 0.0, 0.0, 0.85];
+        const RED: [f32; 4] = [0.18, 0.012, 0.01, 1.0];
+        self.label(ui, out, &format!("{n} of {} unlocked \u{b7} kept in the player folder, not on Steam", snap.len()), 960.0, 222.0, 18.0, 0.5, INK);
         for (k, (a, (done, v))) in crate::achievements::LIST.iter().zip(snap).enumerate() {
             let (x, y) = (360.0 + 630.0 * (k / 20) as f32, 262.0 + 32.0 * (k % 20) as f32);
-            self.label(ui, out, a.title, x, y - 7.0, 17.0, 0.0, if done { GOLD } else { CREAM });
+            self.label(ui, out, a.title, x, y - 7.0, 17.0, 0.0, if done { RED } else { INK });
             let text = if a.max > 0 && !done { format!("{} ({} / {})", a.text, v.min(a.max), a.max) } else { a.text.to_string() };
-            self.label(ui, out, &text, x, y + 9.0, 13.0, 0.0, if done { CREAM } else { DIM });
+            self.label(ui, out, &text, x, y + 9.0, 14.0, 0.0, INK);
         }
         self.button(ui, out, "Back", 840.0, 910.0, 240.0, 56.0, Act::Extras(A::Ach(false)), cursor);
     }
@@ -243,6 +247,13 @@ fn extras_screen_opens() {
     assert!(m.extras_click(A::Ach(true)).is_none());
     m.draw(&mut u, 1920.0, 1080.0, [0.0; 2]);
     assert!(m.hits.iter().any(|h| h.1 == Act::Extras(A::Ach(false))) && !m.hits.iter().any(|h| h.1 == Act::Extras(A::Check)));
+    // its text is dark ink on the parchment (anything tinted in the list area; the art itself is drawn untinted)
+    let (s, o) = (m.s, m.o);
+    let out = m.draw(&mut u, 1920.0, 1080.0, [0.0; 2]);
+    let inside = |p: [f32; 2]| { let (x, y) = ((p[0] - o[0]) / s, (p[1] - o[1]) / s); (340.0..1600.0).contains(&x) && (205.0..890.0).contains(&y) };
+    let text: Vec<_> = out.iter().flat_map(|t| t.1.iter()).filter(|v| inside(v.pos) && v.color[..3] != [1.0; 3]).collect();
+    assert!(text.len() > 1000, "the list drew");
+    assert!(text.iter().all(|v| 0.2126 * v.color[0] + 0.7152 * v.color[1] + 0.0722 * v.color[2] < 0.4), "light text on the parchment");
     assert!(m.extras_click(A::Ach(false)).is_none());
     m.draw(&mut u, 1920.0, 1080.0, [0.0; 2]);
     assert!(m.back().is_none() && matches!(m.screen, Screen::Main));

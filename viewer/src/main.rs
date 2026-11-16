@@ -568,7 +568,11 @@ impl App {
             #[cfg(feature = "live")]
             { l.hill = koth::Hill::read_beside(std::path::Path::new(&f)); } // King of the Hill's score (koth.rs)
             println!("live {f}: loaded in {:.2}s", t0.elapsed().as_secs_f32());
+            #[cfg(feature = "live")]
+            let ach = achievements::saved_counters(l.mem());
             app.start_live(l, None);
+            #[cfg(feature = "live")]
+            achievements::save_loaded(ach);
             // --trail 11,4: the save is that trail's mission (0-based) at difficulty 1 (end screens; endgame write_trail_won_saves)
             if let Some((t, id)) = arg("--trail").as_deref().and_then(|v| v.split_once(',')).and_then(|(t, id)| Some((t.parse().ok()?, id.parse().ok()?))) { app.trail = Some((t, id, 1, false)); }
         }
@@ -843,9 +847,11 @@ impl App {
             menu::Go::Load(f) => match self.loaded(|| loader::load_save(&f)) {
                 Ok(m) => {
                     (self.menu, self.last_lobby, self.campaign) = (None, None, None);
+                    let ach = achievements::saved_counters(&m);
                     let mut l = live::Live::from_mem(m);
                     l.hill = koth::Hill::read_beside(&f); // a King of the Hill game's score (koth.rs)
                     self.start_live(l, None);
+                    achievements::save_loaded(ach); // UpdateAfterLoadingASave
                 }
                 Err(e) => if let Some(m) = &mut self.menu { m.error = Some(e) },
             },
@@ -1419,7 +1425,8 @@ impl App {
         if self.editor_button(down) { return; } // the map editor (menu/editor.rs)
         #[cfg(feature = "live")]
         if down && self.lan_click(self.cam.cursor) { return; } // the LAN chat panel (lan.rs)
-        let on_hud = down && self.ui.as_mut().is_some_and(|u| u.click(self.cam.cursor));
+        let paused = self.play.as_ref().is_some_and(|p| !p.playing);
+        let on_hud = down && self.ui.as_mut().is_some_and(|u| { u.paused = paused; u.click(self.cam.cursor) });
         if !down { if let Some(u) = self.ui.as_mut() { u.drag = None; } } // a dragged HUD slider lets go
         // --live with a building picked in the build menu: a map press is DLL_MapAction mouse state 1 (no pan);
         // the sim validates it and queues the chore only on a valid, affordable spot
@@ -2358,6 +2365,7 @@ impl App {
                         if let Some(st) = self.play.as_ref().and_then(|p| p.huds.get(p.at.saturating_sub(1))) {
                             m.goals = (st.ev.goals.clone(), st.ev.campaign, st.ev.timer);
                             m.free_build.get_or_insert(st.free_cheat != 0); // Options > Cheats' Free Buildings label
+                            m.mp_game = lan::in_game() || self.trail.is_some_and(|t| (21..=23).contains(&t.0)); // game_type 3: LAN, a co-op trail
                         }
                         [hud, m.draw(u, sz.width, sz.height, self.cam.cursor)].concat()
                     }

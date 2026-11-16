@@ -252,6 +252,8 @@ static CHEATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::n
 /// ConfigSettings.TempMissionUnlock: every campaign mission and trail reads as unlocked (skirmish / trail_menu Progress).
 pub fn temp_unlock() -> bool { TEMP_UNLOCK.load(std::sync::atomic::Ordering::Relaxed) }
 fn set_flag(f: &std::sync::atomic::AtomicBool, on: bool) { f.store(on, std::sync::atomic::Ordering::Relaxed) }
+#[cfg(test)]
+pub fn set_temp_unlock(on: bool) { set_flag(&TEMP_UNLOCK, on) }
 /// The cheat keys' GameAction (KeyManager.Update, Settings_CheatKeysEnabled = opt("CheatKeysEnabled", false)):
 /// Cheat_gold = SH1Cheats (1044) 3 then 2, Cheat_freestuff = SH1Cheats 1 / 0 by free_buildingCheat. Each also sets
 /// ConfigSettings.AchievementsDisabled: call `cheated()`.
@@ -367,6 +369,8 @@ pub struct Menu {
     /// Options > Cheats in a game: free_buildingCheat (PlayStateReturnData +2196, main.rs hands it in once; the Free
     /// Buildings button flips it like HUD_Options case 106 flips lastGameState's)
     pub free_build: Option<bool>,
+    /// A multiplayer game runs (GameData.game_type 3: LAN, a co-op trail; main.rs hands it in): no in-game cheats
+    pub mp_game: bool,
 }
 
 /// Save / Load list order (HUD_LoadSaveRequester sortByColumn / sortByAscending): 0 name, 1 date; ascending. Kept
@@ -376,7 +380,7 @@ static SORT: std::sync::Mutex<(u8, bool)> = std::sync::Mutex::new((1, false));
 static LAST_SAVE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
 impl Menu {
-    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], quiet_hover: false, error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, teams_open: false, team_pick: None, keep_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default(), mouse: ([0.0; 2], false), free_build: None } }
+    pub fn main() -> Self { Menu { screen: Screen::Main, files: vec![], infos: vec![], scroll: 0, hits: vec![], quiet_hover: false, error: None, in_game: false, progress: Default::default(), can_restart: false, add_ai: false, teams_open: false, team_pick: None, keep_pick: None, brief: None, help: vec![], solo: vec![], cfg: Default::default(), hk_new: None, hover: None, brief_map: None, goals: (vec![], false, None), preview: None, s: 1.0, o: [0.0; 2], mp: Default::default(), name: String::new(), confirm: None, lst: Default::default(), mouse: ([0.0; 2], false), free_build: None, mp_game: false } }
     pub fn pause(can_restart: bool) -> Self { Menu { screen: Screen::Pause, in_game: true, can_restart, ..Self::main() } }
     /// Back from a sub-screen: the pause menu in game, else the main menu.
     fn home(&self) -> Self { if self.in_game { Self::pause(self.can_restart) } else { Self::main() } }
@@ -1810,9 +1814,8 @@ impl Menu {
             }
             6 => self.coa_page(ui, out, op.coa, op.scroll, cursor),
             // Cheats (CheatSettings): Unlock All Missions (Temporarily / Permanently), Reset All Missions; in a game
-            // (OptionsInGameCheatsVis) Reset Popularity, +1000 Gold, Free Buildings; Enable Cheat Keys (CHECKS); the
-            // warning, "Achievements Disabled" once a cheat was used. ponytail: not hidden in a LAN game (the sim
-            // ignores SH1Cheats there)
+            // (OptionsInGameCheatsVis: not in a multiplayer game, game_type 3) Reset Popularity, +1000 Gold, Free
+            // Buildings; Enable Cheat Keys (CHECKS); the warning, "Achievements Disabled" once a cheat was used
             7 => {
                 const INSET: [f32; 4] = [0.102, 0.006, 0.003, 0x22 as f32 / 255.0];
                 Ui::fill(out, self.r(373.0, 133.0, 351.0, 101.0), INSET);
@@ -1820,7 +1823,7 @@ impl Menu {
                 for (k, key) in ["TEXT_NEW_TEXT2_035", "TEXT_NEW_TEXT2_036", "TEXT_NEW_TEXT2_037"].into_iter().enumerate() {
                     self.glow(ui, out, &tx(ui, key), 378.5, [164.0, 202.0, 251.5][k], 340.0, None, Some(Act::Cheat(101 + k as i32)), cursor);
                 }
-                if op.in_game {
+                if op.in_game && !self.mp_game {
                     Ui::fill(out, self.r(373.0, 293.0, 351.0, 121.0), INSET);
                     let free = if self.free_build == Some(true) { "TEXT_NEW_TEXT2_041" } else { "TEXT_NEW_TEXT2_040" };
                     for (k, key) in ["TEXT_NEW_TEXT2_038", "TEXT_NEW_TEXT2_039", free].into_iter().enumerate() {
@@ -3002,5 +3005,9 @@ fn options_cheats_scribe() {
     let mut sent = vec![];
     for a in [104, 105, 106, 106] { if let Some(Go::Action(x)) = press(&mut g, &mut u, Act::Cheat(a)) { sent.push(x) } }
     assert_eq!(sent, [[1044, 3, 0], [1044, 2, 0], [1044, 1, 0], [1044, 0, 0]]);
+    // a multiplayer game (LAN, co-op trail): none (OptionsInGameCheatsVis, game_type 3)
+    g.mp_game = true;
+    g.draw(&mut u, 1920.0, 1080.0, [0.0; 2]);
+    assert!(!g.hits.iter().any(|h| matches!(h.1, Act::Cheat(104..=106))) && g.hits.iter().any(|h| h.1 == Act::Cheat(101)));
     let _ = std::fs::remove_dir_all(&dir);
 }

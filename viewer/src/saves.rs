@@ -39,6 +39,7 @@ pub fn replay_path(map: &str) -> PathBuf {
 #[cfg(feature = "live")]
 pub fn save_async(m: &shc_sim::mem::Mem, path: PathBuf, elapsed_ms: u32, done: impl FnOnce(std::io::Result<()>) + Send + 'static) {
     let mut c = m.clone();
+    crate::achievements::to_save(&mut c); // the store counters into header block 4 (DE's DLL_SetAchValues)
     PENDING.lock().unwrap().push(path.clone());
     std::thread::spawn(move || {
         let r = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| crate::paths::write_atomic(&path, shc_sim::save::save_game(&mut c, elapsed_ms)))

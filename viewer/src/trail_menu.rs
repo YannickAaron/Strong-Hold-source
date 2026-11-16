@@ -113,7 +113,11 @@ pub struct Progress { pub trail: i32, pub next: i32, pub times: Vec<i32>, pub di
 impl Progress {
     pub fn read(cfg: &skirmish::Settings, trail: i32) -> Self {
         if COOPS.contains(&trail) {
-            return coop_progress(trail, coop_ui().partner.as_deref());
+            let mut p = coop_progress(trail, coop_ui().partner.as_deref());
+            // CalcCoopProgress(0): TempMissionUnlock / CoopCheatsEnabled count every mission as won for the frontier
+            // (all open); the swords stay the partner's real ones (the CalcCoopProgress(partner) after it)
+            if crate::menu::temp_unlock() || cfg.flag("CoopCheatsEnabled", false) { p.next = p.len() + 1; }
+            return p;
         }
         if (90..=92).contains(&trail) {
             // custom_trails.cfg: 1 won, -1 chicken, 0 not done → the times' done / chicken / not done; the frontier is
@@ -130,8 +134,7 @@ impl Progress {
         for (k, v) in cfg.get(&kt).unwrap_or("").split(':').filter_map(|v| v.trim().parse::<i32>().ok()).take(n).enumerate() {
             times[k] = v;
         }
-        // ConfigSettings.TempMissionUnlock: Settings_Progress_Trail* read as all done. ponytail: a trail mission won while
-        // it is on saves it as the frontier (DE keeps the real field underneath)
+        // ConfigSettings.TempMissionUnlock: Settings_Progress_Trail* read as all done (`save` keeps the real field)
         let next = if crate::menu::temp_unlock() { n as i32 + 1 } else { cfg.get(&kp).and_then(|v| v.parse().ok()).unwrap_or(1) };
         let difficulty = cfg.get(&kd).and_then(|v| v.parse().ok()).unwrap_or(1);
         Progress { trail, next, times, difficulty }
@@ -148,7 +151,14 @@ impl Progress {
         }
         let mut cfg = skirmish::Settings::load();
         let (kp, kt, kd) = keys(self.trail);
-        cfg.set(&kp, self.next);
+        // TempMissionUnlock: the real Settings_Progress_Trail* underneath stays; GameData.ManageGameOver still sets it
+        // to done for a won last mission (its time >= 0)
+        let next = match crate::menu::temp_unlock() {
+            true if self.times.last().is_some_and(|&t| t >= 0) => self.len() + 1,
+            true => cfg.get(&kp).and_then(|v| v.parse().ok()).unwrap_or(1),
+            false => self.next,
+        };
+        cfg.set(&kp, next);
         cfg.set(&kt, self.times.iter().map(|t| format!("{t}:")).collect::<String>());
         cfg.set(&kd, self.difficulty);
         cfg.save()
@@ -1643,6 +1653,46 @@ mod tests {
         assert_eq!((a.0, b.0), (1, 2));
         assert!(a.1 >= 600 && b.1 >= 600 && a.2 >= 598 && b.2 >= 598, "ticks / sync checks: {:?} {:?}", (a.1, a.2), (b.1, b.2));
         assert_eq!(a.3, b.3, "final sync sums differ");
+    }
+
+    /// TempMissionUnlock: every mission reads open, but a win saves the real frontier underneath (+ the won time; a
+    /// won last mission = done, GameData.ManageGameOver), campaigns too; it and CoopCheatsEnabled open the co-op trails.
+    #[test]
+    fn temp_unlock_keeps_real_progress() {
+        let dir = std::env::temp_dir().join(format!("shc-temp-unlock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.cfg"), "||SETTINGS||\nCampaignTrail:3\nTrail1Times:12:30:-1:\nCampaign2:2\n||SETTINGS||\n").unwrap();
+        std::fs::remove_file(dir.join("coop.cfg")).ok();
+        crate::skirmish::set_test_profile(&dir);
+        let unlocked = |on| crate::menu::set_temp_unlock(on);
+        unlocked(true);
+        let mut p = Progress::load(0);
+        assert_eq!(p.next, 51);
+        p.won(9, 40);
+        p.save().unwrap();
+        let mut c = skirmish::Progress::load();
+        assert_eq!(c.unlocked, [5; 7]);
+        c.won(7, 2); // campaign 2, mission 2
+        c.save().unwrap();
+        assert_eq!(Progress::load(21).next, 11, "co-op trails open");
+        unlocked(false);
+        let p = Progress::load(0);
+        assert_eq!((p.next, p.times[9]), (3, 40), "real frontier, the won time");
+        let c = skirmish::Progress::load();
+        assert_eq!((c.unlocked[1], c.done.get(&7)), (2, Some(&2)));
+        assert_eq!(Progress::load(21).next, 1);
+        unlocked(true);
+        let mut p = Progress::load(0);
+        p.won(49, 7);
+        p.save().unwrap();
+        unlocked(false);
+        assert_eq!(Progress::load(0).next, 51, "the last mission won: done");
+        let mut cfg = skirmish::Settings::load();
+        cfg.set("CoopCheatsEnabled", "True");
+        cfg.save().unwrap();
+        let co = Progress::load(22);
+        assert_eq!((co.next, co.completed()), (11, 0), "Unlock Permanently: open, no swords");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// coop.cfg: wins per partner; the frontier follows the best partner, the swords the current one (CalcCoopProgress).
